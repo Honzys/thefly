@@ -40,8 +40,25 @@ pub struct Boot {
 impl Boot {
     /// An inactive boot with the `i_botte` frame size.
     pub fn new(w: i32, h: i32) -> Self {
-        let _ = (w, h);
-        todo!("W2 fly-and-world §7.1")
+        Self {
+            active: false,
+            x: 0,
+            y: 0,
+            w,
+            h,
+            vx: 0,
+            vy: 0,
+            accel_y: 0,
+            horizontal_on: false,
+            vertical_on: false,
+            chasing: false,
+            stomping: false,
+            stomps: 0,
+            accel: 0,
+            offset: 0,
+            retarget: Timer::UNARMED,
+            ready: false,
+        }
     }
 
     /// `FUN_0043aabe`, from the farmer's Boot goodie.

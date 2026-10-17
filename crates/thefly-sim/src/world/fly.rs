@@ -2,7 +2,7 @@
 //! (fly-and-world §3). Ticks steps 1, 5, 8, 9, 11 and 18b.
 
 use super::collision::Rect;
-use super::{SwatHit, World};
+use super::{SCREEN_H, SCREEN_W, SwatHit, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::data::Size;
@@ -155,10 +155,59 @@ pub struct Fly {
 }
 
 impl Fly {
-    /// `FUN_00436df6(strength, speed)` (§3.3), alive at once.
+    /// `FUN_00436df6(strength, speed)` (§3.3), alive at once. Draws one rand for x.
     pub fn new(strength: i32, speed: i32, size: Size, cx: &mut Ctx) -> Self {
-        let _ = (strength, speed, size, cx);
-        todo!("W1 fly-and-world §3.3")
+        let max = 550 + 60 * speed;
+        Self {
+            size,
+            x: cx.rng.r(SCREEN_W - 2 * size.w) + size.w,
+            y: (SCREEN_H - size.h) / 2,
+            prev_x: 0,
+            prev_y: 0,
+            vx: 0,
+            vy: 0,
+            max_x: max,
+            max_y: max,
+            scroll: 0,
+            turbo: Turbo::default(),
+            superfly: false,
+            superfly_timer: Timer::UNARMED,
+            strength_f: strength as f32 * 0.2,
+            dying: false,
+            stunned: false,
+            splatted: false,
+            hit_in_progress: false,
+            phase: 0,
+            hit_frame: 0,
+            damage_total: 0,
+            hits_this_life: 0,
+            hit_k: 0,
+            hit_dir: (KickDir::Minus, KickDir::Minus),
+            saved_heading: Heading::Face,
+            post_stun: false,
+            ricochet: 0,
+            kick_x: 0,
+            kick_y: 0,
+            aspirating: false,
+            prev_action: false,
+            carrying: false,
+            grab_lock: false,
+            grab_frame: 0,
+            grab_turn: Turn::In,
+            grab_counter: 0,
+            heading: Heading::Face,
+            heading_target: Heading::Face,
+            heading_frame: 0,
+            heading_turn: Turn::In,
+            drop_pop: false,
+            respawn_request: false,
+            appearing: false,
+            respawn_timer: Timer::UNARMED,
+            crash_timer: Timer::UNARMED,
+            appear_timer: Timer::UNARMED,
+            splat_timer: Timer::UNARMED,
+            life_started_ms: Some(cx.now),
+        }
     }
 
     pub fn life(&self) -> Life {
@@ -299,5 +348,26 @@ impl World {
     pub fn fly_render_driven(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let _ = (m, cx);
         todo!("W1 fly-and-world §2 render-driven state, §3.6 Splat, §3.7.4")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::rng::MsvcRand;
+
+    /// fly-and-world §3.3 with seed 1 (first draw 41 % 560 = 41) and the 120 × 94 Face frame.
+    #[test]
+    fn init_places_the_fly_from_the_first_draw() {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let mut cx = Ctx::new(1000, &mut rng, &data, &mut events);
+        let fly = Fly::new(0, 0, data.size("Face"), &mut cx);
+        assert_eq!((fly.x, fly.y), (41 + 120, (600 - 94) / 2));
+        assert_eq!((fly.max_x, fly.max_y, fly.strength_f), (550, 550, 0.0));
+        assert_eq!(fly.life_started_ms, Some(1000));
+        let fast = Fly::new(3, 5, data.size("Face"), &mut cx);
+        assert_eq!((fast.max_x, fast.max_y), (850, 850));
+        assert_eq!(fast.strength_f, 0.6);
     }
 }

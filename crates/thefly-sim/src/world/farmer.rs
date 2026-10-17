@@ -2,7 +2,7 @@
 //! footsteps (ai-and-rules §1). Ticks steps 2 and 6.
 
 use super::collision::Rect;
-use super::{SwatHit, World};
+use super::{SCREEN_W, SwatHit, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::input::FarmerPad;
@@ -98,10 +98,31 @@ pub struct Farmer {
 }
 
 impl Farmer {
-    /// `FUN_0043c5f2`: x = rand % 800, y = 351, voice timer 10000 ms.
+    /// `FUN_0043c5f2`: x = rand % 800, y = 351, voice timer 10000 ms. The rising-edge memories
+    /// start false; the original's start value is not in the docs.
     pub fn new(level: i32, cx: &mut Ctx) -> Self {
-        let _ = (level, cx);
-        todo!("W2 ai-and-rules §1.1")
+        Self {
+            level,
+            max_speed_x: max_speed_x(level),
+            cooldown_limit: cooldown_limit(level),
+            x: cx.rng.r(SCREEN_W),
+            y: Y_TOP,
+            vx: 0,
+            vy: 0,
+            reach: 0.0,
+            ignore_scroll_once: false,
+            midges_on: false,
+            slowed: false,
+            slow_speed: 0,
+            slow_timer: Timer::UNARMED,
+            swing: Swing::default(),
+            triple: Triple::default(),
+            nuclear: Nuclear::default(),
+            voice_timer: Timer::armed(cx.now, VOICE_FIRST_MS),
+            step_counter: 0,
+            prev_objects_left: false,
+            prev_fly_dead: false,
+        }
     }
 
     /// The hit box (x, y, 130, 154) in screen space.
@@ -172,5 +193,24 @@ impl World {
     ) -> SwatHit {
         let _ = (pad, swing_edge, m, cx);
         todo!("W2 fly-and-world §2 step 6, ai-and-rules §1.2–§1.4, §2.4")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::rng::MsvcRand;
+
+    /// ai-and-rules §1.1: level 2 gives 770 px/s and a 25-tick cooldown; seed 1 puts x at
+    /// 41 % 800 = 41; y starts at the far edge, where the reach is 0.
+    #[test]
+    fn init_follows_the_constants_table() {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
+        let farmer = Farmer::new(2, &mut cx);
+        assert_eq!((farmer.max_speed_x, farmer.cooldown_limit), (770, 25));
+        assert_eq!((farmer.x, farmer.y, farmer.reach), (41, 351, 0.0));
+        assert!(farmer.voice_timer.expired(VOICE_FIRST_MS) && !farmer.voice_timer.expired(9999));
     }
 }
