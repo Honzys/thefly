@@ -106,7 +106,7 @@ fn save_files(root: &Path) -> Res<Value> {
     let entries: Vec<Value> = scores
         .entries
         .iter()
-        .map(|e| json!({ "name": e.name, "score": e.score }))
+        .map(|e| json!({ "name": e.name, "score": e.score, "checksum": e.checksum }))
         .collect();
     Ok(json!({ "scores": entries, "scores_trailer": scores.trailer, "settings": settings.values }))
 }
