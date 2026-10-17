@@ -23,7 +23,7 @@ pub mod traps;
 
 use crate::ctx::Ctx;
 use crate::input::{FarmerPad, FlyPad, KeyState};
-use crate::match_state::{MatchState, PeriodClock};
+use crate::match_state::{MatchState, PeriodClock, Players};
 
 /// The world's ring width W in fly-layer pixels: the main scenery layer's width (game-spec §4.1).
 /// Open item: not measured from the asset; the arena, `Maison` and `dehors` are all 4000 wide.
@@ -74,6 +74,52 @@ pub struct SwatHit {
 }
 
 impl World {
+    /// A playable two-player world with no objects, no traps and no AI: every actor built by its
+    /// own constructor from the match's inventories, in the order the original constructs them.
+    /// It exists so W3 and the scenario tests can run without W1's placement and W2's AI; the
+    /// full period setup is [`World::new`], which this does not replace.
+    ///
+    /// Panics with one player, because that world needs the AI.
+    pub fn bare(m: &MatchState, cx: &mut Ctx) -> Self {
+        assert!(
+            m.config.players == Players::Two,
+            "World::bare has no AI; use World::new for one player"
+        );
+        let data = cx.data;
+        let layers = camera::layer_images(m.scene()).map(|name| data.size(name).w);
+        let boot = data.size("i_botte");
+        let fly = fly::Fly::new(
+            m.economy.fly.strength,
+            m.economy.fly.speed,
+            data.size("Face"),
+            cx,
+        );
+        let farmer = farmer::Farmer::new(m.economy.farmer.level, cx);
+        let lift = lift::Lift::new(m.winch, cx);
+        let flying_goodies = flying_goodies::FlyingGoodies::new(cx);
+        Self {
+            fly,
+            farmer,
+            ai: None,
+            objects: objects::Objects::empty(),
+            lift,
+            traps: traps::Traps::default(),
+            boot: boot::Boot::new(boot.w, boot.h),
+            midges: midges::Swarm::new(),
+            ambient_midges: midges::AmbientMidges::default(),
+            flying_goodies,
+            goodies: goodies::Goodies::default(),
+            camera: camera::Camera::new(m.scene(), layers),
+            ambient: ambient::Ambient::default(),
+            clock: PeriodClock::new(cx.now, m.period_minutes()),
+            fly_action_memory: -1,
+            farmer_swing_memory: -1,
+            keys_blocked: false,
+            paused: false,
+            period_over: false,
+        }
+    }
+
     /// Builds the period: the loading work of `FUN_004015c8` (placement, respawn with 3000 tries,
     /// AI creation, trap entities from the shop layout, timers armed at `cx.now`).
     pub fn new(m: &mut MatchState, cx: &mut Ctx) -> Self {
@@ -132,5 +178,76 @@ impl World {
         self.midges_step(cx);
         // 18b. Appear animation done → alive; splat done → kill recorded, respawn requested.
         self.fly_render_driven(m, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::match_state::{MatchConfig, Players};
+    use crate::rng::MsvcRand;
+
+    fn two_player() -> MatchConfig {
+        MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        }
+    }
+
+    /// A 2P normal match with default inventories builds into a one-period world.
+    #[test]
+    fn a_two_player_period_can_be_constructed() {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let mut cx = Ctx::new(5000, &mut rng, &data, &mut events);
+        let m = MatchState::new(two_player(), true, &mut cx);
+        let world = World::bare(&m, &mut cx);
+
+        assert!(world.ai.is_none() && world.objects.list.is_empty());
+        assert_eq!(
+            m.economy.fly,
+            crate::economy::starting_fly(crate::economy::Setup::Normal)
+        );
+        assert_eq!(world.farmer.level, 0);
+        assert_eq!(world.clock.limit_s, 120);
+        assert!(!world.clock.expired(5000 + 119_999) && world.clock.expired(5000 + 120_000));
+        assert_eq!(world.lift.anchors, m.winch);
+        assert!(world.fly.life_started_ms == Some(5000) && !world.period_over);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn the_same_seed_builds_the_same_world_state() {
+        let build = || {
+            let (mut rng, data, mut events) = (MsvcRand::new(7), GameData::synthetic(), Vec::new());
+            let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
+            let m = MatchState::new(two_player(), false, &mut cx);
+            let w = World::bare(&m, &mut cx);
+            (m, w.fly.x, w.farmer.x, w.lift.anchor, rng.state())
+        };
+        assert_eq!(build(), build());
+    }
+
+    #[test]
+    #[should_panic(expected = "use World::new for one player")]
+    fn bare_refuses_one_player() {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
+        let m = MatchState::new(MatchConfig::default(), false, &mut cx);
+        World::bare(&m, &mut cx);
+    }
+
+    /// The tick itself needs W1's fly physics and objects and W2's farmer and traps.
+    #[test]
+    #[ignore = "needs W1/W2"]
+    fn a_built_world_ticks_with_no_input() {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
+        let mut m = MatchState::new(two_player(), false, &mut cx);
+        let mut world = World::bare(&m, &mut cx);
+        for _ in 0..130 {
+            world.tick(&KeyState::NONE, &mut m, &mut cx);
+        }
+        assert!(!world.fly.dying);
     }
 }

@@ -2,8 +2,8 @@
 //! and delivery (fly-and-world §4.4, §5). Ticks step 12, which also runs the lift (§5.5 step 9)
 //! and the period clock.
 
-use super::World;
 use super::traps::Traps;
+use super::{OBJECT_PARALLAX, W, World};
 use crate::ctx::Ctx;
 use crate::match_state::{MatchState, Meal};
 
@@ -155,6 +155,19 @@ pub struct Objects {
 }
 
 impl Objects {
+    /// No objects on the table: what a world has before [`Objects::place`] runs.
+    pub fn empty() -> Self {
+        Self {
+            list: Vec::new(),
+            wrap_width: (f64::from(W) * OBJECT_PARALLAX) as i32,
+            carrying: false,
+            carried: None,
+            locked: None,
+            lift_loaded: false,
+            all_delivered: false,
+        }
+    }
+
     /// Period start (§5.2): resets the per-type counts in `m`, places up to [`MAX_PLACED`]
     /// objects avoiding each other and the traps, then adds the fan stands.
     pub fn place(m: &mut MatchState, meal: Meal, traps: &Traps, cx: &mut Ctx) -> Self {

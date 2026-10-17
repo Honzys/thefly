@@ -83,8 +83,17 @@ pub fn luck(m: &MatchState, side: Side) -> f64 {
 impl FlyingGoodies {
     /// Both check timers at R(7000) + 8000 ms, farmer first.
     pub fn new(cx: &mut Ctx) -> Self {
-        let _ = cx;
-        todo!("W2 fly-and-world §6.2 Timers")
+        let mut first_check = || {
+            let ms = FIRST_CHECK_BASE_MS + cx.rng.r(FIRST_CHECK_RAND) as u64;
+            Timer::armed(cx.now, ms)
+        };
+        let farmer_check = first_check();
+        let fly_check = first_check();
+        Self {
+            farmer_check,
+            fly_check,
+            ..Self::default()
+        }
     }
 }
 

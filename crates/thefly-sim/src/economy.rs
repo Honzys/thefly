@@ -4,6 +4,7 @@
 use crate::ctx::Ctx;
 use crate::rng::MsvcRand;
 use crate::world::flying_goodies::Side;
+use crate::world::objects::NORMAL_TYPES;
 
 /// Points per kill at payout and at the winner screen.
 pub const KILL_VALUE: i32 = 42;
@@ -163,10 +164,25 @@ pub struct Economy {
 }
 
 impl Economy {
-    /// `FUN_0040b005` + `FUN_0040b3c7` + `FUN_0040b50c`.
+    /// `FUN_0040b005` + `FUN_0040b3c7` + `FUN_0040b50c`: the starting inventories for `setup`,
+    /// the base shop prices, and the food price table (22 types, or the extreme three when
+    /// `extreme`). No type is present until the first period places its objects.
     pub fn new(setup: Setup, extreme: bool) -> Self {
-        let _ = (setup, extreme);
-        todo!("W3 game-spec §5.6, §5.7; ai-and-rules §7.1")
+        let food_prices: Vec<f32> = if extreme {
+            EXTREME_PRICES.to_vec()
+        } else {
+            NORMAL_TYPES.iter().map(|t| t.price).collect()
+        };
+        Self {
+            fly: starting_fly(setup),
+            farmer: starting_farmer(setup),
+            item_prices: ITEMS.map(|spec| spec.price),
+            present: vec![false; food_prices.len()],
+            saved: vec![None; food_prices.len()],
+            food_prices,
+            kills: 0,
+            kill_log: Vec::new(),
+        }
     }
 
     /// `FUN_00422223` steps 2–4: refuse, or deduct and raise the price. The owned count rises

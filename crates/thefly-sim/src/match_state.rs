@@ -3,9 +3,10 @@
 //! ai-and-rules §9).
 
 use crate::ctx::Ctx;
-use crate::economy::Economy;
+use crate::economy::{Economy, Setup};
 use crate::stats::Stats;
 use crate::world::ai::AiLevel;
+use crate::world::lift::{ANCHOR_GAP, draw_anchors};
 use crate::world::traps::TrapKind;
 
 /// Period clock limit in minutes (data+0x26), and in tutorial mode.
@@ -113,13 +114,19 @@ pub struct PeriodClock {
 
 impl PeriodClock {
     pub fn new(now: u64, minutes: u64) -> Self {
-        let _ = (now, minutes);
-        todo!("W3 ai-and-rules §8.6")
+        Self {
+            start_ms: now,
+            limit_s: minutes * 60,
+            ..Self::default()
+        }
     }
 
+    /// While paused the clock stands still at the moment the pause began.
     pub fn elapsed_s(&self, now: u64) -> u64 {
-        let _ = now;
-        todo!("W3 ai-and-rules §8.6")
+        let end = self.pause_started.unwrap_or(now);
+        end.saturating_sub(self.start_ms)
+            .saturating_sub(self.paused_ms)
+            / 1000
     }
 
     pub fn expired(&self, now: u64) -> bool {
@@ -127,13 +134,13 @@ impl PeriodClock {
     }
 
     pub fn pause(&mut self, now: u64) {
-        let _ = now;
-        todo!("W3 ai-and-rules §8.6")
+        self.pause_started.get_or_insert(now);
     }
 
     pub fn resume(&mut self, now: u64) {
-        let _ = now;
-        todo!("W3 ai-and-rules §8.6")
+        if let Some(from) = self.pause_started.take() {
+            self.paused_ms += now.saturating_sub(from);
+        }
     }
 }
 
@@ -194,9 +201,28 @@ pub struct MatchState {
 
 impl MatchState {
     /// `FUN_00408113` steps 1–3: reset, starting inventories, extreme setup, music pick.
+    ///
+    /// Draw order (decisions in the plan): the winch slots first (`FUN_0040b994`, gap 36), then,
+    /// only when music is on, one `rand % 2` for the track [I].
     pub fn new(config: MatchConfig, music_on: bool, cx: &mut Ctx) -> Self {
-        let _ = (config, music_on, cx);
-        todo!("W3 game-spec §2.4, §5.7")
+        let setup = if config.tutorial {
+            Setup::Tutorial
+        } else if config.extreme() {
+            Setup::Extreme
+        } else {
+            Setup::Normal
+        };
+        let winch = draw_anchors(ANCHOR_GAP, cx);
+        let music_game2 = music_on && cx.rng.odd();
+        Self {
+            config,
+            progress: Progress::default(),
+            economy: Economy::new(setup, config.extreme()),
+            stats: Stats::default(),
+            traps: TrapLayout::default(),
+            winch,
+            music_game2,
+        }
     }
 
     /// `FUN_0040b7b2`.
@@ -215,8 +241,16 @@ impl MatchState {
         todo!("W3 ai-and-rules §9.1")
     }
 
+    /// Extreme mode always plays in the arena; otherwise the period's inside/outside flag, with
+    /// inside before the first period.
     pub fn scene(&self) -> Scene {
-        todo!("W3 game-spec §6.2")
+        if self.config.extreme() {
+            return Scene::Arena;
+        }
+        match self.progress.outside {
+            Some(true) => Scene::Outside,
+            _ => Scene::Inside,
+        }
     }
 
     /// Period clock limit in minutes.
@@ -238,5 +272,85 @@ impl MatchState {
     pub fn record_delivery(&mut self, kind: usize) {
         let _ = kind;
         todo!("W3 ai-and-rules §7.5; open item: the price statistic formula")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::economy::{Setup, starting_farmer, starting_fly};
+    use crate::rng::MsvcRand;
+
+    fn build(config: MatchConfig, music: bool) -> (MatchState, MsvcRand) {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let m = MatchState::new(
+            config,
+            music,
+            &mut Ctx::new(0, &mut rng, &data, &mut events),
+        );
+        (m, rng)
+    }
+
+    #[test]
+    fn a_default_match_starts_with_the_normal_inventories() {
+        let (m, _) = build(MatchConfig::default(), false);
+        assert_eq!(m.economy.fly, starting_fly(Setup::Normal));
+        assert_eq!(m.economy.farmer, starting_farmer(Setup::Normal));
+        assert_eq!(m.economy.food_prices.len(), 22);
+        assert_eq!(m.progress, Progress::default());
+        assert_eq!((m.scene(), m.period_minutes()), (Scene::Inside, 2));
+    }
+
+    #[test]
+    fn extreme_uses_the_extreme_inventories_prices_and_arena() {
+        let config = MatchConfig {
+            players: Players::Two,
+            mode: Mode::Special,
+            ..MatchConfig::default()
+        };
+        let (m, _) = build(config, false);
+        assert_eq!(m.economy.fly, starting_fly(Setup::Extreme));
+        assert_eq!(m.economy.food_prices, crate::economy::EXTREME_PRICES);
+        assert_eq!(m.scene(), Scene::Arena);
+    }
+
+    #[test]
+    fn tutorial_wins_over_extreme_and_lasts_three_minutes() {
+        let config = MatchConfig {
+            players: Players::Two,
+            mode: Mode::Special,
+            tutorial: true,
+            ..MatchConfig::default()
+        };
+        let (m, _) = build(config, false);
+        assert_eq!(m.economy.fly, starting_fly(Setup::Tutorial));
+        assert_eq!(m.period_minutes(), 3);
+    }
+
+    /// Seed 1: the winch takes the first three draws, the music coin the fourth, and only when
+    /// music is on.
+    #[test]
+    fn the_music_coin_is_drawn_only_when_music_is_on() {
+        let (off, rng_off) = build(MatchConfig::default(), false);
+        let (on, rng_on) = build(MatchConfig::default(), true);
+        assert!(!off.music_game2);
+        assert_eq!(off.winch, on.winch);
+        let mut probe = MsvcRand::new(1);
+        (0..3).for_each(|_| _ = probe.rand());
+        assert_eq!(rng_off, probe);
+        assert_eq!(on.music_game2, probe.odd());
+        assert_eq!(rng_on, probe);
+    }
+
+    #[test]
+    fn the_period_clock_stands_still_while_paused() {
+        let mut clock = PeriodClock::new(1000, 2);
+        assert_eq!(clock.elapsed_s(1000 + 61_999), 61);
+        clock.pause(11_000);
+        assert_eq!(clock.elapsed_s(500_000), 10);
+        clock.resume(41_000);
+        assert_eq!(clock.elapsed_s(41_000), 10);
+        assert!(!clock.expired(1000 + 120_000 + 29_999) && clock.expired(1000 + 120_000 + 30_000));
     }
 }
