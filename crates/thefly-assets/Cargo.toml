@@ -1,0 +1,15 @@
+[package]
+name = "thefly-assets"
+version = "0.1.0"
+description = "Parsers for The Fly (2002) asset formats: .irc, .bor, .btt"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+png = "0.18"
+serde_json = "1"
+
+[[bin]]
+name = "thefly-extract"
+path = "src/bin/thefly-extract.rs"
