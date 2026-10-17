@@ -93,7 +93,7 @@ fn copy_sounds(dir: &Path, out: &Path) -> Res<Vec<Value>> {
                 .and_then(|n| n.to_str())
                 .unwrap_or("?")
                 .to_string();
-            fs::copy(&p, out.join(&file))?;
+            fs::write(out.join(&file), fs::read(&p)?)?; // not fs::copy: it keeps the read-only bit and breaks re-runs
             names.push(Value::String(file));
         }
     }
