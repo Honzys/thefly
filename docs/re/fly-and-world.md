@@ -1,10 +1,10 @@
 # The Fly 1.2: fly, physics and world rules (phase 1c)
 
-This document refines `game-spec.md` §4 for the parts an engine needs to reproduce frame for frame: the RNG, the tick order, the fly, collision, table objects, the lift, flying goodies, the friendly boot and the midges. It follows the conventions of `game-spec.md`:
+This document owns the world and physics rules an engine needs to reproduce frame for frame: the RNG, the tick order, the fly, collision, table objects, the lift, trap effects on the fly, flying goodies, the friendly boot and the midges. `game-spec.md` is the index; farmer, AI, economy and match rules are in `ai-and-rules.md`; layout and look are in `screens-and-rendering.md`. It follows the conventions of `game-spec.md`:
 
 - [C] means the deciding code was read; [I] means it was inferred.
 - `FUN_`/`DAT_` addresses refer to the local dump.
-- `game+`, `data+` and `app+` are the same objects as in the spec.
+- `game+`, `data+` and `app+` are the same objects as in `game-spec.md`.
 
 It contains no decompiled code. Object-local offsets (`fly+0x…`, `obj+0x…`, `lift+0x…`) are given only so a reviewer can check them; the engine does not need them.
 
@@ -118,7 +118,7 @@ Both therefore complete during a render, between update ticks.
 
 - Fly x and y are **screen** pixels: the top-left corner of the frame, with 0 ≤ x ≤ 800 − w and 0 ≤ y ≤ 600 − h.
 - The fly never leaves the screen. Moving near a screen edge scrolls the camera instead (§3.4, step 11).
-- The frame is w × h; the face strips have 10 frames of 120 × 94 [I, from the asset size].
+- The frame is w × h. The fly's sheets are 10 frames of 120 × 94 (sheet cuts: `screens-and-rendering.md` §4.6).
 
 ### 3.2 Fields that matter for gameplay
 
@@ -442,7 +442,7 @@ Columns:
 - **meal:** bits 1 breakfast, 2 lunch, 4 dinner. A type is eligible when meal & period ≠ 0.
 - **stock:** the maximum copies per period.
 
-| # | Type | grip x | grip y | weight | rank | meal | stock | price (spec) |
+| # | Type | grip x | grip y | weight | rank | meal | stock | base price |
 |---|---|---|---|---|---|---|---|---|
 | 0 | can1 | 74 | 20 | 75 | 3 | 4 | 2 | 60 |
 | 1 | can2 | 111 | 20 | 35 | 3 | 4 | 3 | 15 |
@@ -469,7 +469,7 @@ Columns:
 
 **Extreme mode** (data+0x28 set, `FUN_0042bdf8`) uses only these three [C]:
 
-| Type | grip x | grip y | weight | rank | meal | stock | price |
+| Type | grip x | grip y | weight | rank | meal | stock | base price |
 |---|---|---|---|---|---|---|---|
 | extreme1 | 137 | 20 | 135 | 3 | – | 3 | 80 |
 | extreme2 | 107 | 20 | 100 | 2 | – | 5 | 50 |
@@ -478,7 +478,7 @@ Columns:
 Notes:
 
 - A further column of y-like values (569, 576, 593, 545, 575, 595) was not seen in use [C that it exists, I that it is unused].
-- "Food value" is the per-type price (`FUN_0040b9d8`): data+0x160[type] as a float, or data+0x1b8[type] in extreme mode. It is the base price after fluctuation; see the spec §4.4 [C].
+- The base price is the starting value of the per-type price (`FUN_0040b9d8`): data+0x160[type] as a float, or data+0x1b8[type] in extreme mode. The live price drifts from it by the fluctuation rule in `ai-and-rules.md` §7.1 [C].
 
 ### 5.2 Placement at period start (`FUN_0042ac27`) [C]
 
@@ -496,7 +496,7 @@ Notes:
    5. On failure: undo the slot and count one failure.
 4. Each fan stand becomes an extra, non-collectible object with the piedventi outline (`FUN_0042a85a`).
 
-The spec's "three x positions in 0..760 at least 36 apart" (`FUN_0040bf70`) are the **lift anchors** (§5.6), not object positions.
+The three x draws in 0..760, at least 36 apart (`FUN_0040bf70`), are the **lift anchors** (§5.6), not object positions.
 
 ### 5.3 Object fields and states [C]
 
@@ -553,7 +553,7 @@ The spec's "three x positions in 0..760 at least 36 apart" (`FUN_0040bf70`) are 
   - Landing on top: append to both stack lists, state = 1.
   - Otherwise: push the other object, reverse drop vx and vx, vy = 0.
 
-**Stack push** (`FUN_0042e28a`): moves the whole stack resting on the pushed object, using summed weights and a square root. Its exact formula is open (see Still open).
+**Stack push** (`FUN_0042e28a`): moves the whole stack resting on the pushed object, using summed weights and a square root. Its exact formula is open (open list in `game-spec.md`, item "Stack push").
 
 **Fan push** (`FUN_0042754d`) applies to collectible objects, including the carried one.
 
@@ -615,7 +615,7 @@ The spec's "three x positions in 0..760 at least 36 apart" (`FUN_0040bf70`) are 
    - **None (1000):** lift loaded = 0.
    - **An index:** lift loaded = 1; that object's state = 0 and v = 0.
 
-Scoring: the fly's score and money rise at the shop payout by Σ delivered × price (spec §5.3). Delivery itself only counts.
+Scoring: the fly's score and money rise at the shop payout by Σ delivered × price (`ai-and-rules.md` §7.3 and §8.1). Delivery itself only counts.
 
 ### 5.6 Lift (`DAT_0049bba0`) [C]
 
@@ -623,8 +623,9 @@ The lift is a hook on a rope that comes down to meet a carried object and hoists
 
 **Anchors** (data+0x2fe, three values, `FUN_0040bf70(760, 36, 0.152)`):
 
-- draw v = R(760) three times, rejecting and redrawing until each pair differs by more than 36
-- store trunc(v / 0.152): positions on the minimap scale of 0.152, so x runs 0..5000 in lift-layer units
+- draw v = `rand % 761` (0..760) three times, rejecting and redrawing until each pair differs by more than 36
+- store trunc(v / 0.152): positions on the trap-shop scale of 0.152, so x runs 0..5000 in lift-layer units
+- authoritative detail of the draw, the gap and when the anchors are re-rolled: `ai-and-rules.md` §4.3
 
 **Fields:**
 
@@ -719,13 +720,7 @@ The other two anchors are drawn as idle hooks at y = 50 − h.
 
 ### 6.1 Luck (`FUN_0040c086(side)`) [C]
 
-1. A = data+0x30. Then, for each type t with delivered count data+0x1f0[t] > 0: A = trunc(A + count × price(t)).
-2. B = data+0x38 + data+0x15c × data+0x21c. The spec reads this as the farmer base plus 42 × kills; the meaning of data+0x21c is [I].
-3. d = clamp(A − B, −1000, 1000).
-4. If d == 0: p = 0.5. Otherwise:
-   - p_fly = (1 − |d| / 1000) / 2 when d > 0, and 1 − that when d < 0
-   - p_farmer is the mirror image
-   - so the side that is behind gets the higher p
+Luck p is the balance meter of the side (side 1 = fly, side 2 = farmer): 0.5 at a tie, above 0.5 for the side that is behind. The formula, the clamp and the inputs (both scores, the saved goods at current prices, 42 per kill) are in `ai-and-rules.md` §8.2. The kill count it reads is data+0x21c [C]; data+0x15c is the 42 paid per kill.
 
 ### 6.2 Spawn [C]
 
@@ -736,7 +731,7 @@ The other two anchors are drawn as idle hooks at y = 50 − h.
 
 **When a side's timer fires:**
 
-1. p = luck(side); roll = R(100).
+1. p = meter(side) (§6.1); roll = R(100).
 2. **No spawn,** when p × 100 ≤ roll: re-arm trunc((1 − p) × 8000) + 8000 ms and stop.
 3. **Mystery,** when R(100) < 3: kind 15, mystery-sheet frame 1 (fly) or 2 (farmer).
 4. **Normal,** otherwise. With n = the goodies sheet's frame count = 5 × 2 = 10 [C, the 51 × 50 frame layout passed to the constructor `FUN_004321f8`, frame count computed by `FUN_00414093`] and m = trunc(n/2 − 2) = 3:
@@ -750,7 +745,7 @@ The other two anchors are drawn as idle hooks at y = 50 − h.
      - left: not enforced (see below)
      - vertical: y in [0, 500 − h]
    - Lifetime 8000 ms (fly) or 12000 ms (farmer).
-   - Spawn effect and sound 42.
+   - Spawn effect and sound 42 (positional).
 6. Re-arm trunc((1 − p) × 8000) + 16000 ms (fly) or + 20000 ms (farmer).
 
 **Wander mover** (`FUN_004172a8`, `FUN_004174c0`) [C]:
@@ -766,7 +761,7 @@ The other two anchors are drawn as idle hooks at y = 50 − h.
 **Catch test:**
 
 - Fly box: (x + 50, y + 40, w − 100, h − 80).
-- The farmer catches with the swatter's box, and only when a swatter flag passed in is set (Still open).
+- The farmer catches with the swatter's box, and only while the swatter is in its hit window (swing frame 3 or later) and is not blocked by the mystery "cannot hit" flag [C, `FUN_0043309b` arguments from `FUN_0040326c`].
 - Hit when goodie x ∈ [px − gw, px + pw] and goodie y ∈ [py − gh, py + ph].
 
 **Catch results:**
@@ -779,7 +774,7 @@ The other two anchors are drawn as idle hooks at y = 50 − h.
 | farmer | mystery | R(100) < 50 → swatter cannot hit (result 0x0b); else Nuclear for 20000 ms (result 0x0c) |
 
 - A mystery arms that side's 15000 ms timer. Turbo from a mystery is cut short when that timer ends (tick step 15), so it effectively lasts 15 s plus the decay.
-- Sound 42 stops on a catch.
+- Sound 42 is played on a catch (and at spawn). It is never stopped.
 
 ---
 
@@ -791,7 +786,7 @@ The other two anchors are drawn as idle hooks at y = 50 − h.
 
 - bounds: x in [−1000, 9000], y in [−h, 570]
 - 1000 ms retarget timer
-- x = R(W − 900) + 810, where W is the boot's wrap width; y = 100 − h
+- x = R(W − 900) + 810, where W is the boot's own wrap width (trunc(sceneWidth × 1.25), parallax 1.25, field +0x2c), not the 4000 px scene width; y = 100 − h
 - v = 0, chasing = 1, stomp count = 0
 
 ### 7.2 Update [C]
@@ -852,14 +847,24 @@ Then:
 - No damage total is involved: the splat is an instant death.
 - The kill is recorded when the particles end.
 
-### 7.4 Fan contact, for comparison (`FUN_0042a075`) [C]
+### 7.4 Trap effects on the fly [C]
 
+Trap placement, caps and costs are in `ai-and-rules.md` §4. The manager (game+0x3ffb0, update `FUN_00427270`) keeps three arrays: flypapers (`DAT_0046c948`, stride 0x874, up to 7), fans (`DAT_00470478`, stride 0x7568, up to 5) and zappers (`DAT_00494f80`, stride 0x3610, up to 2).
+
+**Flypaper** (`FUN_0042663b`, overlap test `FUN_0042825c`): while the fly overlaps the strip, both velocity components are divided by 1.4 each tick. No sound.
+
+**Fan** (`FUN_0042a075`):
 - At most once per 100 ms.
 - vx is pushed by the fan strength (+0x91c); vy −= strength + 100.
-- damage = R(20) + 40, or R(10) + 20 with SuperFly. It is added to the damage total directly, not through §3.6 A.
+- damage = R(20) + 40, or R(10) + 20 with SuperFly (protection flag fly+0x24c). It is added to the damage total directly, not through §3.6 A.
   - total ≤ 100 → the post-stun flag only
   - total > 100 → splat, with particles thrown in the fan's direction
-- Sound 45.
+- Sound 45 on impact.
+- Fans also push midges (§8.2) and table objects sideways.
+
+**Zapper** (`FUN_004288fe`, arc `FUN_00428b47`):
+- A fly inside the zapper's column whose top edge is within (zapper height − 80) px of the zapper's top edge is grilled: instant splat (kind 13) and sound 43.
+- An arc (sound 39) subtracts 180 px/s from the fly's vy (up) and adds 1 to the damage total each time it fires. A total of 100 or less only sets the post-stun flag; over 100 splats the fly.
 
 ---
 
@@ -882,13 +887,9 @@ Then:
 
 1. Each midge homes toward its point on the farmer (`FUN_00442f95`). Each tick there is a 30% chance to re-roll the target.
 2. A swatter strike kills up to 20 midges that it touches.
-3. A fan pushes midges by ±180.
+3. A fan pushes midges: ±180 px/s is added to each velocity component, keeping its sign [C, `FUN_00427885` walks the fan array]. A zapper arc that touches a midge puts it into its dying state (`FUN_004278f3` runs the arc test per midge) [I].
 4. inBox = the number of midges inside the farmer's box.
-5. **Farmer slowdown** (`FUN_0043cd23(farmer, active, inBox, total)`). With r = inBox / total, the farmer alternates two timers:
-   - **Slowed** for trunc(r × 400 + 150) ms:
-     - horizontal speed cap = trunc(maxSpeed (farmer+0x9c) × (1 − r))
-     - vertical speed zeroed every tick
-   - **Free** for trunc((1 − r) × 500 + 200) ms.
+5. **Farmer slowdown** (`FUN_0043cd23(farmer, active, inBox, total)`). The pulse timers, the speed cap and the forced retract are in `ai-and-rules.md` §6.3, which owns the rule.
 6. The effect ends when no midges remain.
 
 The ambient midges (game+0x15a20, tick step 14) are a separate, cosmetic population that reacts to the swatter and fans [I for "cosmetic"].
@@ -905,62 +906,3 @@ The two per-slot helpers call the DirectSound buffer directly, with no rescaling
 | `FUN_0040ced5` (via `FUN_0040e008`) | SetFrequency (vtable +0x44), Hz | callers pass values from 10000 up to 49999 |
 
 So the winch (47) and fan impact (45) values are frequencies. The +5000 for sound 29 and +8000 for sound 6 are out-of-range volumes, which most likely leave the volume unchanged [I].
-
-## Corrections to game-spec.md
-
-1. **§4.1:**
-   - The camera field game+0x407c0 is a **per-tick delta** in fly-layer pixels, assigned each tick, not an offset.
-   - The fly lives in screen space; objects, the lift and the boot live on a 1.25-parallax layer whose wrap width is trunc(W × 1.25).
-2. **§4.2 carrying:**
-   - Not "Enter within 1000 px of an object". Holding Enter starts aspirating (a 66-tick animation).
-   - The manager locks the last candidate whose grip point is within Euclidean distance 1000 of the fly's bottom-centre.
-   - Attaching then needs the fly centre within half the object's width of the grip x; a 100 px magnet pulls the fly in.
-   - Enter is a held action, blocked after a goodie use until it is released.
-3. **§4.2 stun:**
-   - The sequence is a 4-tick hit-in, then the knockback kick, then 4 ticks back out.
-   - The ricochet runs independently: 23 deceleration ticks at kick / 25, or kick / 37.5 while a horizontal key is held, then an x clamp.
-   - SuperFly cancels the kick entirely.
-4. **§4.2 dying:** crash animation → 1500 ms timer → kill recorded → respawn request → appear animation. The "falls toward (850, 850)" part is the crash effect.
-5. **§4.2 respawn:**
-   - y is not random: y = trunc((600 − h)/2 − 20) and x = R(800 − w).
-   - Re-rolled while overlapping an object, up to 1000 tries (3000 at period start).
-6. **§4.2 movement:**
-   - Climb while carrying is trunc(75 × c + MY × 0.1f / 1.6), with MY including the turbo boost.
-   - Friction is 9 per tick toward 0 per axis without overshoot.
-   - The jitter is 0/±1 (±2 only at rand 32767), only when idle at FACE and not carrying.
-   - Turbo's +50% uses maxX for both axes; the decay is 5% of the base maximum per tick, per axis.
-7. **§4.4:**
-   - Up to 15 objects per period, chosen by meal mask and stock.
-   - x = R(trunc(W × 1.25)), with spacing and trap checks.
-   - The 0..760 / 36 / 0.152 draw is the **lift anchors**.
-   - Weight is +0x90 and +0x92 is the collectible flag.
-   - Drop: vx / 50 drift plus +50 px/s per tick of gravity. The fly is moved up 20 px and gets vy = −(|vy| + 300).
-   - The states are rest, sliding, falling and held; objects stack.
-8. **§4.5:** the lift is a three-state machine (idle bob, tracking with a 30-tick ring-buffer lag, hoisting at −300 px/s) with explicit hook windows. `FUN_0042a760` is the manager destructor.
-9. **§4.10 / Open question 9:** the boot **can kill** the fly. Contact from above, with the fly's y > 249, splats it instantly. Other contacts only shove the fly. The boot leaves after 10 floor hits, or immediately after it splats the fly.
-10. **§4.9 / Open question 10:** midges slow the farmer in bursts; the slowdown is proportional to the share of midges on him (§8.2). The spawn size is R(5) + 30 [C].
-11. **§4.11 / Open question 5:**
-    - Spawn chance per check = luck p (§6.1).
-    - Mystery 3%; otherwise kind 3–5, biased toward 3–4 for a side far behind.
-    - Re-arm times scale with 1 − p.
-    - The three normal kinds map to Turbo, SuperFly, Midges for the fly and Triple, Nuclear, Boot for the farmer (the spec's +2 × type indexing is right).
-    - The 25 s mystery Turbo is cut at 15 s.
-12. **§4.6 fan:**
-    - The protection flag fly+0x24c is SuperFly [C].
-    - Fan damage bypasses the stun animation: total ≤ 100 only sets the post-stun flag.
-13. **§6.4 / §9.6:**
-    - `.bor` x values are in 2-pixel units from the sprite's left edge; rows are y from the top.
-    - A hit needs coincident outline points at half-x resolution.
-    - The fly uses a fixed rectangle outline (x 30..90, y 29..84 of its frame).
-14. **§4.2 dying sound:** sound 29 gets a volume of +5000 (out of range), not a frequency of 5000 Hz (§9).
-15. **§10:** the fly update, the lift timing and the flying-goodie formula are now decoded here.
-
-## Still open
-
-1. **Stack push** (`FUN_0042e28a`): how a push spreads through a stack (summed weights, square root) is not decoded to the formula. The side-test helper `FUN_0042fb1c` is decoded only by its use.
-2. **Camera accumulation** (`FUN_00441baf`, `FUN_004416b1`): how the per-tick delta becomes each layer's offset, and the exact wrap of W, were not re-read. W itself (the background width) was not measured from the asset; the spec says 4000.
-3. **Farmer catch condition:** the swatter flag that gates the farmer's catch (`FUN_0043309b`) is not identified.
-4. **Splat particle duration** (`FUN_00439c2b`): how long a splat lasts before the respawn request is not timed.
-5. **Outline quirk:** whether the "contained span" y quirk in `FUN_0042f6de` ever changes a result.
-6. **Price statistic:** the per-delivery price-statistic formula (`FUN_0042d8a0` and its neighbours) was not decoded beyond "+ trunc(price)".
-7. **Reseeding:** whether exact replays need the wall-clock reseeding reproduced (§1). This is a project decision, not an RE gap.
