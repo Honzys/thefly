@@ -14,6 +14,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: SDL3 build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \
+            libxss-dev libxtst-dev libxcb1-dev libxkbcommon-dev libwayland-dev libwayland-bin \
+            wayland-protocols libdecor-0-dev libegl-dev libgl-dev libasound2-dev libpulse-dev
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: cargo build --release --bin thefly
