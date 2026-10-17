@@ -6,3 +6,11 @@ members = ["crates/thefly", "crates/thefly-assets", "crates/thefly-platform"]
 edition = "2024"
 license = "GPL-3.0-or-later"
 rust-version = "1.85"
+
+# The C libraries built by cmake must not use the debug MSVC runtime, which Rust does not link.
+# opt-level > 0 makes the cmake crate pick RelWithDebInfo (/MD) instead of Debug (/MDd).
+[profile.dev.package.sdl3-sys]
+opt-level = 2
+
+[profile.dev.package.sdl3-ttf-sys]
+opt-level = 2
