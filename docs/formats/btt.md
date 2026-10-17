@@ -15,7 +15,7 @@ Two raw struct dumps next to the executable, not in `data/`. Parser: `thefly_ass
 
 The file ends with a f64 at offset 480.
 
-Important: the bytes of `name` after the NUL are not zeroed. They hold uninitialised memory (stack pointers such as `00 F0 FD 7F`, small integers like `2F 00`). A parser must stop at the first NUL and ignore the rest, and a writer should zero-fill. The shipped file differs from a fresh table only by that garbage.
+Bytes after the name's NUL are not a single uninitialised region. Name entry writes the run's statistics at +0x10..+0x21. Bytes +0x22..+0x27 are never written and hold stack garbage in the shipped default rows. Nothing in the original exe reads the statistics back. A parser must stop the name at the first NUL. A writer should zero-fill or write the statistics. See  section 7.1 for the field layout and checksum.
 
 Shipped file: all 10 names are `None`. Scores in order: 1.746, 1293.250, 146.892, 348.313, 87.211, 531.972, 700.178, 857.371, 965.542, 69.449. They are not sorted, so the table is probably an unsorted default or written by a test build. The trailing f64 equals `entries[0].score` (1.7462474069349656) bit for bit.
 
