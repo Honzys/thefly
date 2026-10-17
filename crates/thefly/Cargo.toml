@@ -1,0 +1,11 @@
+[package]
+name = "thefly"
+version = "0.1.0"
+description = "The Fly (2002) engine reimplementation; currently an asset viewer"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thefly-assets = { path = "../thefly-assets" }
+thefly-platform = { path = "../thefly-platform" }

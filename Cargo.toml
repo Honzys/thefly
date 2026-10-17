@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/thefly-assets", "crates/thefly-platform"]
+members = ["crates/thefly", "crates/thefly-assets", "crates/thefly-platform"]
 
 [workspace.package]
 edition = "2024"
