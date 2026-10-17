@@ -1,0 +1,10 @@
+[package]
+name = "thefly-sim"
+version = "0.1.0"
+description = "Pure, deterministic gameplay engine for The Fly (2002): no SDL, no clock, no I/O"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thefly-assets = { path = "../thefly-assets" }
