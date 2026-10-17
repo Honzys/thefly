@@ -1,25 +1,34 @@
 //! `.btt` save files: raw struct dumps. `scoot.btt` = score table, `boite.btt` = two flags.
+//! Layouts: `docs/formats/btt.md`; field meaning: `docs/re/game-spec.md` §7.
 
 use crate::Error;
 
 pub const SCORE_ENTRIES: usize = 10;
 const RECORD_LEN: usize = 48;
-const NAME_LEN: usize = 40;
+/// Name field, NUL included (game-spec §7.1).
+const NAME_LEN: usize = 12;
+const SCORE_AT: usize = 12;
+/// The checksum f64 sits at +0x28, after the run statistics (+0x10..+0x21) and unwritten bytes.
+const CHECKSUM_AT: usize = 40;
 /// 10 records plus a trailing f64.
 pub const SCORES_FILE_LEN: usize = SCORE_ENTRIES * RECORD_LEN + 8;
 pub const SETTINGS_FILE_LEN: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoreEntry {
-    /// Bytes before the first NUL in the 40-byte name field, one char per byte (Latin-1).
+    /// Bytes before the first NUL in the 12-byte name field, one char per byte (Latin-1).
     pub name: String,
-    pub score: f64,
+    /// The fly score minus 10 × kills (game-spec §7.1).
+    pub score: i32,
+    /// `c(score)`, or a random filler on an empty slot. The run statistics at +0x10 are not read.
+    pub checksum: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scores {
     pub entries: [ScoreEntry; SCORE_ENTRIES],
-    /// Trailing f64; equals `entries[0].score` in the shipped file.
+    /// Trailing f64: the checksum of the sum of all scores. Equals `entries[0].checksum` in the
+    /// shipped file, whose scores sum to 1.
     pub trailer: f64,
 }
 
@@ -38,12 +47,21 @@ fn parse_entry(rec: &[u8]) -> Result<ScoreEntry, Error> {
         .position(|&b| b == 0)
         .ok_or(Error::Invalid("name is not NUL-terminated"))?;
     let name = name_field[..len].iter().map(|&b| char::from(b)).collect();
-    let score = f64::from_le_bytes(
-        rec[NAME_LEN..RECORD_LEN]
+    let score = i32::from_le_bytes(
+        rec[SCORE_AT..SCORE_AT + 4]
             .try_into()
             .map_err(|_| Error::Invalid("score field"))?,
     );
-    Ok(ScoreEntry { name, score })
+    let checksum = f64::from_le_bytes(
+        rec[CHECKSUM_AT..RECORD_LEN]
+            .try_into()
+            .map_err(|_| Error::Invalid("checksum field"))?,
+    );
+    Ok(ScoreEntry {
+        name,
+        score,
+        checksum,
+    })
 }
 
 fn check_len(bytes: &[u8], want: usize) -> Result<(), Error> {
@@ -86,45 +104,55 @@ pub fn parse_settings(bytes: &[u8]) -> Result<Settings, Error> {
 mod tests {
     use super::*;
 
-    fn scores_file(name: &[u8], first: f64) -> Vec<u8> {
+    /// Record `i` has score `i` (`first` for record 0) and checksum `i + 0.5`.
+    fn scores_file(name: &[u8], first: i32) -> Vec<u8> {
         let mut v = Vec::new();
         for i in 0..SCORE_ENTRIES {
             let mut rec = [0xAAu8; RECORD_LEN]; // padding is uninitialised memory in the original
             rec[..name.len()].copy_from_slice(name);
             rec[name.len()] = 0;
-            let s = if i == 0 { first } else { i as f64 };
-            rec[NAME_LEN..].copy_from_slice(&s.to_le_bytes());
+            let score = if i == 0 { first } else { i as i32 };
+            rec[SCORE_AT..SCORE_AT + 4].copy_from_slice(&score.to_le_bytes());
+            rec[CHECKSUM_AT..].copy_from_slice(&(i as f64 + 0.5).to_le_bytes());
             v.extend(rec);
         }
-        v.extend(first.to_le_bytes());
+        v.extend(0.5f64.to_le_bytes());
         v
     }
 
     #[test]
-    fn parses_scores_ignoring_padding_after_nul() {
-        let s = parse_scores(&scores_file(b"None", 12.5)).unwrap();
+    fn parses_score_and_checksum_at_their_offsets() {
+        let s = parse_scores(&scores_file(b"None", -12)).unwrap();
         assert_eq!(s.entries[0].name, "None");
-        assert_eq!(s.entries[0].score, 12.5);
-        assert_eq!(s.entries[9].score, 9.0);
-        assert_eq!(s.trailer, 12.5);
+        assert_eq!(s.entries[0].score, -12);
+        assert_eq!(s.entries[0].checksum, 0.5);
+        assert_eq!(s.entries[9].score, 9);
+        assert_eq!(s.entries[9].checksum, 9.5);
+        assert_eq!(s.trailer, 0.5);
     }
 
     #[test]
     fn name_decodes_latin1_bytes() {
-        let s = parse_scores(&scores_file(&[0x4a, 0xe9], 0.0)).unwrap();
+        let s = parse_scores(&scores_file(&[0x4a, 0xe9], 0)).unwrap();
         assert_eq!(s.entries[0].name, "J\u{e9}");
     }
 
     #[test]
     fn rejects_unterminated_name() {
-        let mut f = scores_file(b"x", 0.0);
+        let mut f = scores_file(b"x", 0);
         f[..NAME_LEN].fill(b'a');
         assert!(matches!(parse_scores(&f), Err(Error::Invalid(_))));
     }
 
     #[test]
+    fn a_name_may_use_all_eleven_bytes_before_the_nul() {
+        let s = parse_scores(&scores_file(b"abcdefghijk", 0)).unwrap();
+        assert_eq!(s.entries[0].name, "abcdefghijk");
+    }
+
+    #[test]
     fn rejects_wrong_scores_length() {
-        let f = scores_file(b"None", 1.0);
+        let f = scores_file(b"None", 1);
         assert!(matches!(
             parse_scores(&f[..100]),
             Err(Error::Truncated { .. })

@@ -1,6 +1,6 @@
 # `.btt` save files
 
-Two raw struct dumps next to the executable, not in `data/`. Parser: `thefly_assets::btt`. The exe contains the names `scoot.btt`, `boite.btt` and `boitedlg.bmp`.
+Two raw struct dumps next to the executable, not in `data/`. Parser: `thefly_assets::btt`. The exe contains the names `scoot.btt`, `boite.btt` and `boitedlg.bmp`. Field meaning is owned by [`docs/re/game-spec.md`](../re/game-spec.md) section 7; this file records the byte layout and what the shipped files hold.
 
 ## `scoot.btt` (488 bytes): score table
 
@@ -10,23 +10,22 @@ Two raw struct dumps next to the executable, not in `data/`. Parser: `thefly_ass
 
 | Offset in record | Size | Field |
 |---|---|---|
-| 0 | 40 | `name`: NUL-terminated text, one byte per char (assume Latin-1) |
-| 40 | f64 | `score` |
+| 0x00 | 12 | `name`: NUL-terminated text, one byte per char (assume Latin-1), so at most 11 characters |
+| 0x0c | i32 | `score`: the fly score minus 10 x kills |
+| 0x10 | 18 | run statistics written by name entry (below) |
+| 0x22 | 6 | never written; stack garbage in the shipped rows |
+| 0x28 | f64 | `checksum`: `c(score)`, or a random filler on an empty slot |
 
-The file ends with a f64 at offset 480.
+The file ends with a f64 at offset 480: the checksum of the sum of all scores.
 
-Bytes after the name's NUL are not a single uninitialised region. Name entry writes the run's statistics at +0x10..+0x21. Bytes +0x22..+0x27 are never written and hold stack garbage in the shipped default rows. Nothing in the original exe reads the statistics back. A parser must stop the name at the first NUL. A writer should zero-fill or write the statistics. See [`docs/re/game-spec.md`](../re/game-spec.md) section 7.1 for the field layout and checksum.
+Checksum: `c(s) = sqrt(x)` with `x = 5.365799563 * s - sqrt(5.365799563)`, and `x = 0.1835` when `x < 0`. Empty slots (score 0) get a random filler, `rand 0..7999 / 5.63`; a score sum below 1 gives the trailer `rand 0..7999 / 6.8899`. The full rules, the insert order and the validation are in game-spec section 7.1.
 
-Shipped file: all 10 names are `None`. Scores in order: 1.746, 1293.250, 146.892, 348.313, 87.211, 531.972, 700.178, 857.371, 965.542, 69.449. They are not sorted, so the table is probably an unsorted default or written by a test build. The trailing f64 equals `entries[0].score` (1.7462474069349656) bit for bit.
+Run statistics (name entry, `FUN_0041a7ac`): objects saved (i16 at 0x10), maximum life time (f32 s at 0x14), average life time (f32 s at 0x18), average price (i32 at 0x1c), flies killed (i16 at 0x20). Nothing in the original exe reads them back, and the shipped default rows hold garbage in all of 0x10..0x27. A parser must stop the name at the first NUL and ignore the statistics. A writer should zero-fill or write the statistics.
 
-Evidence: "None" appears at offsets 0x00, 0x30, 0x60 ... 0x1B0 (stride 48, 10 hits); the f64 at `record + 40` decodes to plausible magnitudes (1 to 1300) for every record, and the 8 trailing bytes equal the first record's f64.
+Shipped file: all 10 names are `None`. Record 0 has score 1 and checksum 1.7462474069349656 (= c(1)); every other record has score 0 and a filler checksum (1293.250, 146.892, 348.313, 87.211, 531.972, 700.178, 857.371, 965.542, 69.449 in record order from 1). The trailing f64 equals record 0's checksum bit for bit, because the scores sum to 1.
 
-What a score is (points or seconds) and whether lower or higher is better is not decided here; the values look like times in seconds or points. Task B should settle this from the scoring code and the in-game high score screen.
-
-Open: the meaning of the trailing f64 (a copy of the first score? the score of the last game?).
+An earlier version of this file read a 40-byte name and an f64 "score" at +40. That f64 is the checksum; the real score is the i32 at +0x0c. The shipped file cannot tell the two apart for record 0 (c(1) = 1.746), which is how the mistake came about.
 
 ## `boite.btt` (8 bytes): settings
 
-Two u32 little-endian. Shipped value: `1, 1`.
-
-Probable meaning: flags for the start-up dialog (the exe has a `boitedlg.bmp`; "boite" is French for box, as in dialog box), for example "show intro" and "show this dialog". This is a guess from the name only. Task B should confirm. The parser returns the raw pair.
+Two u32 little-endian: [0] music on (1) or off (0), [1] tutorial on or off (game-spec section 7.2). Shipped value: `1, 1`. The parser returns the raw pair.

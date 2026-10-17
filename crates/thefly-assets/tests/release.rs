@@ -44,7 +44,17 @@ fn save_files_parse() {
     let Some(root) = release() else { return };
     let scores = btt::parse_scores(&std::fs::read(root.join("scoot.btt")).unwrap()).unwrap();
     assert!(scores.entries.iter().all(|e| e.name == "None"));
-    assert_eq!(scores.trailer, scores.entries[0].score);
+    // game-spec §7.1: record 0 is score 1 with checksum c(1) = 1.74625; the trailer is c(sum).
+    assert_eq!(scores.entries[0].score, 1);
+    assert!((scores.entries[0].checksum - 1.74625).abs() < 1e-5);
+    assert_eq!(scores.trailer, scores.entries[0].checksum);
+    let checksum = |s: i32| {
+        let x = 5.365799563 * f64::from(s) - 5.365799563_f64.sqrt();
+        (if x < 0.0 { 0.1835 } else { x }).sqrt()
+    };
+    for e in scores.entries.iter().filter(|e| e.score != 0) {
+        assert!((e.checksum - checksum(e.score)).abs() < 1e-9, "{e:?}");
+    }
     let s = btt::parse_settings(&std::fs::read(root.join("boite.btt")).unwrap()).unwrap();
     assert_eq!(s.values, [1, 1]);
 }
