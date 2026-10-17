@@ -10,6 +10,7 @@ This file is the **index**. It holds the flow (screens, state machine, menus, in
 | Farmer and swatter, AI farmer, AI shopping, trap placement, prices and shop, scoring, balance meter, bonus round, winner, high score, statistics counters, period and match progression | `ai-and-rules.md` |
 | Per-screen layout, fonts, colours, the sprite and blit engine, scene layers and draw order, sheet cuts | `screens-and-rendering.md` |
 | State machine, menus, input, clock, durations, save files, audio slot map, asset map, open list | this file |
+| Closed gaps: full key map, splat and respawn timing, stack push, camera accumulation, goodie catch, boot speed, midge contact. **Where `gaps.md` §10 corrects another document, `gaps.md` wins.** | `gaps.md` |
 
 ## Conventions
 
