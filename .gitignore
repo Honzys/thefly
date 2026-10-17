@@ -1,0 +1,12 @@
+/target/
+# Original game data and decompiler output must never be committed.
+/data/
+*.irc
+*.IRC
+*.bor
+*.BOR
+*.btt
+*.wav
+*.mid
+*.avi
+*.exe
