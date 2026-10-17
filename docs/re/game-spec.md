@@ -2,6 +2,15 @@
 
 This spec describes how `The Fly Release 1.2.exe` behaves, as reverse-engineered from a local Ghidra dump. It is written for a clean-room reimplementation. It holds no decompiled code and no original assets. Byte layouts of the data formats are in `docs/formats/` (Task A); this document covers behaviour only.
 
+This file is the **index**. It holds the flow (screens, state machine, menus, input), the audio slot map, the save files, the asset map and the one open-questions list. Every other rule lives in exactly one of the detail documents below, and the sections here say where.
+
+| Topic | Authoritative document |
+|---|---|
+| RNG, tick order, the fly, camera and layers, outlines and collision, table objects, lift, trap effects on the fly, flying goodies, friendly boot, midges (behaviour) | `fly-and-world.md` |
+| Farmer and swatter, AI farmer, AI shopping, trap placement, prices and shop, scoring, balance meter, bonus round, winner, high score, statistics counters, period and match progression | `ai-and-rules.md` |
+| Per-screen layout, fonts, colours, the sprite and blit engine, scene layers and draw order, sheet cuts | `screens-and-rendering.md` |
+| State machine, menus, input, clock, durations, save files, audio slot map, asset map, open list | this file |
+
 ## Conventions
 
 - **[C] confirmed:** read in the decompiled code (or the disassembly for float constants), or checked against a shipped file.
@@ -39,18 +48,18 @@ The main loop (`FUN_004073d1`) runs one step of the current state per 65 Hz tick
 | 0, 3 | boot | `FUN_00407a12`, `FUN_00407ae6` | Creates the sound manager (`FUN_0040c270`) → 0x8c [C] |
 | 8c, 8f, 92 | intro video | `FUN_00408321`, `FUN_00408501`, `FUN_004085f1` | Plays `Intro.avi` through DirectShow. Esc or Enter skips it (`FUN_0040f15d`). When it ends → 0x0a [C] |
 | 0a, 0d, 10, 13 | publisher logo | `FUN_00407b64`, `FUN_00407d60` | Shows `Present` with a colour-shade fade and the label "Release 1.2" at (700, 7). A key skips it after 3000 ms; it fades out on its own after 10000 ms → 0x14 [C] |
-| 14, 17, 1a, 1d | main menu | `FUN_00407f42`, `FUN_00408068`, `FUN_00408113` | Plays an intro animation the first time only (`FUN_0041e1be`, 900 ms wait). Menu result 0 → 0x3c (quit dialog), 1 → 0x5a (keys), 2 → start a match (section 2.4), 3 → 0x6e (high scores) [C] |
+| 14, 17, 1a, 1d | main menu | `FUN_00407f42`, `FUN_00408068`, `FUN_00408113` | Plays a scripted intro the first time only (a 4-step scroll, a fly pass and a pig drop; the 900 ms wait only guards skipping it; `FUN_0041e1be`; `screens-and-rendering.md` §2.2). Menu result 0 → 0x3c (quit dialog), 1 → 0x5a (keys), 2 → start a match (section 2.4), 3 → 0x6e (high scores) [C] |
 | 1e, 21, 24, 27 | goodies shop | `FUN_00408650`, `FUN_00408799`, `FUN_00408918` | Each side buys goodies with its own keys; the side shopping is set by data+0x22fc (`FUN_0040aa80`). Result 1 → 0x28 (traps), 2 → 0x50 (bourse), 0 → quit dialog [C] |
 | 28, 2b, 2e, 31 | traps shop (farmer) | `FUN_00408984`, `FUN_00408acd` | The farmer places traps. Result 1 → 0x50 [C] |
 | 50, 53, 56 | bourse (price board) | `FUN_00409757`, `FUN_00420476` | Shows the current object prices. Enter → 0x32 [C] |
-| 32, 38, 3b | gameplay period | `FUN_00408c2a`, `FUN_00408d5c` | On entry, advances the period (`FUN_0040b7b2`). If the match is over → 0x14; otherwise builds the game object and loads assets (`FUN_004015c8`). When the period ends: if dinner or extreme mode (`FUN_0040b922`) → 0x64 (bonus), else → 0x1e. Esc pauses and opens the quit dialog, unless game+0x407bc blocks it [C] |
-| 64, 67, 6a | bonus round | `FUN_00408f6a`, `FUN_0040906f` | Section 4.12. Afterwards: match over (`FUN_0040b94c`) → 0x78, else → 0x1e [C] |
-| 3c, 3f, 42 | quit / stop dialog | `FUN_0040922a`, `FUN_00409495` | Uses the `boitedlg` frame. From the menu it asks whether to quit to Windows, otherwise whether to stop the game. Yes from the menu → 0x82; Yes from a game → 0x14; No → back to the previous state [C] |
-| 5a, 5d, 60 | keys page | `FUN_00409964` | Shows `touches`; in 1P it adds a line saying the player is the fly. Esc or Enter → 0xa0 if it was reached from match start, else back [C] |
+| 32, 38, 3b | gameplay period | `FUN_00408c2a`, `FUN_00408d5c` | On entry, advances the period (`FUN_0040b7b2`). If the match is over → 0x14; otherwise builds the game object and loads assets behind a random `LOADING` or `LOADING2` screen that always takes about 2.3 s (`FUN_004015c8`; `screens-and-rendering.md` §4.1). Every period then opens with a "3, 2, 1, Go!" banner and a "<meal> Inside/Outside Day n" caption, and the music starts after "Go!" (`FUN_00405538`; `screens-and-rendering.md` §4.5). When the period ends: if dinner or extreme mode (`FUN_0040b922`) → 0x64 (bonus), else → 0x1e. Esc pauses and opens the quit dialog, unless game+0x407bc blocks it [C] |
+| 64, 67, 6a | bonus round | `FUN_00408f6a`, `FUN_0040906f` | `ai-and-rules.md` §8.3. Afterwards: match over (`FUN_0040b94c`) → 0x78, else → 0x1e [C] |
+| 3c, 3f, 42 | quit / stop dialog | `FUN_0040922a`, `FUN_00409495` | Uses the `boitedlg` frame. From the menu it asks whether to quit to Windows, otherwise whether to stop the game. The default button is No and the screen behind keeps animating. Yes from the menu → 0x82; Yes from a game → 0x14; No → back to the previous state [C] |
+| 5a, 5d, 60 | keys page | `FUN_00409964` | Shows `touches`; in 1P it covers the left half with a fill and adds a line saying the player is the fly (`screens-and-rendering.md` §2.6). Esc or Enter → 0xa0 if it was reached from match start, else back [C] |
 | a0, a3, a6 | tutorial page | `FUN_00409d44` | Shows `page_mongol`. Enter → 0x32 [C] |
 | 6e, 71, 74 | high scores | `FUN_00409f45`, `FUN_00419610`, `FUN_00419904` | Opens name entry (`FUN_0041a7ac`) when reached from the stats page; done → 0x14 [C] |
-| 78, 7b, 7e | winner screen | `FUN_0040a162`, `FUN_0044b431`, `FUN_0044bbbf` | Animated trophy for the winner. Esc or Enter skips it (`FUN_0044bb55`) → 0xaa [C] |
-| aa, ad, b0 | statistics | `FUN_0040a38c`, `FUN_0044c73d`, `FUN_0044cab3` | Match statistics (section 4.13). In 1P highscore mode, if the fly score qualifies (`FUN_0040abb0` ≥ 0) → 0x6e, else → 0x14 [C] |
+| 78, 7b, 7e | winner screen | `FUN_0040a162`, `FUN_0044b431`, `FUN_0044bbbf` | Animated trophy for the winner (winner rule: `ai-and-rules.md` §8.4; choreography: `screens-and-rendering.md` §5.1). Esc or Enter skips it (`FUN_0044bb55`) → 0xaa [C] |
+| aa, ad, b0 | statistics | `FUN_0040a38c`, `FUN_0044c73d`, `FUN_0044cab3` | Match statistics (section 4.13). In 1P highscore mode, if the fly score qualifies (`FUN_0040abb0` ≥ 0; `ai-and-rules.md` §8.5) → 0x6e, else → 0x14 [C] |
 | 82, 85, 88 | farewell animation | `FUN_0040a663`, `FUN_00449de0` | Logo with flying midges → 0x46 [C] |
 | 46, 49, 4c | exit | `FUN_0040a8f8` | Closes the application [C] |
 
@@ -70,7 +79,7 @@ The menu is driven by the arrow keys, Enter and Esc (`FUN_00408113` passes Up/Le
 
 ### 2.4 Starting a match [C, `FUN_00408113`]
 
-1. Reset the match (`FUN_0040b005`, which also loads the shop price table in section 5.6).
+1. Reset the match (`FUN_0040b005`, which also loads the shop price table, `ai-and-rules.md` §7.1).
 2. Set up the farmer (`FUN_0040b50c`) and the fly (`FUN_0040b3c7`), plus extreme-mode setup (`FUN_004242d0`, `FUN_0040b994`).
 3. If music is on, pick `music_game` or `music_game2` at random (`FUN_00405538`).
 4. If the tutorial is off → first gameplay period (0x32). If it is on → keys page → tutorial page → gameplay. The tutorial period lasts 3 minutes instead of 2 (`FUN_00405ed0`).
@@ -82,17 +91,17 @@ The menu is driven by the arrow keys, Enter and Esc (`FUN_00408113` passes Up/Le
 | 1P Normal | 1 Player → Normal → AI level → 2/4/6 days | The human is the fly; the AI (`FUN_0043ea40`) plays the farmer, including shopping (`FUN_004414ea`) and trap placement (`FUN_00425ba2`) [C] | days × (breakfast, lunch, dinner) | winner screen → stats → menu [C] |
 | 1P Highscore | 1 Player → Highscore Mode | as 1P Normal, AI level fixed at 1 [C] | 3 days [C] | winner → stats → name entry if the fly score qualifies [C] |
 | 2P Normal | 2 Players → Normal → 2/4/6 days | the fly on the arrow keys, the farmer on T/F/G/H [C] | days × 3 meals [C] | winner → stats → menu [C] |
-| 2P Extreme | 2 Players → Extreme Mode | as 2P; both sides start with large inventories (section 5.7) and the arena scene [C] | a single period at a random meal and random inside/outside, then the bonus round [C, `FUN_0040b7b2`] | winner → stats [C] |
-| Tutorial | Options → Tutorial On, then any mode | preset inventories and money (section 5.7); hint bubbles overlay the game (`FUN_00443772`, `FUN_00443488`) [C] | 3-minute periods [C] | as the chosen mode [I] |
+| 2P Extreme | 2 Players → Extreme Mode | as 2P; both sides start with large inventories (`ai-and-rules.md` §7.7) and the arena scene [C] | a single period at a random meal and random inside/outside, then the bonus round [C, `FUN_0040b7b2`] | winner → stats [C] |
+| Tutorial | Options → Tutorial On, then any mode | preset inventories and money (`ai-and-rules.md` §7.7); hint bubbles overlay the game (`FUN_00443772`, `FUN_00443488`) [C] | 3-minute periods [C] | as the chosen mode [I] |
 
 ### 2.6 Period, day and match progression [C, `FUN_0040b7b2`]
 
-- data+0x20 holds the period (0 before the first, then 1 = breakfast, 2 = lunch, 4 = dinner) and data+0x21 the day.
-- **Normal modes:** periods go 1 → 2 → 4. After dinner, the day goes up and the period returns to 1. data+0x2c flips between 1 = inside and 2 = outside on each period (`FUN_00405538`: 2 shows "Outside", any other value "Inside"). The match is over when the day goes past data+0x22.
-- **Extreme mode:** picks one random period and a random inside/outside. The second call ends the match.
-- **End of a period:** the clock (game+0x407d8, `FUN_0044214e`, `FUN_004421dd`; 2 minutes, from data+0x26 = 2) runs out, or every object on the table has been delivered (object-manager flag copied to game+0x407b8) [C].
-- **Period label:** a banner reads "<meal> Inside/Outside Day <n>" (`FUN_00405538`). The meal labels in the exe are "Breakfast", "Lunch" and "Diner" [C].
-- **After each period** (`FUN_0040b922`): if the period was dinner or the mode is extreme → bonus round; otherwise → shops → bourse → next period. The game is over when it is dinner of the last day, or the mode is extreme (`FUN_0040b94c`) [C].
+Authoritative detail: `ai-and-rules.md` §9 (advance §9.1, period end order §9.2) and §8.6 (the clock).
+
+- data+0x20 holds the period (0 before the first, then 1 = breakfast, 2 = lunch, 4 = dinner) and data+0x21 the day; data+0x2c is 1 = inside or 2 = outside (`FUN_00405538`: 2 shows "Outside", any other value "Inside").
+- A period ends when the 2-minute clock (3 in the tutorial) runs out, or when every object on the table has been delivered.
+- After a period: dinner (or extreme mode) → bonus round; otherwise shops → bourse → next period. Extreme mode is a single period.
+- The period banner reads "<meal> Inside/Outside Day <n>". The meal labels in the exe are "Breakfast", "Lunch" and "Diner" [C].
 
 ## 3. Input [C, `FUN_00407241`; DirectInput keyboard, no mouse or joystick]
 
@@ -105,176 +114,105 @@ The menu is driven by the arrow keys, Enter and Esc (`FUN_00408113` passes Up/Le
 - App fields: Up +0x44, Down +0x48, Right +0x4c, Left +0x50, H +0x54, F +0x58, T +0x5c, G +0x60, Enter +0x64, Esc +0x6c, Tab +0x74, scancode 0x10 at +0x78, Right Shift +0x7c [C].
 - `FUN_0040735a` detects a fresh press of Esc or Enter. Screens use it to skip, so that a held key does not skip several screens [C].
 - The shops use the keys of the side whose turn it is (`FUN_00408799`) [C].
-- The in-game key help text lists D, F, R, G for the swatter, but the code reads T, F, G, H (see Open questions).
+- The farmer's four direction keys are T up, F left, G down, H right [C, `FUN_00407241` order checked against the parameter order of `FUN_0043cea5`]. The in-game key help text lists D, F, R, G; the port follows the code (open list item 1).
 
 ## 4. Game objects
 
-The game object's update is `FUN_0040326c`. Each tick it receives the fly's five keys, the farmer's five keys, the two goodie keys, the frame time and the FPS [C]. Unless a subsection says otherwise, everything below runs once per 65 Hz tick.
+The game object's update is `FUN_0040326c`. Each tick it receives the fly's five keys, the farmer's five keys, the two goodie keys, the frame time and the FPS [C]. Unless a subsection says otherwise, everything below runs once per 65 Hz tick. The fixed order of the sub-updates is in `fly-and-world.md` §2. Each subsection here is an index entry: it names the owner of the rules and keeps only facts no other document holds.
 
 ### 4.1 World and camera [C, `FUN_004416b1`, `FUN_00441baf`]
 
-- The world is 4000 px wide (the width of the main scenery layer) and one screen (600 px) tall.
-- The camera scrolls horizontally only; its offset is game+0x407c0. Each layer scrolls at its own parallax factor (section 6.2).
+Authoritative detail: `fly-and-world.md` §4.1 (layers, camera, wrap), `screens-and-rendering.md` §4.2 (scene layers, scrolling, draw).
+
+- The world is 4000 px wide (the width of the main scenery layers `Maison`, `dehors` and `arene`, section 9.3) and one screen (600 px) tall.
+- The camera scrolls horizontally only. game+0x407c0 is a per-tick delta in fly-layer pixels, assigned each tick; it is not an offset. The fly lives in screen space. Table objects, the lift and the boot live on a 1.25 parallax layer whose wrap width is trunc(W × 1.25) = 5000.
 - The farmer and the collision tests wrap around the world width (`FUN_0043cea5`, `FUN_0042f6de`) [C].
 - Ambient sound: animal noises (slots 14–21) play at random intervals (`FUN_00441b3c`) [C].
 
 ### 4.2 Fly (game+0x40; init `FUN_00436df6`, physics `FUN_00437547`, update `FUN_00433ddd`, render `FUN_004388ca`)
 
-**States** [C for alive/stunned/dead/respawn; I for the exact sub-states inside `FUN_00433ddd`]:
+Authoritative detail: `fly-and-world.md` §3 (fields §3.2, init §3.3, physics §3.4, update and carrying §3.5, damage, stun and death §3.6, respawn §3.7, Turbo and SuperFly §3.8).
 
-| State | Entered when | Behaviour | Leaves when |
-|---|---|---|---|
-| flying | spawn or respawn | the movement model below | hit, zapped or splatted |
-| carrying | Enter pressed within 1000 px of an object (`FUN_0042e704`) | as flying; the object's weight slows climbing (section 4.4) | Enter again (drop), or delivery at the lift |
-| stunned / ricochet | swatter or fan damage with a running total of 100 or less | thrown away from the hit; decelerates over 25 ticks (`FUN_00437e99`) | 25 ticks pass |
-| dying | running damage total over 100 | crash animation; falls toward (850, 850) (`FUN_0043a158`); sound 29 at frequency 5000 Hz | off-screen |
-| respawn | after dying | reappears at a random x, y with the respawn sound (37/38) and a fresh survival timer (`FUN_00438643`, `FUN_004385c6`, `FUN_004387d5`) | immediately back to flying |
-
-**Movement constants** [C, `FUN_00437547`, `FUN_00436df6`; floats resolved in the disassembly]:
-
-| Quantity | Value | Unit |
-|---|---|---|
-| max speed per axis | 550 + 60 × speed level (data+0x88), plus the turbo bonus | px/s |
-| acceleration while a direction is held | 0.1 × max speed | px/s per tick |
-| climb while carrying | 75 × f + 0.1 × max / 1.6, where f = 0.2 × strength level (data+0x86); with SuperFly f = min(f + 0.5, 1) | px/s per tick |
-| friction with no key held | 9 toward 0 | px/s per tick |
-| position | += velocity × dt, clamped to 0..800−w by 0..600−h on screen | px |
-| idle jitter | ± random × 2 | px per tick |
-| edge scrolling | inside one sprite width of a screen edge, the camera moves at max × overlap / (w/2) | px/s |
-
-**Damage and health** [C, `FUN_00437e99`; fan and zapper callers in section 4.6]:
-
-- Health is 100. Each hit adds to a running damage total (fly+0x2cc).
-- The new total is 100 or less → ricochet. On each axis the kick is random × 500 if that axis's velocity was 0, otherwise |v| × (damage / 50) × random + 800 px/s, always away from the swatter. Sound 28.
-- The new total is over 100 → dying. On a kill, `FUN_0040bc5e` records the kill type from the swatter's hit count (1 hit → type 3, 2–3 hits → type 2, more → type 1) [C].
-- SuperFly divides incoming swatter damage by 2.5 [C, `FUN_0043728f`].
-
-**Assets** [C, `FUN_00435cd4`]: `Face` and the eight `transi-*` strips (heading sprites), `crash-face0001..0004` and `crash-face0011`, `eclatement_fly`, `blood`, `Aspi` (grab effect), `onde_active`, `stardust`, `DUST`. Sounds: the buzz (slot 7) is positional (`FUN_0040d005`: pan from x around screen centre 400; frequency 10000 + random 0–999 + a speed term; quieter off-screen) [C].
+- States: flying, carrying, stunned (ricochet), dying (crash animation), splatted, and respawning. Health is 100; a running damage total above 100 kills.
+- **Assets** [C, `FUN_00435cd4`]: `Face` and the eight `transi-*` strips (heading sprites), `crash-face0001..0004` and `crash-face0011`, `eclatement_fly`, `blood`, `Aspi` (grab effect), `onde_active`, `stardust`, `DUST`.
+- **Buzz** (slot 7) is positional (`FUN_0040d005`: pan from x around screen centre 400; frequency 10000 + random 0–999 + a speed term; quieter off-screen) [C].
 
 ### 4.3 Farmer / swatter (game+0x13d20; init `FUN_0043c5f2`, move `FUN_0043cea5`, swing `FUN_0043d510`, hit test `FUN_0043d1a0`)
 
-L = farmer level, data+0x7c (0..5) [C].
+Authoritative detail: `ai-and-rules.md` §1 (constants §1.1, movement §1.2, swing §1.3, hit test and damage §1.4, voices and footsteps §1.5, Triple Hit §1.6, Nuclear Hit §1.7). L = farmer level, data+0x7c (0..5).
 
-| Quantity | Value | Unit |
-|---|---|---|
-| max horizontal speed | 650 + 60L | px/s |
-| horizontal acceleration | ±400 | px/s per tick |
-| horizontal stop | instant when the key is released | |
-| vertical speed change | ±200, clamped to ±400 | px/s per tick, px/s |
-| swing cooldown | 35 − 5L | ticks (field +0xc8) |
-| hit power | L, or 5 while Nuclear is active | level |
-| hit radius R | swatter width / 2 + fly width / 2 | px |
-| damage | int((40 + 6L) × (1 − distance / R)); Nuclear uses 74 instead of 40 + 6L | HP |
-
-- The swatter is drawn larger or smaller with depth (scale field +0xb8) [C].
-
-**Swing states** [C, `FUN_0043d510`]:
-
-| Frame | What happens |
-|---|---|
-| idle | waits for Tab while the cooldown is 0 and the swatter is allowed to hit (the mystery goodie can block it, field +0x154) |
-| 1 | swing sound (slot 27) at a random frequency of 35000–49999 Hz (40000 Hz for Triple Hit); 20% chance of the voice line in slot 34 |
-| 2 | wind-up |
-| 3 | active: the hit test runs from this frame on |
-| 4 | impact: shockwave sprite (`FUN_0043df24`); with Nuclear, a 70% chance of sparks. Then the swatter retracts and the cooldown starts |
-
-- Voice lines in slots 30–33 (win, hurry, miss, lose) are chosen in `FUN_0043c730` [I for the exact triggers].
-- **AI (1P):** `FUN_0043ea40` (init `FUN_0043edb1`, `FUN_0043ee0b`, at game+0x14e48) drives the same key inputs as a human farmer. It has three levels (Easy, Normal, Inteligent) [C]. Its decision rules were not read in detail [I].
+- **AI (1P):** `FUN_0043ea40` (at game+0x14e48) drives the same key inputs as a human farmer, with three levels (Easy, Normal, Inteligent) from data+0x25. Creation, parameters, controller, goodie decisions: `ai-and-rules.md` §2; shopping: §3; trap placement: §4.4.
 - **Assets** [C, `FUN_0043c061`, `FUN_00448802`]: `tapette-1`, `-3`, `-5`, `-7`, `-8` (swing frames), `onde_frappe` (shockwave), `fleche_tap` (position arrow), `etincelle` (sparks), `plaque_tap` (HUD plate). `piecetap` is used by the bonus-round swatter [I].
 
 ### 4.4 Table objects (game+0x3df60 manager `FUN_0042c888`; instances in `DAT_0049bd20`, stride 0x874)
 
-- **Object set:** 22 normal objects, plus 3 that appear only in extreme mode. Each has a sprite (`div*.irc`), a `.bor` outline (section 6.4), a weight (short at object +0x90 / +0xb0) and a base price [C, `FUN_0040ae51`].
-- **Spawning:** objects are placed on the table with collision spacing (`FUN_0040bd61`). Three random x positions in 0..760 px, at least 36 px apart, are chosen for drops (`FUN_0040bf70`) [C].
-- **Object states:**
+Authoritative detail: `fly-and-world.md` §5 (type table with base prices §5.1, placement §5.2, fields and states §5.3, motion §5.4, manager tick and delivery §5.5).
 
-  | State | Behaviour |
-  |---|---|
-  | resting | on the table |
-  | carried | follows the fly; adds its weight to the fly's vertical velocity each tick [C] |
-  | falling | on release, falls with the fly's vx / 50; the fly pops up 20 px [C] |
-  | delivered | dropped onto the lift (`FUN_00431115` returns −1); plays g_money (slot 11), adds to the saved count per type (+0x1f0) and to the stats [C] |
-  | pushed | a fan can blow it sideways (`FUN_0042754d`) [C] |
-
-- **Base prices** [C, `FUN_0040ae51`]: can1 60, can2 15, can3 12, chips1 5, chips2 5, clope 22, saucisson 90, saucisson1 20, cacahuete 10, zippo 100, lait 60, mandarine 21, pomme 43, sucre 30, toaster 100, toast 18, poulet 60, poivriere 10, tomate 30, muffin 40, cornichon 8, mais 65. Extreme mode adds extreme1 80, extreme2 50, extreme3 20.
-- **Price fluctuation** [C, `FUN_0040ba40`]: each price moves by ± (random 0–29)% of itself, with a floor of 1.0. The result is shown on the bourse page. That it is applied once per period is [I].
-- **Footsteps:** slots 22–26 play from `FUN_0042dc21` [I].
+- Object set: 22 normal objects, plus 3 that appear only in extreme mode. Each has a sprite (`div*.irc`), a `.bor` outline (section 9.6), a weight and a base price [C, `FUN_0040ae51`]. Up to 15 objects are placed per period.
+- Price fluctuation, payout and delivery scoring: `ai-and-rules.md` §7.1, §7.3 and §7.5.
+- A landing object plays its stored impact sound, slot 6 (`FUN_0042dc21`). The footsteps in slots 22–26 belong to the farmer (section 8.2).
 
 ### 4.5 Lift / winch (`DAT_0049bba0`; `FUN_00430e48`, `FUN_00431115`, `FUN_00431931`, `FUN_0042a760`)
 
-- The lift is the delivery point; the fly drops carried objects on it [C, `FUN_00431115`].
-- It is drawn with `treuil` and a `treuil_corde` rope. The winch sound (slot 47) plays while it moves [C].
-- Its movement timing was not read in detail [I].
+Authoritative detail: `fly-and-world.md` §5.6 (anchors, three-state machine, hook windows, hoisting) and §5.5 (delivery).
+
+- The lift is drawn with `treuil` and a `treuil_corde` rope. The winch sound (slot 47) plays while it moves [C]. `FUN_0042a760` is the manager destructor.
 
 ### 4.6 Traps (game+0x3ffb0 manager, update `FUN_00427270`, render back `FUN_00427a27`, render front `FUN_00427b54`)
 
-The farmer buys traps in the traps shop with trap tokens (section 5.6). The manager keeps three arrays [C, `FUN_00427270`]:
+Authoritative detail: `ai-and-rules.md` §4 (types, costs, caps, lifetime, placement validator, AI placement). Effects on the fly: `fly-and-world.md` §7.4. Effects on midges: `fly-and-world.md` §8.2.
 
-- flypapers: `DAT_0046c948`, stride 0x874, up to 7
-- fans: `DAT_00470478`, stride 0x7568, up to 5
-- zappers: `DAT_00494f80`, stride 0x3610, up to 2
-
-| Trap | Assets | Effect on the fly | Sound |
-|---|---|---|---|
-| Flypaper (`FUN_0042663b`) | `colle_mouche1`, `colle_mouche2` | while the fly overlaps the strip (`FUN_0042825c`), both velocity components are divided by 1.4 each tick [C] | none found |
-| Fan, left- or right-facing (`FUN_0042a075`, `FUN_00429605`, `FUN_00427954`) | `ventilo_gauche`, `ventilo_droite`, `vent` (wind particles); `palesventi_gc`/`_dt` and `piedventi_gc`/`_dt` outlines | collision with the blades (`FUN_0042f6de`), at most once per 100 ms: pushes the fly sideways by the fan strength (+0x91c) and up by strength + 100 px/s; adds damage of 40–59, or 20–29 when the protection flag fly+0x24c is set (likely SuperFly [I]); a total of 100 or less stuns, over 100 splatters the fly into 60 + 11 particles (`FUN_004397c0`) [C] | slot 44, loop at −400 or −100 (louder when blowing); positional when there is a single fan; slot 45 on impact at 20000–25999 Hz [C] |
-| Zapper (`FUN_004288fe`, `FUN_00428b47`, `FUN_0042699d`, `FUN_00428540`) | `tue_mouche`, `eclaires`, `etincelle` | a fly inside the zapper's column whose top edge overlaps the zapper body (within height − 80 px of the zapper's top edge) is grilled: instant death (`FUN_00439f29`) and slot 43. An arc (`FUN_00428b47`, sound 39) also pushes the fly up 180 px/s and adds 1 damage per tick, dying past 100 [C] | slot 40, a loop at −500 idle or −200 while arcing; −450 positional when there is a single zapper [C] |
-
-- **Placement:** traps go into up to 15 slots at data+0x2a2. Positions are checked by `FUN_0040bd61`. Placing one plays p_build (slot 13) [C, `FUN_00425456`].
-- **Per-type caps:** at data+0x298..0x29e [C]. The values 7, 5, 5, 2 and 7 next to the trap names at data+0xa1 are probably those caps [I].
+- **Assets** [C]: `colle_mouche1`, `colle_mouche2` (flypaper); `ventilo_gauche`, `ventilo_droite`, `vent` (wind particles) with the `palesventi_*` and `piedventi_*` outlines; `tue_mouche`, `eclaires`, `etincelle` (zapper).
+- **Trap sounds** [C]: fan loop slot 44 at −400 or −100 (louder when blowing), positional when there is a single fan, and slot 45 on impact at 20000–25999 Hz. Zapper loop slot 40 at −500 idle or −200 while arcing (−450 positional when there is a single zapper), slot 39 on an arc, slot 43 when a fly is grilled. The flypaper has no sound. Placing any trap plays slot 13.
 
 ### 4.7 Fly goodies [C, `FUN_00404198`]
 
-- The goodie selector (game+0x408a8) cycles through 0..3 with Right Shift; Enter uses the selected one if its count is above 0.
-- Using a goodie plays j_goodie (slot 37/38) and a stardust effect.
+The goodie selector (game+0x408a8) cycles through 0..3 with Right Shift; Enter uses the selected one if its count is above 0. Using a goodie plays slot 37/38 (j_goodie) and a stardust effect.
 
-| # | Goodie | Count field | Effect | Duration | Sound |
+| # | Goodie | Count field | Duration | Sound | Authoritative detail |
 |---|---|---|---|---|---|
-| 1 | Turbo (`FUN_00436fc1`) | data+0x8a | +50% of base max speed, with a velocity kick on the dominant axis; afterwards max speed decays by 5% of base per tick | 1500 ms | 35 |
-| 2 | SuperFly (`FUN_0043728f`) | data+0x8c | swatter damage ÷ 2.5; better carrying climb (section 4.2) | 8000 ms | 36 |
-| 3 | Midges (`FUN_00404caf`) | data+0x8e | see section 4.9 | until they leave | 48 |
+| 1 | Turbo (`FUN_00436fc1`) | data+0x8a | 1500 ms | 35 | `fly-and-world.md` §3.8 |
+| 2 | SuperFly (`FUN_0043728f`) | data+0x8c | 8000 ms | 36 | `fly-and-world.md` §3.8 |
+| 3 | Midges (`FUN_00404caf`) | data+0x8e | until they leave | 48 | `fly-and-world.md` §8 |
 
 ### 4.8 Farmer goodies [C, `FUN_004043c1`]
 
-- The selector is game+0x408aa; the goodie key (scancode 0x10) cycles and uses it.
+The selector is game+0x408aa; the goodie key (scancode 0x10) cycles and uses it. Selector and activation rules: `ai-and-rules.md` §5.
 
-| # | Goodie | Count field | Effect | Duration |
+| # | Goodie | Count field | Duration | Authoritative detail |
 |---|---|---|---|---|
-| 1 | Triple Hit (`FUN_0043c8e2`) | data+0x80 | the next swings form a triple strike (flag +0xdc); higher swing pitch | [I] |
-| 2 | Nuclear Hit (`FUN_0043cb71`) | data+0x82 | hit power 5, damage base 74, sparks | 5000 ms (20000 ms from a mystery goodie) |
-| 3 | Friendly Boot | data+0x84 | calls the boot (section 4.10) | one stomp |
+| 1 | Triple Hit (`FUN_0043c8e2`) | data+0x80 | not timed: 3-swing bursts, ends after more than 6 bursts | `ai-and-rules.md` §1.6 |
+| 2 | Nuclear Hit (`FUN_0043cb71`) | data+0x82 | 5000 ms (20000 ms from a mystery goodie) | `ai-and-rules.md` §1.7 |
+| 3 | Friendly Boot | data+0x84 | the boot leaves after 10 stomps | `fly-and-world.md` §7 |
 
 ### 4.9 Midges (game+0x178a0, 300 slots; spawn `FUN_00404caf`, render `FUN_00404ef3`)
 
-- **Spawn** [C]: min(100, 300 − active midges) midges. Each starts at x = 800 + random(0 .. world width − 811), y = random 0–599, with a speed of ±(200..399) px/s and a size of 30–34 px.
-- **Behaviour:** each flies toward a random point on the swatter [C]. The intent is to get in the farmer's way (from the hint strings); the exact gameplay effect was not read [I].
+Authoritative detail: `fly-and-world.md` §8 (spawn, homing, kills, fan push); the slowdown they cause: `ai-and-rules.md` §6.3.
+
 - **Assets:** `moucheron`, `moucheron1` [C].
 
 ### 4.10 Friendly boot (game+0x3dc60; `FUN_0043aabe`, `FUN_0043abc7`, `FUN_0043b157`, `FUN_0043b370`, render `FUN_0043b41b`)
 
-- When called, a giant boot (`i_botte`) stomps down. The active flag is game+0x3df58. The boom (slot 6) plays [C].
-- Whether it damages the fly or only scares it was not traced [I].
+Authoritative detail: `fly-and-world.md` §7 (spawn, update, effect on the fly). The boot can kill a low fly.
+
+- A giant boot (`i_botte`) stomps down; the active flag is game+0x3df58. The boom (slot 6) plays [C].
 
 ### 4.11 Flying goodies (game+0x15000; `FUN_00432684` spawn, `FUN_00432dfb` update, `FUN_0043309b` catch, render `FUN_00432e7b`)
 
-- Two flyers can be on screen: one for the fly (sub-object +0x1c8) and one for the farmer (+0x18). They are drawn with `goodiesmystere`/`goodies` icons and `ailesgoodies` wings [C].
-- **Spawning** [C for the timer values, I for the full probability formula]: a spawn check is re-armed every 8000 ms plus a random term. After a spawn, the next check waits 16000 ms (fly side) or 20000 ms (farmer side). A roll below 3 out of 100 chooses a rarer type. The flyer spawns at a random (x 0–799, y 0–499) and wanders slowly.
-- **Catching** [C, `FUN_0043309b`]:
-  - Fly catches its flyer: type below 10 → +1 to one fly goodie count (data+0x84 + 2 × type). Type 10 or above → mystery: 50% inverted controls (result 1; the fly's key pairs are swapped on both axes), 50% Turbo for 25000 ms (result 2).
-  - Farmer catches its flyer: type below 10 → +1 to one farmer goodie count (data+0x7a + 2 × type). Type 10 or above → mystery: 50% "swatter cannot hit" (result 0x0b, sets +0x154), 50% Nuclear for 20000 ms (result 0x0c).
-  - Every catch plays slot 42. A mystery effect arms a 15000 ms timer; the flags game+0x40898 and game+0x40899 hold the active mystery state.
+Authoritative detail: `fly-and-world.md` §6 (spawn, update, catch). The spawn chance and the re-arm times use the balance meter, `ai-and-rules.md` §8.2.
+
+- Two flyers can be on screen: one for the fly (sub-object +0x1c8) and one for the farmer (+0x18), drawn with `goodiesmystere`/`goodies` icons and `ailesgoodies` wings [C].
+- Flags game+0x40898 and game+0x40899 hold the active mystery state.
 
 ### 4.12 Bonus round (`FUN_00444da0`, `FUN_004452a1`, update `FUN_00446030` and `FUN_004472df`, render `FUN_00446993`)
 
-| Step | What happens |
-|---|---|
-| intro [C] | a big "3, 2, 1" countdown at 1000 ms steps, in the `JOINPD__.TTF` face, with b_321 (slot 52); music_bonus (`FUN_00446e7d`); background `bckbonusfond` with the bar `bckbonusbarre` |
-| play [C for the counters, I for the duration] | coins (`piece`) fall. The fly scores by collecting them (counter +0xd864); the farmer scores by swatting with the bonus swatter `FUN_00449203` (counter +0xd868; swing slot 27, voice 34). The value 35000 is stored at +0xd8a0, probably the round length in ms [I]. A handicap for each side is set from the balance meter (`FUN_0040c086`, section 5.5) |
-| result [C] | fly money and score += 2 × fly coins; farmer money and score += 10 × farmer hits. A two-line tally shows "Score the Fly" and "Score the Farmer". Slot 53 plays if the farmer total is larger, otherwise slot 51 |
+Authoritative detail: `ai-and-rules.md` §8.3 (handicaps, coins, targets, bonus AI, result). Screen: `screens-and-rendering.md` §6. The round lasts 35000 ms.
+
+- **Assets** [C]: backdrop `bckbonusfond` with the bar `bckbonusbarre`; coins `piece`; the bonus swatter uses `FUN_00449203`; the countdown uses the `JOINPD__.TTF` face; music_bonus (`FUN_00446e7d`).
 
 ### 4.13 Statistics (`FUN_0040d3e0`, `FUN_0040d4ea`; page `FUN_0044bf60`)
 
-- Counters [C]: periods played (`FUN_0040c230`), objects saved, average per period, max and average fly survival time (GetTickCount based, `FUN_0040db31`, `FUN_0040db52`), average object price, swatter hits, flies killed (`FUN_0040c250`), kills per period, hit ratio and average damage.
+Authoritative detail: `ai-and-rules.md` §8.7 (counters and page values); layout: `screens-and-rendering.md` §5.2.
 
 ## 5. Timing and scoring constants
 
@@ -291,111 +229,68 @@ The farmer buys traps in the traps shop with trap tokens (section 5.6). The mana
 |---|---|
 | gameplay period | 2 minutes (data+0x26); 3 minutes in the tutorial |
 | logo skip / auto-advance | 3000 / 10000 ms |
-| first menu intro wait | 900 ms |
-| Turbo | 1500 ms (25000 ms from a mystery goodie) |
+| first menu intro skip guard | 900 ms |
+| Turbo | 1500 ms; a mystery Turbo is armed for 25000 ms but is cut when the 15000 ms mystery timer ends (`fly-and-world.md` §6.3) |
 | SuperFly | 8000 ms |
 | Nuclear | 5000 ms (20000 ms from a mystery goodie) |
+| Triple Hit | not timed (`ai-and-rules.md` §1.6) |
 | mystery effect timer | 15000 ms |
-| fly ricochet | 25 ticks |
+| fly stun | 4 ticks hit-in, the kick, 4 ticks back out; the ricochet decelerates over 23 ticks (`fly-and-world.md` §3.6) |
+| fly death to respawn | 1500 ms after the crash animation |
 | fan re-hit guard | 100 ms |
+| flying goodie lifetime | 8000 ms (fly), 12000 ms (farmer) |
 | bonus countdown step | 1000 ms |
+| bonus round | 35000 ms |
 
 ### 5.3 Scoring [C]
 
-- **Fly score** (data+0x30) and **fly money** (data+0x92): at the shop payout after each period (`FUN_00422223`) both go up by the sum over object types of saved count × current price (`FUN_0040ba40`). The bonus round adds 2 per coin.
-- **Farmer score** (data+0x38) and **farmer money** (data+0x90): +42 per kill (data+0x15c, `FUN_0040bbe5`), paid at the same shop payout. The bonus round adds 10 per hit.
-- **High score:** the table records the fly score (data+0x30) [C, `FUN_0040abb0` caller].
-- **Winner:** decided by comparing the two scores [I, `FUN_0044b431`].
+Authoritative detail: `ai-and-rules.md` §8.1 (points per event), §7.3 (payout), §8.4 (winner), §8.5 (high score).
+
+- Fly score (data+0x30) and money (data+0x92) rise at the shop payout by the saved goods at the old price; the farmer's (data+0x38, data+0x90) rise by 42 per kill. The payout pays the old price and then fluctuates it, once per type present that period.
+- The bonus round adds 2 per coin to the fly and 10 per target to the farmer.
+- The fly wins ties: the farmer wins only if fly score < farmer score after the end-of-match top-up.
+- The high-score table stores the fly score minus 10 × kills, and ties rank above older entries.
 
 ### 5.4 Difficulty knobs [C]
 
-- Fly speed and strength levels 0–5, and farmer level 0–5, are all bought in the shop.
-- AI level 0–2 sets the AI farmer's skill [I].
+- Fly speed and strength levels 0–5, and farmer level 0–5, are bought in the shop.
+- AI level 0–2 sets the AI farmer's parameters (`ai-and-rules.md` §2.2).
 - Period length 2 minutes; match length 2, 4 or 6 days (3 in highscore mode).
 
 ### 5.5 Balance meter [C, `FUN_0040c086`]
 
-- diff = fly saved value − (farmer base + 42 × kills), clamped to ±1000.
-- Each side's ratio = (1 − |diff| / 1000) / 2, mirrored by side.
-- It drives the bonus-round handicap (section 4.12).
+Authoritative detail: `ai-and-rules.md` §8.2. Both scores are included; the meter is exactly 0.5 at a tie and the trailing side gets more than 0.5. It drives the flying-goodie spawns (`fly-and-world.md` §6) and the bonus-round handicaps (`ai-and-rules.md` §8.3).
 
-### 5.6 Shop prices [C, `FUN_0040b005`, `FUN_00422223`, `FUN_00421e6a`]
+### 5.6 Shop prices [C]
 
-Buying beyond the cap, or without enough money, plays gp_error (slot 12). A purchase plays g_money (slot 11).
+Authoritative detail: `ai-and-rules.md` §7.1 (price table with caps and increments), §7.2 (purchase rules, the farmer level special case and the paid sequences).
 
-| Side | Item | Price | Cap | Price increase per purchase |
-|---|---|---|---|---|
-| Farmer | level / strength | 200 | 5 | +200 |
-| Farmer | trap tokens (data+0x7e) | 55 | 14 | 0 |
-| Farmer | Triple Hit | 30 | 99 | 0 |
-| Farmer | Nuclear Hit | 40 | 99 | 0 |
-| Farmer | Friendly Boot | 65 | 99 | 0 |
-| Fly | strength | 100 | 5 | +100 |
-| Fly | speed | 100 | 5 | +100 |
-| Fly | Turbo | 20 | 99 | 0 |
-| Fly | SuperFly | 55 | 99 | 0 |
-| Fly | Midges | 60 | 99 | 0 |
+### 5.7 Starting inventories [C]
 
-- The farmer's level item has a special case two below the cap [C, `FUN_00422223`]; its effect was not decoded [I].
-- When the farmer finishes shopping with trap tokens left, the traps shop opens; otherwise the game moves on [C].
-- **Trap token costs** [C, `FUN_00424a6f`, `FUN_00424c83`, `FUN_00424db1`, `FUN_00425456`]: flypaper 1, fan (left or right) 2, zapper 4.
-
-### 5.7 Starting inventories [C, `FUN_0040b3c7`, `FUN_0040b50c`]
-
-| Setup | Fly: strength, speed, turbo, superfly, midges | Fly money, score | Farmer: level, tokens, triple, nuclear, boot | Farmer money, score |
-|---|---|---|---|---|
-| Normal | 0, 0, 5, 3, 0 | 0, 0 | 0, 0, 3, 1, 0 | 0, 0 |
-| Extreme | 4, 4, 20, 20, 0 | 0, 0 | 4, 0, 20, 15, 0 | 0, 0 |
-| Tutorial | 3, 3, 50, 50, 50 | 1000, 4200 | 3, 6, 50, 50, 50 | 400, 3000 |
+Authoritative detail: `ai-and-rules.md` §7.7.
 
 ## 6. Rendering
 
+Authoritative detail: `screens-and-rendering.md` (engine §1, per-screen layout §2–§6).
+
 ### 6.1 Display [C, `FUN_00406803`, `FUN_004070ef`]
 
-- DirectDraw 7, full-screen 800 × 600 at 16-bit colour.
-- A primary surface with one back buffer, flipped each tick. On a lost surface it restores.
-- A Direct3D 7 device is created; its use was not traced [I].
-- Text is drawn with GDI TextOut in two TrueType faces loaded from `data\rsc`: `casual.ttf` (menus and HUD [I]) and `JOINPD__.TTF` (dialogs and the bonus round [C, `FUN_00446030`]).
+- DirectDraw 7, full-screen 800 × 600 at 16-bit colour. A primary surface with one back buffer, flipped each tick. On a lost surface it restores.
+- Direct3D 7 draws every alpha-blended or scaled image (fades, dust, tints, caption tweens, HUD dimming, high-score highlights); opaque and colour-keyed images use plain blits (`screens-and-rendering.md` §1.1).
+- Text is drawn with GDI TextOut in `JOINPD__.TTF` and in system faces; which screen uses which is in `screens-and-rendering.md` (Conventions, Fonts).
 
 ### 6.2 In-game scene layers [C, `FUN_004416b1`]
 
-- Layers 1–3 use magenta (0xFF00FF) as the transparent colour key.
-- The scene variant is chosen by data+0x2c: 1 = inside, 2 = outside, and extreme mode uses the arena.
+Authoritative detail: `screens-and-rendering.md` §4.2 (the layer table: assets, y, parallax; scroll and wrap).
 
-| Layer | Parallax | Inside (1) | Outside (2) | Extreme |
-|---|---|---|---|---|
-| 0 sky | 0.25 | `Paysage`, y 0 | `paysage2`, y 0 | `paysage2`, y 0 |
-| 1 middle | 0.75 inside, 0.5 otherwise | `Jardin`, y 205 | `collines`, y 280 | `collines`, y 280 |
-| 2 main (sets the 4000 px world width) | 1.0 | `Maison`, y 0 | `dehors`, y 230 | `arene`, y 123 |
-| 3 table front | 1.25 | `Table`, y 525 | `table2`, y 525 | `table2`, y 525 |
+### 6.3 Draw order per frame [C, `FUN_00403e36`]
 
-### 6.3 Draw order per frame [C for the order, I for the role of the unnamed effects; `FUN_00403e36`]
-
-1. Back scene layers (`FUN_00441baf`).
-2. Effect layer at game+0x3fd90.
-3. Dust (game+0x158b0).
-4. Swatter shadow / back part (`FUN_0043d74a`).
-5. Midges (`FUN_00404ef3`).
-6. Front scene layers (second `FUN_00441baf` pass).
-7. Table objects.
-8. Boot (back).
-9. Traps (back).
-10. Table-object manager (`FUN_0042d2e3`).
-11. Effect at game+0x15740.
-12. Fly (`FUN_004388ca`).
-13. Boot (front).
-14. HUD (`FUN_00404640`: clock `horloge`, goodie panel `croix_goodies`, swatter plate).
-15. Flying goodies.
-16. Swatter (`FUN_0043db53`).
-17. Traps (front).
-18. Tutorial bubbles.
-19. Period label (`FUN_00405538`).
-20. End-of-period banner (game+0x3fe40).
+Authoritative detail: `screens-and-rendering.md` §4.3 (the 20-step order, the meal tint).
 
 ### 6.4 Sprite sheets and outlines
 
-- **Sprite sheets** [I, from sizes and `FUN_00413b73`]: animated sprites are horizontal strips cut into frames. For example, `Face` and each `transi-*` is 1200 × 94, and `moucheron` is 162 × 27. The frame count is passed in code at load time. Other animations are separate files (`tapette-*`, `crash-face*`).
-- **`.bor` outlines** [C for the structure, I for the purpose]: `FUN_0042e040` reads a `.bor` as 500 rows, each a list of 16-bit values ended by −1. They are kept as per-row linked lists on the object. The collision code (`FUN_0042f6de`, `FUN_0042dda4`, `FUN_00426398`) does a bounding-box test first and then walks these rows. So `.bor` files are per-scanline collision outlines for objects and fan parts, not render masks. Byte layout: `docs/formats/bor.md`.
+- **Sprite sheets:** authoritative detail `screens-and-rendering.md` §1.2 and §4.6. Sheets are cut into a column × row grid and frames run in row-major order; frame delays are wall-clock (default 50 ms). The frame count is passed in code at load time.
+- **`.bor` outlines:** authoritative detail `fly-and-world.md` §4.2 and §4.3; byte layout `docs/formats/bor.md`. They are per-scanline collision outlines, not render masks.
 
 ## 7. Save files
 
@@ -404,13 +299,15 @@ Both files are opened relative to the working directory: read with "rb" (`FUN_00
 ### 7.1 `scoot.btt`: high-score table [C, `FUN_00410a69`, `FUN_00410ad3`, `FUN_00410c24`, `FUN_00410cbd`, `FUN_00410f04`]
 
 - **Layout:** ten 48-byte records, then an 8-byte trailer.
-  - Each record holds a name (12 bytes, NUL padded) at +0, the score (signed 32-bit) at +0x0c, and a checksum (64-bit float) at +0x28. Bytes +0x10..+0x27 are not written deliberately; they hold whatever was on the stack.
+  - Each record holds a name (12 bytes, NUL padded) at +0, the score (signed 32-bit) at +0x0c, and a checksum (64-bit float) at +0x28.
+  - Name entry (`FUN_0041a7ac`) also fills +0x10..+0x21 with the run's statistics: objects saved (int16 at +0x10), maximum life time (float32 s at +0x14), average life time (float32 s at +0x18), average price (int32 at +0x1c) and flies killed (int16 at +0x20) [C]. Bytes +0x22..+0x27 are not written deliberately, and the shipped default rows hold stack garbage in all of +0x10..+0x27. Validation reads only score and checksum, and the table screen shows only rank, name and score, so nothing in this exe reads the statistics back [I].
+  - The score field holds data+0x34, the fly score minus 10 × kills (`ai-and-rules.md` §8.5).
   - The trailer is the checksum of the sum of all scores.
 - **Checksum c(s):** x = 5.365799563 × s − sqrt(5.365799563); if x < 0, x = 0.1835; c = sqrt(x).
   - Empty slots get a random filler checksum (random 0–7999 / 5.63).
   - If the score sum is below 1, the trailer gets random 0–7999 / 6.8899.
 - **Validation** (`FUN_00410ad3`): every non-zero score must match its checksum, and the trailer must match.
-- **Insert** (`FUN_00410cbd`): finds the first slot whose score is lower, shifts the rest down, then rewrites every checksum. `FUN_00410f04` sets the name.
+- **Insert** (`FUN_00410cbd`): finds the first slot whose score is lower than or equal to the new one, so a tie ranks above the older entry; shifts the rest down, then rewrites every checksum. If no slot qualifies, nothing is stored. `FUN_00410f04` sets the name. Qualification and the stored value: `ai-and-rules.md` §8.5.
 - **Shipped file:** record 0 is "None" with score 1 and checksum 1.74625 = c(1); the trailer is equal to it [C, checked against the shipped file].
 
 ### 7.2 `boite.btt`: options [C, `FUN_00411061`, `FUN_004110b3`, `FUN_00411105`]
@@ -440,6 +337,8 @@ Both files are opened relative to the working directory: read with "rb" (`FUN_00
 
 ### 8.2 Slot → event map
 
+Slots are decimal here. Other documents and the code show some of them in hex, for example slot 54 is 0x36.
+
 | Slot | File | Event (function) |
 |---|---|---|
 | 0 | i_melody | menu intro / ambience (`FUN_0041d3cc`, `FUN_0041e598`) [C call, I meaning] |
@@ -448,7 +347,7 @@ Both files are opened relative to the working directory: read with "rb" (`FUN_00
 | 3 | i_ha | menu selection (`FUN_0041be05`) [C] |
 | 4 | i_fucking_pig | menu pig animation (`FUN_0041e598`) [C] |
 | 5 | i_kickpig | menu pig kicked (`FUN_0041e63c`) [C] |
-| 6 | z_boom | menu (`FUN_0041d3cc`, `FUN_0041eb60`); friendly-boot stomp (`FUN_0043b370`) [C] |
+| 6 | z_boom | menu (`FUN_0041d3cc`, `FUN_0041eb60`); table-object landing impact (`FUN_0042dc21`, via the stored impact slot); friendly-boot stomp (`FUN_0043b370`) [C] |
 | 7 | z_Bzz | fly buzz, positional (`FUN_0040d005`); menu (`FUN_0041d3cc`) [C] |
 | 8 | g_blatte | goodies shop cockroach (`FUN_0042123c`, `FUN_00423be2`, `FUN_00423f2e`) [C] |
 | 9 | g_tapis | goodies shop conveyor (`FUN_0042123c`, `FUN_00421e6a`, `FUN_0042322f`) [C] |
@@ -457,11 +356,11 @@ Both files are opened relative to the working directory: read with "rb" (`FUN_00
 | 12 | gp_error | purchase refused (shops) [C] |
 | 13 | p_build | trap placed (`FUN_00425456`) [C] |
 | 14–21 | j_birds1, j_Birds2, j_sheep, j_dog1, j_dog2, j_cow, j_rooster, j_chicken | random ambience (`FUN_00441b3c`) [C] |
-| 22–26 | j_pas1..5 | footsteps (`FUN_0042dc21`) [I] |
+| 22–26 | j_pas1..5 | farmer footsteps (`FUN_0043c730`; `ai-and-rules.md` §1.5) [C] |
 | 27 | j_frappe_tap | swatter swing (`FUN_0043d510`, `FUN_00449203`) [C] |
 | 28 | j_ricoche_fly | fly hit, ricochet (`FUN_00437e99`) [C] |
-| 29 | j_crash_fly | fly killed (`FUN_00437e99`) [C] |
-| 30–33 | j_fvoix_gagne, _hate, _rate, _perdu | farmer voice lines (`FUN_0043c730`; 33 also `FUN_0044a9a8`) [C call, I trigger] |
+| 29 | j_crash_fly | fly killed (`FUN_00437e99`); the call sets its volume to +5000, which is out of range, so it is a volume and not a frequency (`fly-and-world.md` §3.6, §9) [C] |
+| 30–33 | j_fvoix_gagne, _hate, _rate, _perdu | farmer voice lines (`FUN_0043c730`; 33 also `FUN_0044a9a8`): 30 when the fly dies, 31 on a random timer, 32 after a long miss streak, 33 when objects are left on the table (`ai-and-rules.md` §1.5) [C] |
 | 34 | j_fvoixhaaa | swing shout, 20% chance (`FUN_0043d510`, `FUN_00449203`) [C] |
 | 35 | j_turbo | Turbo used (`FUN_00436fc1`) [C] |
 | 36 | j_super_fly | SuperFly used; high-score screen (`FUN_00419904`) [C] |
@@ -469,19 +368,19 @@ Both files are opened relative to the working directory: read with "rb" (`FUN_00
 | 39 | jpt_eclair | zapper arc (`FUN_00428b47`) [C] |
 | 40 | jpt_tuemouc | zapper hum (`FUN_00427270`) [C] |
 | 41 | j_aspi | fly grabs an object (`FUN_00433ddd`) [C] |
-| 42 | j_goovolant | flying goodie caught (`FUN_0043309b`); bonus round [C] |
+| 42 | j_goovolant | flying goodie spawned (positional, `FUN_00432684`) and caught (`FUN_0043309b`); bonus target swatted (`FUN_004472df`) [C] |
 | 43 | jpt_grillemouc | fly grilled by the zapper (`FUN_004288fe`) [C] |
 | 44 | jpv_ventilo | fan running (`FUN_00427270`) [C] |
 | 45 | jpv_chocventilo | fly hits a fan (`FUN_0042a075`, `FUN_0042754d`) [C] |
 | 46 | j_splash | fly splatter (`FUN_004397c0`, `FUN_0044a641`) [C] |
 | 47 | j_treuil | winch / lift moving (`FUN_00431931`, `FUN_0042a760`) [C] |
 | 48 | j_moucherons | Midges goodie (`FUN_00404caf`) [C] |
-| 49, 50 | b_ring | preloaded for bourse, winner and stats (`FUN_0040c9dc`, `FUN_0040cbf1`, `FUN_0040cd8b`) [C load, I event] |
-| 51 | b_iha | bonus result, fly ahead; winner; high scores [C] |
+| 49, 50 | b_ring | alternating tick sounds: bourse bar growth (`FUN_00420476`), winner count-up (`FUN_0044b431`), bonus coin collected (`FUN_004472df`); preloaded for bourse, winner and stats [C] |
+| 51 | b_iha | bonus result, fly ahead; every 50th bonus coin; winner screen when the fly won; high scores [C] |
 | 52 | b_321 | bonus countdown; game start (`FUN_004015c8`) [C] |
-| 53 | b_ihatap | bonus result, farmer ahead; winner [C] |
+| 53 | b_ihatap | bonus result, farmer ahead; every 10th bonus hit; winner screen when the farmer won [C] |
 | 54 | w_glingcup | winner trophy (`FUN_0044b431`) [C] |
-| 55–58 | w_vibrofly1/2, w_vibrofarmer1/2 | winner screen celebration (`FUN_0044b431`) [C] |
+| 55–58 | w_vibrofly1/2, w_vibrofarmer1/2 | winner screen cheers (`FUN_0044b431`): 55/56 when the farmer won, 57/58 when the fly won [C] |
 
 ## 9. Asset map
 
@@ -635,8 +534,8 @@ Blank sizes were not needed for the spec; `irc_dims.py` prints them. All table o
 | File | Used by |
 |---|---|
 | Intro.avi | intro video, DirectShow (`FUN_00408321`); format notes in `docs/formats/avi.md` |
-| casual.ttf | font registered at init (`FUN_00406653`) |
-| JOINPD__.TTF | font face "Joint by PizzaDude": dialogs and bonus round (`FUN_00446030`) |
+| casual.ttf | font registered at init (`FUN_00406653`); no screen read selects it (`screens-and-rendering.md`, Conventions) |
+| JOINPD__.TTF | font face "Joint by PizzaDude": menus, dialogs, banners, the bonus countdown and the end-screen headings. The HUD, bourse prices, stats rows and high-score rows use the system face Arial Black |
 
 ### 9.6 `bor/` (29 files) [C, `FUN_0040ae51`, `FUN_00427954`, `FUN_00429605`, loader `FUN_0042e040`]
 
@@ -671,29 +570,59 @@ The startup file check (`FUN_004101f9`) verifies the object and fan outlines [C]
 | scoot.btt, boite.btt | save files (section 7) [C] |
 | Readme_English.txt, Readme_français.txt, www.killthefly.htm | documentation and a web link; not read by the exe [I] |
 
-## 10. Not read in detail
+## 10. Coverage of earlier "not read" items
 
-These were identified but not traced to the line. A reimplementer should treat their behaviour as open:
-
-- the fly's full update, including the grab animation and the crash sub-states (`FUN_00433ddd`)
-- the lift timing (`FUN_00430e48`, `FUN_00431115`)
-- the bourse animation (`FUN_00420476`)
-- AI decision rules (`FUN_0043ea40`, `FUN_004414ea`, `FUN_00425ba2`)
-- winner-screen choreography (`FUN_0044b431`)
-- the stats page layout (`FUN_0044c17a`)
-- the flying-goodie spawn probability formula (`FUN_00432684`)
+| Item | Status |
+|---|---|
+| fly update, grab animation, crash sub-states | decoded: `fly-and-world.md` §3.5, §3.6 |
+| lift timing | decoded: `fly-and-world.md` §5.6 |
+| bourse animation | decoded: `screens-and-rendering.md` §3.3 |
+| AI decision rules | decoded: `ai-and-rules.md` §2–§4 |
+| winner-screen choreography | decoded: `screens-and-rendering.md` §5.1 |
+| stats page layout | decoded: `screens-and-rendering.md` §5.2 |
+| flying-goodie spawn probability | decoded: `fly-and-world.md` §6.2 |
+| what is still unread | the open list below |
 
 ## Open questions
 
-1. **Swatter keys:** the in-game help text names D, F, R, G, but the code polls T, F, G, H (DIK 0x14, 0x21, 0x22, 0x23). Is the text a leftover from an AZERTY or earlier layout? The reimplementation should follow the code.
-2. **Inside/outside:** data+0x2c = 1 shows "Inside" and uses the house scenery (`FUN_00405538`, `FUN_004416b1`). It is unclear whether any other value than 1 or 2 ever occurs.
-3. **Unreferenced files:** `charbon`, `g_error.wav`, `j_sifflet.wav` and the extensionless `silence` have no reference in the exe. Are they leftovers?
-4. **High-score records:** bytes +0x10..+0x27 of each `scoot.btt` record hold uninitialised stack data. Does any version read them?
-5. **Mystery-goodie odds:** the rare-type roll (3 in 100) and the exact spawn chance per check were not fully decoded (`FUN_00432684`).
-6. **AI:** its behaviour per level is unknown beyond it using the farmer's controls, shop and trap placement.
-7. **Bonus round:** is 35000 at +0xd8a0 the round length in ms, and how exactly does the balance meter handicap each side?
-8. **Farmer level item:** what is the special case two below the cap in `FUN_00422223`?
-9. **Friendly boot:** does it damage the fly or only shake the screen?
-10. **Midges:** what is their exact effect on the farmer?
-11. **Winner rule:** the higher score is assumed to win; the comparison in `FUN_0044b431` was not read.
-12. **Screenshots:** none were taken, so screen layouts come from code and asset sizes only.
+One list for all four documents. **Answered** items say where; **open** items are still unknown.
+
+| # | Question | Status |
+|---|---|---|
+| 1 | Swatter keys: the in-game help text names D, F, R, G, but the code polls T, F, G, H. | **Answered** for the port: T up, F left, G down, H right (section 3, [C]). **Open:** why the help text differs (cosmetic). |
+| 2 | Inside/outside: can data+0x2c take any value other than 1 or 2? | **Answered:** 0 before the first advance, then 1 or 2 only (`ai-and-rules.md` §9.1). |
+| 3 | Unreferenced files: `charbon`, `g_error.wav`, `j_sifflet.wav`, extensionless `silence`. | **Open:** no reference in the exe; probably leftovers. |
+| 4 | High-score records: what do bytes +0x10..+0x27 hold, and does anything read them? | **Answered:** +0x10..+0x21 hold the run's statistics written by name entry, +0x22..+0x27 are unwritten, and nothing in this exe reads them back (section 7.1). |
+| 5 | Mystery-goodie odds and the spawn chance per check. | **Answered:** `fly-and-world.md` §6.2. |
+| 6 | AI behaviour per level. | **Answered:** `ai-and-rules.md` §2–§4. |
+| 7 | Bonus round length and handicap. | **Answered:** 35000 ms; `ai-and-rules.md` §8.3. |
+| 8 | The farmer level item's special case two below the cap. | **Answered:** the price rises by increment − 1; sequence 200/400/600/800/999 (`ai-and-rules.md` §7.2). |
+| 9 | Does the boot damage the fly? | **Answered:** it can kill (`fly-and-world.md` §7.3). |
+| 10 | Exact effect of midges on the farmer. | **Answered:** `ai-and-rules.md` §6.3, `fly-and-world.md` §8.2. |
+| 11 | Winner rule. | **Answered:** the fly wins ties (`ai-and-rules.md` §8.4). |
+| 12 | Screenshots and Wine capture: no screen was captured, so every layout is [C] or [I], never [O]. | **Open:** blocked on a from-source Wine build; recipe in the RE tooling's WINE.md. Check positions side by side, especially centred-text formulas (they assume char width = size / 2). |
+| 13 | Stack push (`FUN_0042e28a`): exact formula for how a push spreads through a stack (summed weights, square root). | **Open.** |
+| 14 | Camera accumulation and the world width W. | **Answered:** `screens-and-rendering.md` §4.2 for the per-layer accumulation; W = 4000 from the asset widths (section 9.3). |
+| 15 | The swatter flag that gates the farmer's flying-goodie catch. | **Answered:** the swatter must be in its hit window (swing frame 3 or later) and not blocked (`fly-and-world.md` §6.3). |
+| 16 | Splat particle lifetimes (`FUN_00439c2b`): how long a splat lasts before the kill and respawn. | **Open:** the kill and respawn fire when the last particle ends; each particle's lifetime was not read. |
+| 17 | Whether the "contained span" y quirk in the outline test (`FUN_0042f6de`) ever changes a result. | **Open.** |
+| 18 | The per-delivery price statistic. | **Answered:** price total += trunc(price) per delivery; average = total ÷ delivered (`ai-and-rules.md` §7.5, §8.7). |
+| 19 | Do exact replays need the wall-clock reseeding reproduced? | **Answered:** the port needs the same distributions only (`ai-and-rules.md` §0). A deterministic mode is a project decision, not an RE gap. |
+| 20 | AI controller: exact reference points for `dy` (`FUN_0043b756`, `FUN_0043bbfe`) and the x-direction "hold" encoding during the reaction delay. | **Open.** |
+| 21 | Do the AI goodie budgets reset each period? | **Answered [I]:** the AI is created with the in-game object (`FUN_0043ee0b` step 6), which is built for every period (section 2.2), so they restart (`ai-and-rules.md` §2.6). |
+| 22 | Flying-goodie types: the value of N and the farmer type mapping. | **Answered:** N = 3, kinds 3–5; Turbo, SuperFly, Midges for the fly and Triple, Nuclear, Boot for the farmer (`fly-and-world.md` §6.2, §6.3). |
+| 23 | Which libc function is `FUN_00450734`? | **Answered:** `sin` (its error handler carries the name "sin"). It shapes the boot hover and the bonus coin entry (`fly-and-world.md` §7.2, `ai-and-rules.md` §8.3). |
+| 24 | Boot horizontal speed expression, and whether a boot crush counts as a kill. | **Answered:** `fly-and-world.md` §7.2 (speed) and §7.3 (kill recorded when the splat particles end). |
+| 25 | Midge–swatter contact box (`FUN_00442e51`). | **Answered:** an axis-aligned overlap of the midge's top-left, grown by its size, with the swatter's box (`ai-and-rules.md` §6.3). |
+| 26 | Trap type 4 (flypaper variant): how a human places it. | **Open.** |
+| 27 | Meaning of the 0.152 trap and winch x scale. | **Answered [I]:** the trap shop's 0..760 x range maps onto the object layer's 0..5000 units (`ai-and-rules.md` §4.3). |
+| 28 | AI+0x08, the flag that zeroes AI damage output. | **Open.** |
+| 29 | Conveyor double press: can a second purchase press during the animation exceed a cap? The owned count lags the press. | **Open.** |
+| 30 | Bonus round: displayed intro sequence (the counter shows 3..0) and the screen layout and animation (`FUN_004452a1`, `FUN_00446993`, `FUN_00446030`). | **Open:** the rules are in `ai-and-rules.md` §8.3; the layout is not read (`screens-and-rendering.md` §6). |
+| 31 | Measured tick rate. | **Open:** 65 Hz comes from the timer rate constant and was not measured. |
+| 32 | Goodies shop render details: counter text positions, the purchase sequence (belt, machine, cockroach), the side-switch animation (`FUN_0042322f`, `FUN_00422571`, `FUN_00423be2`). | **Open.** |
+| 33 | Traps shop render: icon positions, font face, whether the backdrop slides in from y −600. | **Open.** |
+| 34 | Farewell animation timing and choreography (`FUN_00449fae`, `FUN_0044a641`). Referred to elsewhere as "Farewell timing". | **Open.** |
+| 35 | Colours not checked: the `color_shade` cell colours (cell 1 is assumed black) and the 1P keys-page fill. | **Open.** |
+| 36 | Bourse: meaning of the class mask values (1/2/4 combinations at `0x4672e8`) beyond "object in play this scene". | **Open.** |
+| 37 | Do zapper arcs really kill midges (`FUN_004278f3`)? | **Open [I]:** the arc test runs per midge and puts it into its dying state (`fly-and-world.md` §8.2). |

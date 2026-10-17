@@ -1,6 +1,6 @@
 # The Fly 1.2: farmer, AI, traps, goodies, economy and match rules
 
-Phase 1c clean-room description, written for the Rust engine workers. It extends `game-spec.md`, and where the two disagree this file wins. That file covers the state machine, assets, rendering and the fly. This file covers the farmer and swatter, both AIs, shops, traps, goodies, scoring and progression, at the level of exact rules and numbers.
+Phase 1c clean-room description, written for the Rust engine workers. `game-spec.md` is the index (state machine, input, assets, audio map, save files, open list); `fly-and-world.md` owns the fly, world physics, trap effects, flying goodies, the boot and midge behaviour; `screens-and-rendering.md` owns the look. This file owns the farmer and swatter, both AIs, shopping, trap placement, prices, scoring, the bonus round and progression, at the level of exact rules and numbers.
 
 Tags: **[C]** means read directly from code (the cited function). **[I]** means inferred: a name, a purpose, or a value derived without reading every path. Addresses are virtual addresses in `thefly.exe`. Offsets such as "data+0x7c" are byte offsets into the shared game-data object (the one `game-spec.md` calls data), "game+…" into the in-game scene object, "farmer+…" into the farmer object.
 
@@ -10,7 +10,7 @@ Tags: **[C]** means read directly from code (the cited function). **[I]** means 
 
 | Item | Rule |
 |---|---|
-| Tick | 65 Hz. One update per tick. `dt` is measured wall-clock seconds (see game-spec §3) [C] |
+| Tick | 65 Hz. One update per tick. `dt` is measured wall-clock seconds (`game-spec.md` §5.1) [C] |
 | Truncation | every float→int conversion truncates toward zero (x87 `ftol` semantics). Written `trunc(·)` below [C] |
 | Modulus | `a % b` is C remainder: the result has the sign of `a`. `rand` is never negative, so `rand % b` with a negative `b` equals `rand % |b|`. Division by zero is not guarded anywhere it is noted [C] |
 | RNG | `rand()` is the MSVC LCG: `seed = seed·214013 + 2531011 (mod 2³²)`, returns `(seed >> 16) & 0x7fff` (0..32767) [C, `FUN_0044f260`]. `srand(time(NULL))` runs in several constructors (`FUN_00416eb0`, `FUN_0042ac27`, `FUN_0042bdf8`, `FUN_00430e48`, `FUN_00436df6`) [C], so the original is not replayable. The port only needs the same distributions; it does not need the same RNG call order |
@@ -59,7 +59,7 @@ The AI calls the same routine with its own four key flags (§2.4 step 11) [C].
 
 ### 1.3 Swing state machine, per tick [C, `FUN_0043d1a0`, `FUN_0043d510`]
 
-State: `frame` (0..4), `swinging`, `retracting`, `cooldown` (ticks), `active` (hit active this tick), `blocked` (set by the farmer's mystery "cannot hit", game-spec §4.11), `triple`, `nuclear`, and `missStreak` (ticks with no hit).
+State: `frame` (0..4), `swinging`, `retracting`, `cooldown` (ticks), `active` (hit active this tick), `blocked` (set by the farmer's mystery "cannot hit", `fly-and-world.md` §6.3), `triple`, `nuclear`, and `missStreak` (ticks with no hit).
 
 Edge input: for a human, the swing key counts only on a press edge: the current value is ≥ 1 and the previous stored value (game+0x407cc) was < 0 [C]. Using a farmer goodie sets that stored value to 10, so the key must be released before the next swing [C, `FUN_004043c1`]. The AI passes its swing request in directly as the edge [C, `FUN_0043f611`].
 
@@ -390,7 +390,12 @@ Steps:
 | 3 | zapper (tue_mouche) | 4 | 2 | 97 | 0 |
 | 4 | flypaper variant (colle_mouche2) | – | 7 | 8 | 0 |
 
-The caps are at data+0x298..0x2a0. Type 4 is not placed by the AI. How a human gets one was not traced [I]. The trap effects are as in game-spec §4.6.
+The caps are at data+0x298..0x2a0 [C]. Type 4 is not placed by the AI. How a human gets one was not traced [I].
+
+Storage and side effects [C, `FUN_00425456`, `FUN_00427270`]:
+- Placements go into up to 15 slots at data+0x2a2. Placing one plays slot 13 (p_build).
+- The manager (game+0x3ffb0) keeps flypapers in `DAT_0046c948` (up to 7), fans in `DAT_00470478` (up to 5) and zappers in `DAT_00494f80` (up to 2).
+- What each trap does to the fly and to midges is in `fly-and-world.md` §7.4 and §8.2.
 
 ### 4.2 Lifetime [C]
 
@@ -446,7 +451,7 @@ Human-shop affordability [C, `FUN_00424db1`]:
 
 ---
 
-## 5. Farmer goodies (corrections to game-spec §4.8) [C, `FUN_004043c1`]
+## 5. Farmer goodies [C, `FUN_004043c1`]
 
 - **Selector:**
   - A press edge of the goodie key steps the selector 0 → 1 → 2 → 3 → 0.
@@ -460,52 +465,17 @@ Human-shop affordability [C, `FUN_00424db1`]:
 
 ## 6. Other goodie and hazard rules
 
-### 6.1 Friendly boot [C, `FUN_0043aabe`, `FUN_0043abc7`, `FUN_0043b157`, `FUN_0043734c`, `FUN_004397c0`; motion curve I]
+### 6.1 Friendly boot
 
-1. **Spawn:**
-   - x = `rand % (W − 900) + 810`, where W is the scene width, 4000 [I].
-   - y = 100 − bootHeight, mostly off the top of the screen.
-   - The boot starts in follow mode with stomp counter 0. Its re-target timer is armed at 1000 ms.
-2. **Follow:**
-   - Every 1500 + rand % 1000 ms it re-rolls a horizontal offset `rand % (bootW + 100 + flyW)`.
-   - Its target is `flyX − (bootW + 50) + offset`, taken around the ring.
-   - Horizontal speed toward the target comes from a truncated float expression [I]. Vertically it bobs on a curve of x/10 [I].
-   - At random it holds still for 500–999 ms: entered when `rand % 100 > 97`, left early when `rand % 100 ≥ 91`.
-3. **Stomp:**
-   - When the horizontal distance is < 11 px, it stops.
-   - With `rand % 100 > 85` (14%), it stomps: it falls with acceleration 100.
-   - At the floor it bounces up with acceleration 150 and spawns an impact at its bottom centre. The boom (slot 6) plays [C, `FUN_0043b370`].
-   - Each impact adds 1 to the stomp counter. If the fly is dead at impact, the counter is set to 15 (16 after the increment).
-   - Once back at hover height (y < 80 − bootH), it returns to follow mode.
-4. **Leave:** when the stomp counter is > 9, it rises at 80 px/s and stops moving sideways. It counts as active while in follow mode or while any part is on screen [C, `FUN_0043b33b`].
-5. **Collision with the fly** (only while the fly is alive):
-   - The test uses the fly's box inset by 30 px on the left and 25 px on top, against the boot's box, with ring wrap.
-   - The fly is pushed out along the axis of smaller overlap, or along both on a tie, so it ends up 20 or 25 px outside the boot's edge.
-   - **If it is pushed down** (the boot is above the fly), the fly's y > 249, and the fly is not already splatted, the fly is **splatted**:
-     - Same routine as a fan overkill, kind 12.
-     - Slot 46 plays and the fly's hit count goes up by 1.
-     - The fly drops its object, and SuperFly is cancelled.
-   - The fly's y is then clamped to ≤ 600 − flyH.
-   - So the boot kills by crushing a low fly [C], and that counts as a kill through the normal death path [I].
+Authoritative detail: `fly-and-world.md` §7 (spawn, follow, stomp, retire, fly contact). The boot kills a low fly (y > 249) by pressing it from above, and leaves after 10 stomps or once it has crushed the fly. The kill is recorded when the splat particles end, through the same kill routine as any other death (§7.6).
 
-### 6.2 Flying goodies spawn [C, `FUN_00432684`]
+### 6.2 Flying goodies spawn
 
-Each side has a check timer. When it expires:
-
-1. `m = meter(side)` (§8.2). If `rand % 100 ≥ m · 100`, there is no spawn; re-arm with `trunc((1 − m) · 8000) + 8000` ms.
-2. Otherwise spawn at (rand % 800, rand % 500):
-   - With `rand % 100 < 3` it is a mystery goodie (type 15).
-   - Otherwise `type = 3 + rand % N`, with N from the goodie icon sheet's frame count (fly: half the frames − 2) [C formula; N's value is open].
-   - If the side is trailing, `t = trunc(m·100 − 50) > 0`; with `rand % 100 ≤ t·100/50`, the type is forced to 3 + rand % 2.
-   - So a trailing side gets more Turbo/SuperFly (fly) or Triple/Nuclear (farmer) [I for the farmer mapping].
-   - The flyer lives 8000 ms (fly) or 12000 ms (farmer).
-   - Re-arm with `trunc((1 − m) · 8000) + 16000` ms (fly) or `+ 20000` ms (farmer).
-
-Catch effects are as in game-spec §4.11.
+Authoritative detail: `fly-and-world.md` §6 (spawn timers, type roll, lifetime, catch). The spawn chance and re-arm times use the balance meter of §8.2.
 
 ### 6.3 Midges slow the farmer [C, `FUN_0043cd23`, called from `FUN_00404ef3`]
 
-1. Each tick, `stuck` = midges touching the swatter (`FUN_00442e51`) and `total` = midges spawned in this swarm. `r = stuck / total`, or 0 when total is 0.
+1. Each tick, `stuck` = midges touching the swatter (`FUN_00442e51`: an axis-aligned overlap between the midge's top-left, grown by the midge's size, and the swatter's box [C]) and `total` = midges spawned in this swarm. `r = stuck / total`, or 0 when total is 0.
 2. The pulse uses the farmer timer +0x120:
    - **Not slowed**, timer expired: re-arm `trunc(r · 400 + 150)` ms. If `r ≠ 0`, become slowed with `slowSpeed = trunc(maxSpeedX · (1 − r))`.
    - **Slowed**, timer expired: become unslowed and re-arm `trunc((1 − r) · 500 + 200)` ms.
@@ -514,7 +484,7 @@ Catch effects are as in game-spec §4.11.
    - Horizontal speed is capped at `slowSpeed`.
    - A swing in its forward phase is forced into retract.
 4. When the swarm is gone, both flags clear.
-5. Midges that touch a trap get ±180 px/s added to each velocity component, keeping its sign [C, `FUN_00427885`].
+5. Midges that touch a fan get ±180 px/s added to each velocity component, keeping its sign; see `fly-and-world.md` §8.2.
 
 ---
 
@@ -522,8 +492,24 @@ Catch effects are as in game-spec §4.11.
 
 ### 7.1 Prices and fluctuation [C, `FUN_0040b005`, `FUN_0040b9d8`, `FUN_0040ba40`]
 
-- Item prices, caps and increments are as in game-spec §5.6.
-- Food prices: 22 float base prices (data+0x160..). In extreme mode, a 3-entry table (80, 50, 20) is used instead.
+- Shop items, with price, cap and the price increase per purchase (`FUN_0040b005`, `FUN_00422223`, `FUN_00421e6a`). Buying beyond the cap, or without enough money, plays slot 12; a purchase plays slot 11.
+
+| Side | Item | Price | Cap | Price increase per purchase |
+|---|---|---|---|---|
+| Farmer | level / strength | 200 | 5 | +200 |
+| Farmer | trap tokens (data+0x7e) | 55 | 14 | 0 |
+| Farmer | Triple Hit | 30 | 99 | 0 |
+| Farmer | Nuclear Hit | 40 | 99 | 0 |
+| Farmer | Friendly Boot | 65 | 99 | 0 |
+| Fly | strength | 100 | 5 | +100 |
+| Fly | speed | 100 | 5 | +100 |
+| Fly | Turbo | 20 | 99 | 0 |
+| Fly | SuperFly | 55 | 99 | 0 |
+| Fly | Midges | 60 | 99 | 0 |
+
+- The farmer level item has a special case two below the cap (§7.2 step 4).
+- Trap token costs are in §4.1: flypaper 1, fan 2, zapper 4.
+- Food prices: 22 float base prices (data+0x160..); the base values are the table in `fly-and-world.md` §5.1. In extreme mode, a 3-entry table (80, 50, 20) is used instead.
 - A type is present in the current period when data+0x1c4[type] ≥ 0. It is set to 0 or −1 per period by the objects manager [C, `FUN_0042ac27`].
 
 **Fluctuate(type)**, valid only for a present type:
@@ -556,7 +542,7 @@ Catch effects are as in game-spec §4.11.
   - For each type in order: if saved ≥ 0, `value = Fluctuate(type)` (the old price), and the side earns `value × saved`.
   - Types that are present but have nothing saved are still fluctuated.
   - The total is added to fly money (data+0x92) and fly score (data+0x30).
-- **Farmer:** 42 per kill (data+0x15c) is added to money (data+0x90) and score (data+0x38). Then kills = 0.
+- **Farmer:** 42 per kill (data+0x15c is the 42; the kill count is data+0x21c) is added to money (data+0x90) and score (data+0x38). Then kills = 0.
 - **Animated tally:** it shows one type, or one kill, per conveyor cycle, and credits as each cycle completes. A key press skips to the instant result. **Both paths produce identical totals**, so the port needs one payout function plus an optional animation.
 - After the farmer's payout the AI shops (§3.2).
 
@@ -574,13 +560,21 @@ When the fly drops an object on the winch:
 
 ### 7.6 Kills [C, `FUN_0040bc5e`]
 
-1. `kills += 1` and stats kills += 1.
+1. `kills += 1` (data+0x21c) and stats kills += 1.
 2. A kill type is stored at list index `kills` (index 0 unused):
    - 3 when the fly took 1 hit.
    - 2 for 2–3 hits.
    - 1 for 4 or more.
 
 The list holds 50 entries and is not bounds-checked [C].
+
+### 7.7 Starting inventories [C, `FUN_0040b3c7`, `FUN_0040b50c`]
+
+| Setup | Fly: strength, speed, turbo, superfly, midges | Fly money, score | Farmer: level, tokens, triple, nuclear, boot | Farmer money, score |
+|---|---|---|---|---|
+| Normal | 0, 0, 5, 3, 0 | 0, 0 | 0, 0, 3, 1, 0 | 0, 0 |
+| Extreme | 4, 4, 20, 20, 0 | 0, 0 | 4, 0, 20, 15, 0 | 0, 0 |
+| Tutorial | 3, 3, 50, 50, 50 | 1000, 4200 | 3, 6, 50, 50, 50 | 400, 3000 |
 
 ---
 
@@ -615,7 +609,7 @@ The trailing side gets the value above 0.5. The meter drives the flying-goodie s
      - If `h_fly > 0.5`: `b = trunc(58·h_fly − 24)` and `rate = (b + rand % (60 − b)) / 100`.
      - Otherwise: `rate = (1 + rand % trunc(100·h_fly + 10)) / 100`.
      - The initial rate is `(1 + rand % 60)/100`.
-   - The rate times a spawn counter feeds a math-library call that shapes where the coin enters [I: likely trigonometric].
+   - The rate times a spawn counter feeds `sin` (`FUN_00450734`, the math call that also shapes the boot hover) to shape where the coin enters [C that the call is `sin`, I for its exact use].
    - The fly collects a coin on box overlap. Slot 49 or 50 plays, at 21500 + rand % 500 Hz.
 4. **Farmer targets** (10 slots): one spawns every `trunc(h_farmer · 300 + 200)` ms if a slot is free. The bonus swatter hits them on box overlap, and slot 42 plays.
 5. **Counting:** coins and hits count only while the 35-s timer has not expired. Every 50th coin plays slot 51, and every 10th hit plays slot 53.
@@ -651,11 +645,13 @@ On entering the winner screen:
 
 The displayed final scores include the top-up.
 
-### 8.5 High score [C, `FUN_0040a48a`, `FUN_0040abb0`]
+### 8.5 High score [C, `FUN_0040a48a`, `FUN_0040abb0`, `FUN_0044c73d`, `FUN_0044c061`, `FUN_0041a7ac`, `FUN_00410cbd`]
 
 - A score is recorded only with 1 player in high-score mode (`FUN_0040aac0` == 2).
-- The fly score after the top-up is inserted at the first of 10 rows whose score is ≤ the new score, so ties rank above older entries.
-- No entry is made if no such row exists.
+- **Qualification** compares the fly score after the top-up (data+0x30) with the table: it qualifies at the first of 10 rows whose score is ≤ the new score, so ties rank above older entries. If no such row exists, no name entry opens.
+- **The recorded value** is data+0x34, which the statistics object sets on exit: the fly score minus 10 × kills (the count-up on the stats page, `screens-and-rendering.md` §5.2). So the table stores a lower number than the one that qualified.
+- **Insert** (`FUN_00410cbd`) uses the same tie rule on the recorded value: the new entry goes above the first row whose score is ≤ it, the rest shift down, and a row that falls off the end is lost. If the recorded value is below all ten rows, nothing is stored even though the entry qualified [C by reading both loops].
+- File layout and checksum: `game-spec.md` §7.1.
 
 ### 8.6 Period clock [C, `FUN_0044214e`, `FUN_004421dd`, `FUN_00405ed0`]
 
@@ -715,56 +711,3 @@ A zero denominator shows 0.
 2. If a bonus round is due (§9.1), it runs.
 3. If the match is not over, the shop follows: payout, then shopping and traps.
 4. Otherwise the winner screen, the stats page and, if eligible, the high-score table follow.
-
----
-
-## Corrections to game-spec.md
-
-1. **§4.6 traps and §5.6:**
-   - Traps last one period: all slots are cleared when the traps shop opens and when the farmer leaves with 0 tokens. Unspent tokens carry over.
-   - The caps (7 flypaper, 5 fans total, 2 zappers, 7 for the flypaper variant) are [C], not [I].
-2. **§4.8:** the Triple Hit duration is not timed. It is a 3-swing burst per press, and it ends after more than 6 bursts. Triple and Nuclear cannot be activated while Nuclear is active. Nuclear auto-teleports and re-swings with no cooldown.
-3. **§4.9 midges:** the effect is decoded (§6.3): pulsed slowdown, no vertical movement, and forced retract while slowed.
-4. **§4.10 boot:** the boot does kill. Pushing a low fly (y > 249) downward splats it. Otherwise it is a solid obstacle that pushes the fly out. It leaves after 10 stomps.
-5. **§4.11 flying goodies:** the spawn probability is the balance meter, and the re-arm delay is `(1 − m)·8000 + 8000/16000/20000` ms. It is not a plain random term.
-6. **§4.12 bonus round:**
-   - The round length is 35000 ms [C].
-   - The handicap is applied through the coin pattern rate (fly) and the target spawn interval `h·300 + 200` ms (farmer).
-   - The 1P bonus round has its own AI.
-7. **§5.3 scoring:**
-   - Payout pays the **old** price, then fluctuates it.
-   - Fluctuation runs once per shop payout, for every type present that period.
-   - The winner is [C]: the farmer wins only on fly < farmer after an end-of-match top-up of unsold goods and kills.
-   - High score ties rank above older entries.
-8. **§5.5 balance meter:**
-   - Both scores are included.
-   - It returns exactly 0.5 at diff 0.
-   - The trailing side gets more than 0.5.
-9. **§5.6:**
-   - The farmer level special case gives the sequence 200/400/600/800/**999**.
-   - The owned count increments when the conveyor animation ends, not at the press.
-10. **§3 / RNG:** MSVC `rand`, reseeded with `time()` in several constructors, so the game is not replayable.
-11. **Swatter hit test:**
-    - The radius uses the fixed 130-px hit box (65 + flyW/2), not the sprite width.
-    - Damage peaks at 40 + 6·L, or 74 with Nuclear, and lands at most once per swing.
-    - Sound 29's 5000 is a volume, not a frequency.
-12. **AI (§5.4, open item 6):** decoded in §2–§4.
-13. **Statistics:**
-    - The swing counter is the stats object, not an AI counter.
-    - The period counter does not increment on the final advance.
-14. **Period end:** a period also ends early once every table object has been delivered.
-
-## Still open
-
-1. **Key order.** The human farmer's key array order (T/G/F/H → right/left/up/down) in `FUN_00407241` is not confirmed against `FUN_0043cea5`'s parameter order.
-2. **Controller details.** The exact reference points for the AI controller's `dy` (`FUN_0043b756`, `FUN_0043bbfe`). The x-direction "hold" encoding during the reaction delay.
-3. **Budget lifetime.** Whether AI goodie budgets reset each period.
-4. **Flying goodie types.** The value of N, the per-side type range (it needs the frame count of the goodie icon sheet). The exact farmer type mapping.
-5. **Math call.** Which libc function `FUN_00450734` is (it shapes the boot bob and the bonus coin entry); likely `sin` or `pow`.
-6. **Boot.** Its horizontal speed expression, and whether a boot crush increments kills through the normal death path.
-7. **Midges.** The midge–swatter contact box (`FUN_00442e51`).
-8. **Trap type 4** (flypaper variant): how a human places it.
-9. **Coordinate scale.** What the 0.152 trap/winch x scale means beyond "shop px → stored units".
-10. **AI+0x08,** the flag that zeroes AI damage output.
-11. **Conveyor double-press.** Whether a second purchase press during the conveyor animation can exceed a cap. The owned count lags the press.
-12. **Bonus intro.** Its exact displayed sequence (the counter shows 3..0 before play starts).

@@ -8,6 +8,9 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
 - **Coordinates.** Screen pixels on the 800×600 back buffer, origin at the top left, x to the right, y down. A sprite position is its top-left corner unless the text says otherwise.
 - **Colours.** Given as RGB(r,g,b). The exe stores GDI COLORREF values as 0x00BBGGRR, and they are converted here.
 - **Fonts.** "Joint" means the face "Joint by PizzaDude" (`JOINPD__.TTF`). "Arial Black" and "Arial" are system faces. All fonts are created at regular weight with antialiased quality (CreateFontA quality 2). A size is the font height in pixels.
+  - Joint is used for menus, dialogs, banners, the bonus countdown, bourse labels and the large figures and headings of the end screens (winner scores, "Stats", "Your Score").
+  - Arial Black is used for the HUD, bourse prices, stats rows, high-score rows, shop counts, the credits lines and the keys-page lines. Each screen section names the face it uses.
+  - `casual.ttf` is registered at start-up, but no screen read here selects it [C for the screens read, I for the rest].
 - **Assets.** An asset is named by its exe name and its file, using the tables in `game-spec.md` §9. For example, `i_soleil` is ac12.
 - **Frames.** A frame is "w×h, c×r", meaning frame size and columns × rows. Frames are numbered from 1 in row-major order (see §1.2).
 - **Wine.** No screen could be captured under Wine; §0 says why. Every layout claim below is therefore [C] or [I]. No claim is [O].
@@ -41,7 +44,7 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
   - These are drawn with BltFast. Flags 0x11 mean source colour key plus wait.
   - The colour key is magenta, RGB(255,0,255).
   - A failed blit with DDERR_SURFACELOST restores the surface and retries once.
-- **Alpha and scaled images go through Direct3D 7.** This corrects spec §6.1, which says the D3D use was not traced.
+- **Alpha and scaled images go through Direct3D 7.** Every fade, dust puff, tint, caption tween, HUD dimming and high-score highlight uses it.
   - `FUN_00418f34` draws one textured quad as a 4-vertex triangle strip.
   - Render state: colour-key enable on, alpha blending on, source blend SRCALPHA, destination blend INVSRCALPHA.
   - The vertex diffuse alpha is the per-draw alpha (0–255).
@@ -60,7 +63,7 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
 - With `FUN_00413ce0`, cols = sheetW / fw and rows = sheetH / fh, using integer division. Frame count = cols × rows.
 - With no cut call, the whole sheet is one frame.
 - **Frame order is row-major:** frame 1 is the top-left cell, frames go left to right, then the next row.
-- This corrects spec §6.4, which says "horizontal strips". Most sheets are one row, but `i_soleil` (4×2), `Goodies` (5×2), `i_items1` (2×4) and `blood` (3×2) are grids.
+- Most sheets are one row, but `i_soleil` (4×2), `Goodies` (5×2), `i_items1` (2×4) and `blood` (3×2) are grids. The frame cut of each sheet is given in this document (§4.6 and the screen sections); the code passes it at load time.
 
 **Animation state:**
 - Current frame, a [start, start+len) range, an animate flag, loop, ping-pong and direction (`FUN_004143c0` steps it).
@@ -76,8 +79,8 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
 
 ### 1.3 Mover (sprite + motion) [C, `FUN_00417xxx`, `FUN_004180af`]
 
-- **Velocity** is in px/s (+0x20, +0x24). `FUN_004180af(fps)` turns it into whole pixels per tick with error accumulation, so v px are covered in exactly one second of ticks.
-- **Wander mode** (`FUN_00417144`, `FUN_004174c0`): the speed is re-rolled at random intervals, using a base plus a random term.
+- **Velocity** is in px/s (+0x20, +0x24). The time-based and FPS-based integrators (`FUN_00417db6`, `FUN_004180af`) are specified in `fly-and-world.md` §4.1.
+- **Wander mode** (`FUN_00417144`, `FUN_004174c0`): specified in `fly-and-world.md` §6.2 (wander mover).
 - **Optional clamp box** (`FUN_004171bd`, enabled by `FUN_00417225`).
 - **Visibility flag** (`FUN_00418b94`).
 
@@ -125,7 +128,7 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
 
 ### 1.6 Timing notes
 
-- **Logic tick:** the state machine steps once per tick (spec §2.2, claimed 65 Hz) [C].
+- **Logic tick:** the state machine steps once per tick (`game-spec.md` §2.2 and §5.1; the 65 Hz rate is from the timer constant, not measured) [C].
 - **Wall-clock elements** (independent of fps):
   - sprite frame delays (GetTickCount)
   - mover velocities (px/s, spread over fps)
@@ -341,7 +344,7 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
 - **Count-up:**
   - On entry every bar starts at 0.
   - Every 10 ms timer edge, all unfinished bars grow by 1.
-  - While any bar is still growing, a ticking sound loops on slot 0x31 or 0x32, at 21500–21999 Hz.
+  - While any bar is still growing, a ticking sound loops on slot 49 or 50 (0x31/0x32, b_ring), at 21500–21999 Hz.
 
 **Text:**
 - **Price label:** white Arial Black 22, "<n>$", at (x − 5, baseline + 5). It is shifted left by 5 for 3-character strings and by 10 for 4 or more.
@@ -356,7 +359,7 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
 - Columns whose object belongs to the current scene set (mask table `0x4672e8`, matched against the inside/outside/extreme class) get cover frame 2 at full alpha. All others get frame 1 at alpha 150, which dims the objects not in play.
 - The in-play column with the highest price blinks, toggling every 300 ms, once its bar has finished.
 
-**Exit:** Enter → gameplay (spec §2.2).
+**Exit:** Enter → gameplay (`game-spec.md` §2.2).
 
 ---
 
@@ -377,7 +380,14 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
 
 ### 4.2 Scene and camera [C, layers `FUN_004416b1`, draw `FUN_00441baf`]
 
-- **Layer table:** four layer slots, each with an image, a y position, a parallax factor and an accumulated scroll value. Assets and y values are as in spec §6.2, confirmed.
+- **Layer table:** four layer slots, each with an image, a y position, a parallax factor and an accumulated scroll value. The scene variant is chosen by data+0x2c: 1 = inside, 2 = outside, and extreme mode uses the arena.
+
+  | Layer | Parallax | Inside (1) | Outside (2) | Extreme |
+  |---|---|---|---|---|
+  | 0 sky | 0.25 | `Paysage`, y 0 | `paysage2`, y 0 | `paysage2`, y 0 |
+  | 1 middle | 0.75 inside, 0.5 otherwise | `Jardin`, y 205 | `collines`, y 280 | `collines`, y 280 |
+  | 2 main (sets the 4000 px world width) | 1.0 | `Maison`, y 0 | `dehors`, y 230 | `arene`, y 123 |
+  | 3 table front | 1.25 | `Table`, y 525 | `table2`, y 525 | `table2`, y 525 |
 - **Scroll per frame:**
   - Each layer's accumulator gets round(cameraDelta) added.
   - The layer's source x = round(accumulator × factor).
@@ -391,14 +401,31 @@ Phase 1c output: what each screen draws, where, with which asset and font, and h
 - **Layer 1 start offset:** 50 px.
 - **Camera delta:** it comes from the game object (game+0x407c0, a double). How it follows the fly is in the fly/camera RE (another task), not here.
 
-### 4.3 Per-frame draw order
+### 4.3 Per-frame draw order [C for the order, I for the role of the unnamed effects; `FUN_00403e36`]
 
-Confirmed as spec §6.3, with these refinements [C, `FUN_00403e36`]:
-- Step 2, the "effect layer" at game+0x3fd90, is the meal tint. A `color_shade` cell scaled ×40 is drawn at a fixed alpha over the back layers only, when the tint flag is on.
-  - The cell is frame 3 or 4, chosen by meal.
-  - Alpha: inside 51 (breakfast) / 102 (dinner), outside 25 / 63 [C, values from the init].
-  - This is how "dinner" looks darker. The tint sits *behind* the front layer and the actors.
-- Steps 3 and 11 are mover sprites updated and drawn in the same call (dust and the fly-effect sheet).
+1. Back scene layers (`FUN_00441baf`).
+2. Effect layer at game+0x3fd90: the meal tint. A `color_shade` cell scaled ×40 is drawn at a fixed alpha over the back layers only, when the tint flag is on [C].
+   - The cell is frame 3 or 4, chosen by meal.
+   - Alpha: inside 51 (breakfast) / 102 (dinner), outside 25 / 63 [C, values from the init].
+   - This is how "dinner" looks darker. The tint sits *behind* the front layer and the actors.
+3. Dust (game+0x158b0): a mover sprite updated and drawn in the same call.
+4. Swatter shadow / back part (`FUN_0043d74a`).
+5. Midges (`FUN_00404ef3`).
+6. Front scene layers (second `FUN_00441baf` pass).
+7. Table objects.
+8. Boot (back).
+9. Traps (back).
+10. Table-object manager (`FUN_0042d2e3`).
+11. Effect at game+0x15740 (the fly-effect sheet, a mover sprite updated and drawn in the same call).
+12. Fly (`FUN_004388ca`).
+13. Boot (front).
+14. HUD (`FUN_00404640`: clock `horloge`, goodie panel `croix_goodies`, swatter plate).
+15. Flying goodies.
+16. Swatter (`FUN_0043db53`).
+17. Traps (front).
+18. Tutorial bubbles.
+19. Period label (`FUN_00405538`).
+20. End-of-period banner (game+0x3fe40).
 
 ### 4.4 HUD [C, `FUN_00404640`; clock `FUN_0044214e`/`FUN_004421dd`/`FUN_004422c8`]
 
@@ -472,16 +499,15 @@ Confirmed as spec §6.3, with these refinements [C, `FUN_00403e36`]:
 
 Animation rates not listed default to 50 ms per frame (§1.2). The fly, swatter, trap and object animations (frame ranges per action) belong to the entity RE and are not repeated here.
 
+The `.bor` collision outlines are not render masks. Their structure and use are in `fly-and-world.md` §4.2 and §4.3; the byte layout is in `docs/formats/bor.md`.
+
 ---
 
 ## 5. End-of-match screens
 
 ### 5.1 Winner screen (states 0x78–0x7e) [C, init `FUN_0044aedb`, choreography `FUN_0044b431`, render `FUN_0044bbbf`, skip `FUN_0044bb55`]
 
-**Winner rule:**
-- The fly wins when fly score (data+0x30) ≥ farmer score (data+0x38). **Ties go to the fly.**
-- The end-of-match bonuses (`FUN_0040bb54`, `FUN_0040bbe5`) are added to both scores first.
-- This answers spec open question 11.
+**Winner rule:** the fly wins ties; the end-of-match top-up is added to both scores first. Authoritative detail: `ai-and-rules.md` §8.4. The winner sets the trophy side, the caption position and the sounds below.
 
 **Static layout:**
 
@@ -501,8 +527,8 @@ Animation rates not listed default to 50 ms per frame (§1.2). The fly, swatter,
 |---|---|
 | 0 | 600 ms fade in, plus a 2000 ms wait |
 | 1 | Both counters count up by 10 per tick, the loser's to its score and the winner's to its score. Bar height = counter × 413 / winnerScore, so the winner's bar ends 413 px tall. A tick sound plays at 21500–21999 Hz. → state 2 when the winner's counter is full. |
-| 2 | The trophy falls (gravity mover). When its bottom passes the loser sprite, the loser sprite is hidden (crushed). When it lands (bottom at y 587), it snaps to y 587 − h. Then: a dust burst of 30 puffs at (trophyX − 20, 310) spread 480×100; sound 0x36 at volume 2000; sound 0x35 (farmer won) or 0x33 (fly won); the caption tween starts; Enter/Esc becomes active after 1500 ms. → state 3 |
-| 3 | The trophy hops around at random inside a small box over the floor (wander mode). It lands and rests 1000–5999 ms; each landing gives a smaller dust burst (alpha 140) and a thud sound. During a hop, a random cheer plays (slot 0x37/0x38 for the farmer, 0x39/0x3a for the fly, 20500–22499 Hz). |
+| 2 | The trophy falls (gravity mover). When its bottom passes the loser sprite, the loser sprite is hidden (crushed). When it lands (bottom at y 587), it snaps to y 587 − h. Then: a dust burst of 30 puffs at (trophyX − 20, 310) spread 480×100; slot 54 (0x36, w_glingcup) at volume 2000; then slot 53 (0x35, b_ihatap) if the farmer won or slot 51 (0x33, b_iha) if the fly won; the caption tween starts; Enter/Esc becomes active after 1500 ms. → state 3 |
+| 3 | The trophy hops around at random inside a small box over the floor (wander mode). It lands and rests 1000–5999 ms; each landing gives a smaller dust burst (alpha 140) and a thud sound. During a hop, a random cheer plays (slots 55 or 56, 0x37/0x38, w_vibrofly, when the farmer won; slots 57 or 58, 0x39/0x3a, w_vibrofarmer, when the fly won; 20500–22499 Hz). |
 | 4 | Enter/Esc pressed: 600 ms fade out → stats |
 
 ### 5.2 Statistics (states 0xaa–0xb0) [C, init `FUN_0044c17a`, update `FUN_0044c73d`, render `FUN_0044cab3`]
@@ -521,8 +547,8 @@ Animation rates not listed default to 50 ms per frame (§1.2). The fly, swatter,
 **Stat rows:**
 - White Arial Black 22, 23 px apart.
 - Label x 280, value x 530, written as ": <value>".
-- **Fly block:** starts at y 153. Rows: Objects saved, Average objects saved, Average price (as a percentage), Maximum life time (s), Average life time (s).
-- **Farmer block (2P only):** starts at y 363. Rows: Flies killed, Average flies killed, Swatter hits, Average damage, Ratio (%).
+- **Fly block:** starts at y 153. Rows: Objects saved (delivered), Average objects saved (delivered ÷ available × 100, shown with " %"), Average price of saved objects (price total ÷ delivered, a whole number), Maximum life time (s), Average life time (s).
+- **Farmer block (2P only):** starts at y 363. Rows: Flies killed, Average flies killed (per period, 2 decimals), Swatter hits, Average damage, Ratio (hit ratio × 100, shown with " %").
 
 **1P highscore mode** (1P and mode 2) replaces the farmer block with a score breakdown:
 - **Frame:** a white frame of 4 nested rectangles at (185,315), 450×210.
@@ -558,18 +584,18 @@ Animation rates not listed default to 50 ms per frame (§1.2). The fly, swatter,
 - For each row, a highlight bar sweeps: `highscores_color` 20×20 scaled ×15 to 300×20, at (50, rowY), with alpha 255→0 in 200 ms.
 - When the bar ends, the counter moves up one row and a burst of up to 30 `stardust` particles (20×20, 3 frames, 20–79 ms per frame) is thrown over the row area.
   - Each particle has velocity ±(30..79) px/s on both axes and fades out in 400–499 ms.
-- 90 particle slots in total. A music cue (slot 0x24) plays during the reveal.
+- 90 particle slots in total. A music cue (slot 36, 0x24, j_super_fly) plays during the reveal.
 
 **Name entry** (from stats when the score qualifies):
 - The new row shows the typed name with a "_" cursor that blinks every 200 ms.
-- Confirming saves to `scoot.btt` (spec §7.1) and plays slot 0x33.
-- A key during the reveal skips it (slot 0x26).
+- Confirming saves to `scoot.btt` (`game-spec.md` §7.1; the stored value is `ai-and-rules.md` §8.5) and plays slot 51 (0x33).
+- A key during the reveal skips it (slot 38, 0x26).
 - Enter / Esc → menu.
 
 ### 5.4 Farewell (states 0x82–0x88) [C partly, `FUN_00449de0`, `FUN_00449fae`]
 
 - Two `color_shade` layers (20×15 cells, 4×1) at (0,0), plus the `logo` (div19, 700×112) and midges (`moucheron`, 27×27) in wander mode (params 100,10,50,50,30).
-- The exact timing was not read. See "Still open".
+- The exact timing was not read (open list in `game-spec.md`, item "Farewell timing").
 
 ---
 
@@ -585,34 +611,3 @@ Not read in this pass beyond the asset cuts. Known from the cuts:
 - `boitedlg` for the tally (`FUN_00446030`)
 
 Layout is open.
-
----
-
-## Corrections to game-spec.md
-
-1. **§6.1:** Direct3D 7 *is* used. Alpha-blended, scaled textured quads (`FUN_00418f34`; SRCALPHA/INVSRCALPHA with the colour key on) draw every fade, dust puff, tint, caption tween, HUD dimming and high-score highlight.
-2. **§6.4:** Sheets are cut by frame size into a column × row grid, and frames run in row-major order. They are not always horizontal strips. Examples: `i_soleil` 4×2, `Goodies` 5×2, `i_items1` 2×4, `blood` 3×2.
-3. **§6.4 / §5.1:** Sprite frame delays are wall-clock (GetTickCount), with a default of 50 ms. They do not depend on the tick rate. Mover speeds are px/s. Only count-ups and the menu's per-tick velocity changes depend on the tick rate.
-4. **§2.2 gameplay:** Every period starts with a "3, 2, 1, Go!" countdown banner and a "<meal> Inside/Outside Day n" caption before play (`FUN_00405538`). Music starts after "Go!".
-5. **§2.2 gameplay:** Loading shows `LOADING` or `LOADING2` (random) with a stepped progress sprite, and always takes about 2.3 s because of fixed busy-waits.
-6. **§2.2 quit dialog:** The default button is NO. The screen behind it keeps animating.
-7. **§2.2 keys page:** In 1P, the left half (x 0..399) is covered by a fill before the "1 Player : The Fly" lines are drawn.
-8. **§2.2 main menu:** The first-visit intro is a 4-step scripted scroll, fly pass and pig drop (§2.2 here). The 900 ms guard only applies to skipping it.
-9. **§6.3 step 2:** The effect layer at game+0x3fd90 is the meal tint (`color_shade` cell 3 or 4 at alpha 25–102), drawn behind the front table layer.
-10. **Open question 11:** The fly wins on fly ≥ farmer, so ties go to the fly (`FUN_0044aedb`).
-11. **§6.1 fonts:** Menus, dialogs, banners, the bourse and the end screens use Joint. The HUD, bourse prices, stats rows and high scores use Arial Black. `casual.ttf` was not seen selected by any screen read here [C for the screens read, I for the rest].
-12. **§10:** The bourse animation, winner choreography and stats layout are now decoded (§3.3, §5.1, §5.2 here).
-
-## Still open
-
-- **Wine capture:** blocked on a from-source Wine build; the recipe is in `re/WINE.md`. Nothing here is [O]. Every position should be checked side by side once Wine runs, especially the centred-text formulas, which assume char width = size/2.
-- **Measured tick rate:** not measured. The 65 Hz figure stays unverified.
-- **Goodies shop:** the render details are not traced — counter text positions, the purchase sequence (belt, machine, cockroach) and the side-switch animation (`FUN_0042322f`, `FUN_00422571`, `FUN_00423be2`).
-- **Traps shop:** the render, the icon positions, the font face and whether the backdrop slides in from y −600.
-- **Bonus round:** layout and animation (`FUN_004452a1`, `FUN_00446993`, `FUN_00446030`).
-- **Farewell:** timing and choreography (`FUN_00449fae`, `FUN_0044a641`).
-- **Colours not checked:**
-  - the `color_shade` cell colours (cell 1 is assumed black; cells 3–4 are the meal tints)
-  - the 1P keys-page fill colour
-- **Camera:** how the camera delta follows the fly is left to the fly/camera RE task.
-- **Bourse:** what the class mask values (1/2/4 combinations at `0x4672e8`) mean, beyond "object in play this scene".
