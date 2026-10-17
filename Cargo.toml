@@ -14,3 +14,6 @@ opt-level = 2
 
 [profile.dev.package.sdl3-ttf-sys]
 opt-level = 2
+
+[profile.dev.package.rustysynth]
+opt-level = 3
