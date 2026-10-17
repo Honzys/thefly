@@ -17,7 +17,7 @@ use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::Mod;
 use sdl3::pixels::PixelFormat;
 use sdl3::render::{Canvas, ScaleMode};
-use sdl3::video::Window;
+use sdl3::video::{FullscreenType, Window};
 use sdl3::{EventPump, Sdl};
 
 pub use audio::{Audio, Voice};
@@ -55,7 +55,7 @@ impl Config {
         Self {
             title: title.to_owned(),
             logical_size: (800, 600),
-            tick_hz: 60,
+            tick_hz: 65,
             filter: Filter::Nearest,
             data_dir,
             soundfont: None,
@@ -129,27 +129,27 @@ impl Platform {
         let mut input = Input::default();
         let mut step = Timestep::new(self.config.tick_hz);
         let mut last = Instant::now();
-        let mut fullscreen = false;
         loop {
             for event in self.events.poll_iter() {
                 if matches!(event, Event::Quit { .. }) {
                     return Ok(());
                 }
-                if is_fullscreen_toggle(&event) {
-                    fullscreen = !fullscreen;
-                    self.canvas
-                        .window_mut()
-                        .set_fullscreen(fullscreen)
-                        .map_err(sdl)?;
+                if let Some(repeat) = fullscreen_chord(&event) {
+                    if !repeat {
+                        let window = self.canvas.window_mut();
+                        let on = window.fullscreen_state() == FullscreenType::Off;
+                        window.set_fullscreen(on).map_err(sdl)?;
+                    }
+                    continue; // the game never sees the toggle keys, repeats included
                 }
                 feed(&mut input, &event, self.canvas.window(), logical);
             }
             let now = Instant::now();
             for _ in 0..step.advance(now - last) {
+                input.begin_tick();
                 if game.update(&input, &mut self.audio).is_break() {
                     return Ok(());
                 }
-                input.end_tick();
             }
             last = now;
             self.audio.pump();
@@ -176,17 +176,19 @@ impl Platform {
     }
 }
 
-fn is_fullscreen_toggle(event: &Event) -> bool {
+/// `Some(is_key_repeat)` for F11 or Alt+Enter going down, otherwise `None`.
+fn fullscreen_chord(event: &Event) -> Option<bool> {
     let Event::KeyDown {
         scancode: Some(key),
         keymod,
-        repeat: false,
+        repeat,
         ..
     } = event
     else {
-        return false;
+        return None;
     };
-    *key == Key::F11 || (*key == Key::Return && keymod.intersects(Mod::LALTMOD | Mod::RALTMOD))
+    let alt_enter = *key == Key::Return && keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
+    (*key == Key::F11 || alt_enter).then_some(*repeat)
 }
 
 fn feed(input: &mut Input, event: &Event, window: &Window, logical: (u32, u32)) {
@@ -218,5 +220,60 @@ fn feed(input: &mut Input, event: &Event, window: &Window, logical: (u32, u32)) 
             ..
         } => input.release_all(),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_down(key: Key, keymod: Mod, repeat: bool) -> Event {
+        Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: None,
+            scancode: Some(key),
+            keymod,
+            repeat,
+            which: 0,
+            raw: 0,
+        }
+    }
+
+    #[test]
+    fn f11_and_alt_enter_are_fullscreen_chords_including_repeats() {
+        assert_eq!(
+            fullscreen_chord(&key_down(Key::F11, Mod::empty(), false)),
+            Some(false)
+        );
+        assert_eq!(
+            fullscreen_chord(&key_down(Key::F11, Mod::empty(), true)),
+            Some(true)
+        );
+        assert_eq!(
+            fullscreen_chord(&key_down(Key::Return, Mod::LALTMOD, false)),
+            Some(false)
+        );
+        assert_eq!(
+            fullscreen_chord(&key_down(Key::Return, Mod::RALTMOD, true)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn plain_enter_and_other_keys_are_not_chords() {
+        assert_eq!(
+            fullscreen_chord(&key_down(Key::Return, Mod::empty(), false)),
+            None
+        );
+        assert_eq!(
+            fullscreen_chord(&key_down(Key::Space, Mod::LALTMOD, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn default_tick_rate_is_the_originals_65_hz() {
+        assert_eq!(Config::new("t", PathBuf::new()).tick_hz, 65);
     }
 }
