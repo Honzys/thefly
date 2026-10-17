@@ -13,7 +13,7 @@ Owns: `crates/thefly-platform/` (library) and `crates/thefly/` (the game binary,
   - Scale filter is selectable: nearest, or linear for the "better graphics" mode.
   - Fullscreen toggle on Alt+Enter and F11. Vsync on.
 - **Game loop.**
-  - Fixed-timestep simulation at a configurable tick rate, defaulting to 60 Hz until the spec gives the original rate.
+  - Fixed-timestep simulation at a configurable tick rate, defaulting to 65 Hz, the original's rate (`docs/re/game-spec.md` §5.1).
   - Rendering is decoupled and uncapped with vsync, and receives an interpolation alpha.
   - The loop caps catch-up ticks per frame (8 max) so it never spirals.
 - **Assets.**
