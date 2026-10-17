@@ -44,17 +44,17 @@ pub fn parse(bytes: &[u8]) -> Result<Bor, Error> {
     if bytes.len() % 2 != 0 {
         return Err(Error::Invalid("odd byte length"));
     }
-    let mut rows = vec![Vec::new()];
+    let mut rows = Vec::new();
+    let mut cur = Vec::new();
     for pair in bytes.chunks_exact(2) {
         let v = u16::from_le_bytes([pair[0], pair[1]]);
-        match (v == TERMINATOR, rows.last_mut()) {
-            (true, _) => rows.push(Vec::new()),
-            (false, Some(row)) => row.push(v),
-            (false, None) => return Err(Error::Invalid("no open row")),
+        if v == TERMINATOR {
+            rows.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(v);
         }
     }
-    let tail = rows.pop();
-    if tail.is_none_or(|t| !t.is_empty()) {
+    if !cur.is_empty() {
         return Err(Error::Invalid("data after last row terminator"));
     }
     if rows.len() != ROWS {

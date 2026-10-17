@@ -102,6 +102,9 @@ pub fn parse(bytes: &[u8]) -> Result<Irc, Error> {
         }
     }
 
+    if data_off < 54 + 4 * palette.len() {
+        return Err(Error::Invalid("pixel data overlaps headers"));
+    }
     let stride = (width * usize::from(bpp)).div_ceil(32) * 4;
     let pixels = bmp
         .get(data_off..)
@@ -272,6 +275,16 @@ mod tests {
             parse(&build(i32::MAX, 1, 8, &[MAGENTA], &[0; 4])),
             Err(Error::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn rejects_oversized_palette_and_overlapping_pixel_data() {
+        let mut f = build(1, 1, 8, &[MAGENTA], &[0; 4]);
+        f[16 + 46..16 + 50].copy_from_slice(&257u32.to_le_bytes());
+        assert!(matches!(parse(&f), Err(Error::Invalid(_))));
+        let mut f = build(1, 1, 8, &[MAGENTA], &[0; 4]);
+        f[16 + 10..16 + 14].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(parse(&f), Err(Error::Invalid(_))));
     }
 
     #[test]
