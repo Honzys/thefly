@@ -1729,6 +1729,25 @@ mod tests {
         assert!(!fly.respawn_timer.expired(CRASH_MS + RESPAWN_DELAY_MS - 1));
     }
 
+    /// Acceptance W1 5: with an object covering the whole table every re-roll fails, so the
+    /// placement draws exactly its cap (one R(800 − w) per try) and the fly appears anyway.
+    #[test]
+    fn respawn_placement_stops_after_its_try_cap() {
+        use crate::world::objects::{NORMAL_TYPES, Object};
+        for tries in [RESPAWN_TRIES, RESPAWN_TRIES_PERIOD_START] {
+            let mut b = Bench::new(1);
+            let (_, mut w) = world(&mut b);
+            let mut wall = Object::of_type(0, &NORMAL_TYPES[0], Size { w: 4990, h: 600 });
+            wall.y = 0;
+            w.objects.list.push(wall);
+            b.with(|cx| w.fly.request_respawn(cx));
+            let before = b.draws_since(1, 0);
+            b.with(|cx| w.place_fly(tries, cx));
+            assert_eq!(b.draws_since(1, before), tries);
+            assert!(w.fly.appearing && !w.fly.respawn_request);
+        }
+    }
+
     #[test]
     fn the_respawn_timer_records_the_kill_and_requests_a_respawn() {
         let mut b = Bench::new(1);
