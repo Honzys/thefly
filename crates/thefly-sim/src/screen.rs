@@ -212,7 +212,7 @@ impl Gameplay {
             GamePhase::Loading { step, next } => self.load_step(step, next, cx),
             GamePhase::Banner { count, mut next } => {
                 // answers.md "Banner": the whole update runs, paused (`World::paused`) and with
-                // every key released, so the fly appears (slot 38, survival timer) by "2".
+                // every key released; the fly is already alive from the load's reset(0).
                 self.world.tick(&KeyState::NONE, m, cx);
                 if next.expired_rearm(cx.now) {
                     self.banner_step(count - 1, next, m, cx);
@@ -270,9 +270,12 @@ impl Gameplay {
         self.phase = GamePhase::Playing;
     }
 
-    /// ai-and-rules §9.2: the flag set by the previous world tick is acted on here.
+    /// ai-and-rules §9.2: the flag set by the previous world tick is acted on here. The period
+    /// end adds the fly's life in progress (answers.md "Fly survival stat: the period end also
+    /// stops it").
     fn play(&mut self, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
         if self.world.period_over {
+            self.world.fly.stop_survival(m, cx.now);
             cx.emit(Event::Music(Music::Stop));
             return MatchFlow::Next(after_period(m, cx));
         }
@@ -621,25 +624,26 @@ mod tests {
         assert_eq!(ended, [33]);
     }
 
-    /// gaps §2.3: the appear tween is render-driven and a Wine capture shows the fly drawn under
-    /// the banner, so a period-start fly has finished appearing by "2" (33 ticks after "3").
+    /// answers.md "Fly reset(0) and SuperFly sparkles": the period start's reset(0) makes the fly
+    /// alive at the load (slot 38 and the survival start), so it is drawn under the whole banner
+    /// (gaps §2.3's Wine capture) and plays slot 38 once.
     #[test]
-    fn the_period_start_fly_has_appeared_by_the_second_banner_digit() {
+    fn the_period_start_fly_is_alive_through_the_banner() {
         let mut rig = Rig::new(1);
         let mut m = two_player(&mut rig);
         let world = rig.cx(|cx| World::new(&mut m, cx));
-        assert!(world.fly.appearing);
+        assert!(world.fly.alive());
         let mut g = Gameplay::loading(world, false, rig.now());
-        let at_two = |g: &Gameplay| matches!(g.phase, GamePhase::Banner { count: 2, .. });
         for _ in 0..TICK_CAP {
-            if at_two(&g) {
+            if g.phase == GamePhase::Playing {
                 break;
             }
             rig.step(&[], |k, cx| g.tick(k, &mut m, cx));
+            assert!(g.world.fly.alive());
         }
-        assert!(at_two(&g));
-        assert!(!g.world.fly.appearing);
-        assert!(rig.events.contains(&Event::play(SoundSlot::GOODIE_FLY)));
+        assert_eq!(g.phase, GamePhase::Playing);
+        let slot_38 = Event::play(SoundSlot::GOODIE_FLY);
+        assert_eq!(rig.events.iter().filter(|e| **e == slot_38).count(), 1);
     }
 
     /// Ticks with no keys until the banner is up.
@@ -800,6 +804,29 @@ mod tests {
         rig.step(&[], |k, cx| im.tick(k, &table, cx));
         assert!(matches!(im.screen, MatchScreen::GoodiesShop(_)));
         assert!(rig.events.contains(&Event::Music(Music::Stop)));
+    }
+
+    /// answers.md "Fly survival stat: the period end also stops it": a fly that never died
+    /// still counts its life, so the stats page's maximum is not 0 s.
+    #[test]
+    fn the_period_end_counts_the_life_of_a_fly_that_never_died() {
+        let mut rig = Rig::new(1);
+        let m = two_player(&mut rig);
+        let mut g = rig.cx(|cx| Gameplay::loading(World::bare(&m, cx), false, cx.now));
+        g.phase = GamePhase::Playing;
+        g.world.period_over = true;
+        let mut im = InMatch {
+            m,
+            screen: MatchScreen::Gameplay(Box::new(g)),
+        };
+        for _ in 0..100 {
+            rig.step(&[], |_, _| ());
+        }
+        let now = rig.now();
+        let table = HighScoreTable::default();
+        rig.step(&[], |k, cx| im.tick(k, &table, cx));
+        assert_eq!(im.m.stats.survival_max_ms, now);
+        assert!(im.m.stats.page().max_survival_s > 0.0);
     }
 
     #[test]

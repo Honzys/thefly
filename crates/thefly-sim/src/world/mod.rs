@@ -142,7 +142,7 @@ impl World {
         let meal = m.progress.meal.unwrap_or(Meal::Breakfast);
         world.objects = objects::Objects::place(m, meal, &world.traps, cx);
         world.fly.request_respawn(cx);
-        world.place_fly(fly::RESPAWN_TRIES_PERIOD_START, cx);
+        world.place_fly(fly::RESPAWN_TRIES_PERIOD_START, false, cx);
         if m.config.players == Players::One {
             let f = &world.fly;
             let view = ai::AiView {
@@ -266,11 +266,12 @@ mod tests {
     }
 
     /// A 2P period at seed 1: placement and the fly's period-start respawn, with the fly clear
-    /// of every object and appearing.
+    /// of every object and alive at once through reset(0) (answers.md "Fly reset(0) and
+    /// SuperFly sparkles"): sound 38 and the survival stat start at the load.
     #[test]
     fn a_new_period_places_objects_and_respawns_the_fly_clear_of_them() {
         let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
-        let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
+        let mut cx = Ctx::new(300, &mut rng, &data, &mut events);
         let mut m = MatchState::new(two_player(), false, &mut cx);
         m.advance(&mut cx);
         let world = World::new(&mut m, &mut cx);
@@ -278,7 +279,11 @@ mod tests {
         assert!(placed > 0 && placed <= objects::MAX_PLACED);
         assert_eq!(m.stats.available, placed as i32);
         assert!(!world.objects.box_hit(&world.fly.inner_box()));
-        assert!(world.fly.appearing && world.ai.is_none());
+        assert!(world.fly.alive() && world.ai.is_none());
+        assert_eq!(world.fly.life_started_ms, Some(300));
+        assert!(events.contains(&crate::event::Event::play(
+            crate::event::SoundSlot::GOODIE_FLY
+        )));
     }
 
     #[test]

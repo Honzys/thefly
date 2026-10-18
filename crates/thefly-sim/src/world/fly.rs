@@ -16,6 +16,19 @@ pub const TURBO_MS: u64 = 1500;
 /// Turbo from a mystery catch; cut at [`super::goodies::MYSTERY_MS`] by step 15.
 pub const MYSTERY_TURBO_MS: u64 = 25_000;
 pub const SUPERFLY_MS: u64 = 8000;
+/// SuperFly's sparkle timer (+0x9a50) and the sparkles per firing and at the start.
+const SUPERFLY_SPARKLE_MS: u64 = 40;
+const SUPERFLY_SPARKLES: u32 = 5;
+/// reset(0)'s forced burst, `FUN_00439450(0, 45)`.
+const RESET_SPARKLES: u32 = 45;
+/// The sparkle store's slots.
+const SPARKLE_SLOTS: u32 = 90;
+/// A sparkle's rolls: delay R(60) + 20 (drawn only), position inside the fly less 20 px, speed
+/// R(160) per axis, each with an R(10) sign roll.
+const SPARKLE_DELAY_ROLL: i32 = 60;
+const SPARKLE_SIGN_ROLL: i32 = 10;
+const SPARKLE_INSET: i32 = 20;
+const SPARKLE_SPEED_ROLL: i32 = 160;
 /// Dying: crash animation done → this timer → kill recorded and respawn requested (§3.6 D).
 pub const RESPAWN_DELAY_MS: u64 = 1500;
 /// Respawn placement re-rolls (§3.7); [`RESPAWN_TRIES_PERIOD_START`] at period start.
@@ -42,12 +55,24 @@ pub const SPLAT_PIECES: usize = 11;
 pub const ZAPPER_EXTRA_BLOOD: usize = 40;
 /// DirectSound volume passed for slot 29 before the crash plays; out of range (FW §9).
 const CRASH_VOLUME: i32 = 5000;
-/// The buzz helper's random frequency part, R(1000) (game-spec §4.2 "Buzz").
+/// `FUN_0040d005(x, vx, vy, w, −700)` (answers.md "Fly buzz: pitch, pan and volume"): frequency
+/// 10000 + R(1000) + vy × 1500 / 700 + |vx| × 2500 / 700; a pan of ±2000 at the screen edges;
+/// volume −700 less the px off screen.
+const BUZZ_FREQ_BASE: i32 = 10_000;
 const BUZZ_FREQ_ROLL: i32 = 1000;
+const BUZZ_VY_HZ: i32 = 1500;
+const BUZZ_VX_HZ: i32 = 2500;
+const BUZZ_SPEED_DIV: i32 = 700;
+const BUZZ_VOLUME_CB: i32 = -700;
+const BUZZ_PAN_CB: f64 = 2000.0;
+/// The pan's centre, half the 800 px screen.
+const BUZZ_PAN_MID: i32 = SCREEN_W / 2;
 /// The hit frame the stun turns around at (§3.6 B).
 const HIT_FRAME_TOP: i32 = 3;
 /// Grab and heading strips: frames 0..=9, the loop runs 4..=9 (§3.5).
 const TURN_IN_END: i32 = 4;
+/// A steady heading facing the opposite key turns out from this frame.
+const TURN_OUT_FRAME: i32 = 3;
 const LOOP_LAST: i32 = 9;
 /// Frames of the FACE idle cycle.
 const FACE_FRAMES: i32 = 10;
@@ -147,6 +172,7 @@ pub struct Fly {
     pub turbo: Turbo,
     pub superfly: bool,
     pub superfly_timer: Timer,
+    pub superfly_sparkle_timer: Timer,
     /// 0.2 × strength level, a float.
     pub strength_f: f32,
     pub dying: bool,
@@ -165,8 +191,11 @@ pub struct Fly {
     pub hit_dir: (KickDir, KickDir),
     /// Heading saved at the hit, restored when the stun ends.
     pub saved_heading: Heading,
-    /// fly+0x314, set when a stun ends or by fan damage at or below the death total.
+    /// fly+0x314, set when a stun ends or by fan or arc damage at or below the death total; the
+    /// render counts the hit and clears it.
     pub post_stun: bool,
+    /// fly+0x2c8: the effective damage of the latest hit, which the render adds to the stats.
+    pub stat_damage: i32,
     pub ricochet: i32,
     pub kick_x: i32,
     pub kick_y: i32,
@@ -177,8 +206,8 @@ pub struct Fly {
     pub grab_frame: i32,
     pub grab_turn: Turn,
     pub grab_counter: i32,
+    /// The direction flags E, W, N, S and FACE (+0x1ec..+0x1fc) as one heading.
     pub heading: Heading,
-    pub heading_target: Heading,
     pub heading_frame: i32,
     pub heading_turn: Turn,
     pub drop_pop: bool,
@@ -219,6 +248,7 @@ impl Fly {
             turbo: Turbo::default(),
             superfly: false,
             superfly_timer: Timer::UNARMED,
+            superfly_sparkle_timer: Timer::UNARMED,
             strength_f: strength as f32 * 0.2,
             dying: false,
             stunned: false,
@@ -232,6 +262,7 @@ impl Fly {
             hit_dir: (KickDir::Minus, KickDir::Minus),
             saved_heading: Heading::Face,
             post_stun: false,
+            stat_damage: 0,
             ricochet: 0,
             kick_x: 0,
             kick_y: 0,
@@ -243,7 +274,6 @@ impl Fly {
             grab_turn: Turn::In,
             grab_counter: 0,
             heading: Heading::Face,
-            heading_target: Heading::Face,
             heading_frame: 0,
             heading_turn: Turn::In,
             drop_pop: false,
@@ -323,11 +353,38 @@ impl Fly {
         self.turbo = Turbo::default();
     }
 
-    /// `FUN_0043728f`: 8000 ms, looping slot 36.
+    /// `FUN_0043728f`: 5 sparkles, looping slot 36, 8000 ms and the 40 ms sparkle timer
+    /// (answers.md "Fly reset(0) and SuperFly sparkles").
     pub fn start_superfly(&mut self, cx: &mut Ctx) {
+        self.sparkles(SUPERFLY_SPARKLES, cx);
         self.superfly = true;
         self.superfly_timer.arm(cx.now, SUPERFLY_MS);
+        self.superfly_sparkle_timer.arm(cx.now, SUPERFLY_SPARKLE_MS);
         cx.sound(SoundSlot::SUPERFLY, SoundOp::Loop(PlayParams::default()));
+    }
+
+    /// `FUN_00437302`: 5 sparkles per firing of the 40 ms timer while SuperFly lasts.
+    fn superfly_sparkle(&mut self, cx: &mut Ctx) {
+        if self.superfly && self.superfly_sparkle_timer.expired_rearm(cx.now) {
+            self.sparkles(SUPERFLY_SPARKLES, cx);
+        }
+    }
+
+    /// `FUN_00439450`: each sparkle's 7 draws.
+    ///
+    /// shortcut: the sparkles are presentation and the event API has no sparkle effect, so the
+    /// rolls are drawn for the stream and dropped; the 90-slot cap is taken as never full (the
+    /// sparkle lifetime is undocumented). Revisit when an `Effect::Sparkles` lands.
+    fn sparkles(&self, count: u32, cx: &mut Ctx) {
+        for _ in 0..count.min(SPARKLE_SLOTS) {
+            cx.rng.r(SPARKLE_DELAY_ROLL);
+            cx.rng.r(SPARKLE_SIGN_ROLL);
+            cx.rng.r(self.size.w - SPARKLE_INSET);
+            cx.rng.r(self.size.h - SPARKLE_INSET);
+            cx.rng.r(SPARKLE_SPEED_ROLL);
+            cx.rng.r(SPARKLE_SIGN_ROLL);
+            cx.rng.r(SPARKLE_SPEED_ROLL);
+        }
     }
 
     fn end_superfly(&mut self, cx: &mut Ctx) {
@@ -448,6 +505,7 @@ impl Fly {
     /// fly's state; the arc's gate is not re-tested after a same-tick grill.
     pub fn add_raw_damage(&mut self, damage: i32, source: RawDamage, cx: &mut Ctx) {
         self.damage_total += damage;
+        self.stat_damage = damage;
         if self.damage_total <= DEATH_TOTAL {
             self.post_stun = true;
             return;
@@ -496,11 +554,9 @@ impl Fly {
     }
 
     /// `FUN_00438643(appear)`: clear hit, stun, damage, splat, grab, carrying, Turbo, SuperFly, and
-    /// the crash and respawn timers (a fan can splat a dying fly).
-    ///
-    /// shortcut: §3.7.3 says argument 0 is "alive immediately" without saying whether
-    /// `FUN_004387d5` runs; it clears the dying and appearing state silently. Revisit if a caller
-    /// with 0 turns up that needs sound 38 or the survival timer.
+    /// the crash and respawn timers (a fan can splat a dying fly). Argument 0 is the period start:
+    /// `FUN_004387d5` (sound 38, survival started), then a forced 45-sparkle burst (answers.md
+    /// "Fly reset(0) and SuperFly sparkles").
     pub fn reset(&mut self, appear: bool, cx: &mut Ctx) {
         self.hit_in_progress = false;
         self.crash_timer.disarm();
@@ -516,27 +572,45 @@ impl Fly {
         if self.superfly {
             self.end_superfly(cx);
         }
+        let (x, y) = self.centre();
         if !appear {
-            (self.dying, self.appearing, self.phase) = (false, false, 0);
+            self.become_alive(cx);
+            self.sparkles(RESET_SPARKLES, cx);
+            // shortcut: Stardust stands in for the sparkle burst until an `Effect::Sparkles` exists.
+            cx.emit(Event::Effect(Effect::Stardust { x, y }));
             return;
         }
         self.appearing = true;
         self.appear_ticks = 0;
-        let (x, y) = self.centre();
         cx.emit(Event::Effect(Effect::Stardust { x, y }));
     }
 
-    /// `FUN_0040bc5e` with this life's hits, and the survival statistic (AR §8.7).
-    ///
-    /// shortcut: AR §8.7 says survival "stops at death"; the port stops it when the kill is
-    /// recorded (dying: after the respawn delay; splat: when the pieces land). Revisit if the
-    /// stats screen's survival figures disagree with the original.
+    /// `FUN_0040bc5e` with this life's hits, and the survival stop when the kill is recorded
+    /// (answers.md "Fly survival stat: the period end also stops it").
     fn record_death(&mut self, m: &mut MatchState, cx: &Ctx) {
         m.record_kill(self.hits_this_life);
         self.hits_this_life = 0;
+        self.stop_survival(m, cx.now);
+    }
+
+    /// `FUN_0040db52`: the life in progress into the survival total and maximum. Called at the
+    /// kill record and at the period end, the world destructor `FUN_00433904`.
+    pub fn stop_survival(&mut self, m: &mut MatchState, now: u64) {
         if let Some(start) = self.life_started_ms.take() {
-            m.stats.record_life(cx.now.saturating_sub(start));
+            m.stats.record_life(now.saturating_sub(start));
         }
+    }
+
+    /// The fly render `FUN_00439156` counts a hit once +0x314 is set and the fly is not dying, so
+    /// a fatal hit never counts (answers.md "Fly hits and damage stats: counted in the render,
+    /// fatal hits excluded").
+    fn count_hit(&mut self, m: &mut MatchState) {
+        if !self.post_stun || self.dying {
+            return;
+        }
+        self.post_stun = false;
+        m.stats.hits += 1;
+        m.stats.damage += self.stat_damage;
     }
 
     /// `FUN_004387d5`: alive, sound 38, survival timer started (§3.7.4).
@@ -557,6 +631,9 @@ impl Fly {
         if self.superfly && self.superfly_timer.expired(cx.now) {
             self.end_superfly(cx);
         }
+        // shortcut: answers.md names `FUN_00437302` but not its call site; it runs with the
+        // SuperFly expiry. Revisit if the sparkle draws prove out of order.
+        self.superfly_sparkle(cx);
         self.turbo_tick(cx.now);
         let mx = self.max_x + i32::from(self.turbo.boost_x);
         let my = self.max_y + i32::from(self.turbo.boost_y);
@@ -664,34 +741,48 @@ impl Fly {
         (jx, axis())
     }
 
-    /// §3.4 step 10.
-    ///
-    /// shortcut: game-spec §4.2 gives the buzz frequency as 10000 + random 0–999 + a speed term;
-    /// the R(1000) is drawn to keep the stream, but the pitch and the pan curve are open item O14
-    /// (the frontend's). Who first starts the loop is not documented, so the first alive tick
-    /// loops it. Revisit with O14.
+    /// §3.4 step 10, `FUN_0040d005`: the rand first, then pan, frequency and volume; the loop
+    /// starts whenever the slot is not playing. The volume only changes off screen, which the
+    /// clamped fly never is, so it is set at the loop start.
     fn buzz(&mut self, cx: &mut Ctx) {
-        let pan = Pan::ScreenX {
-            x: self.x,
-            w: self.size.w,
-        };
         if !self.alive() {
             if std::mem::take(&mut self.buzzing) {
                 cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Stop);
             }
             return;
         }
-        cx.rng.r(BUZZ_FREQ_ROLL);
-        let op = if self.buzzing {
-            SoundOp::Move(pan)
-        } else {
-            SoundOp::Loop(PlayParams {
-                pan,
-                ..PlayParams::default()
-            })
+        let r = cx.rng.r(BUZZ_FREQ_ROLL);
+        let hz = BUZZ_FREQ_BASE
+            + r
+            + self.vy * BUZZ_VY_HZ / BUZZ_SPEED_DIV
+            + self.vx.abs() * BUZZ_VX_HZ / BUZZ_SPEED_DIV;
+        let freq = u32::try_from(hz).unwrap_or(0);
+        let pan = Pan::Fixed(self.buzz_pan());
+        if std::mem::replace(&mut self.buzzing, true) {
+            cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Move(pan));
+            cx.sound(SoundSlot::FLY_BUZZ, SoundOp::SetFrequency(freq));
+            return;
+        }
+        let params = PlayParams {
+            volume_cb: BUZZ_VOLUME_CB - offscreen_px(self.x),
+            freq_hz: Some(freq),
+            pan,
         };
-        self.buzzing = true;
-        cx.sound(SoundSlot::FLY_BUZZ, op);
+        cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Loop(params));
+    }
+
+    /// Left of 400 − w: −trunc((1 − x / (400 − w)) × 2000); from 400: trunc((x − 400) / 400 ×
+    /// 2000); 0 between.
+    fn buzz_pan(&self) -> i32 {
+        let left = BUZZ_PAN_MID - self.size.w;
+        let (x, mid) = (f64::from(self.x), f64::from(BUZZ_PAN_MID));
+        if self.x <= left {
+            -((1.0 - x / f64::from(left)) * BUZZ_PAN_CB) as i32
+        } else if self.x >= BUZZ_PAN_MID {
+            ((x - mid) / mid * BUZZ_PAN_CB) as i32
+        } else {
+            0
+        }
     }
 
     /// §3.4 step 11: assigns `scroll` and returns this tick's camera delta.
@@ -732,7 +823,7 @@ impl Fly {
             return;
         }
         if hit.damage >= 1 || self.dying || self.stunned {
-            self.damage(hit, m, cx);
+            self.damage(hit, cx);
             if self.dying {
                 self.aspirating = false;
             }
@@ -746,13 +837,13 @@ impl Fly {
         }
     }
 
-    /// §3.6 (`FUN_00437e99`).
-    ///
-    /// shortcut: §3.6 does not say whether a new hit (A) runs B in the same call; it does here,
-    /// so the hit frame reads 1 on the hit tick. Revisit if the stun proves one tick short.
-    fn damage(&mut self, hit: SwatHit, m: &mut MatchState, cx: &mut Ctx) {
+    /// §3.6 (`FUN_00437e99`). A new hit (A) and the stun (B) are exclusive branches, so the hit
+    /// frame stays 0 on the hit tick (answers.md "Fly hit: a new hit does not run B in the same
+    /// call").
+    fn damage(&mut self, hit: SwatHit, cx: &mut Ctx) {
         if hit.damage >= 1 && !self.hit_in_progress {
-            self.new_hit(hit, m, cx);
+            self.new_hit(hit, cx);
+            return;
         }
         if self.stunned && self.phase == 0 {
             self.stun_in(cx);
@@ -767,11 +858,8 @@ impl Fly {
         }
     }
 
-    /// §3.6 A, and the hits and damage statistics (AR §8.7, `FUN_00439156`).
-    ///
-    /// shortcut: AR §8.7 does not say whether the damage sum takes the raw or the SuperFly-cut
-    /// damage; it takes the effective one. Revisit with the stats page check.
-    fn new_hit(&mut self, hit: SwatHit, m: &mut MatchState, cx: &mut Ctx) {
+    /// §3.6 A. The effective (SuperFly-cut) damage is kept for the render's stats.
+    fn new_hit(&mut self, hit: SwatHit, cx: &mut Ctx) {
         self.saved_heading = self.heading;
         self.hits_this_life += 1;
         let effective = if self.superfly {
@@ -780,8 +868,7 @@ impl Fly {
             hit.damage
         };
         self.damage_total += effective;
-        m.stats.hits += 1;
-        m.stats.damage += effective;
+        self.stat_damage = effective;
         if self.damage_total <= DEATH_TOTAL {
             self.stunned = true;
         } else {
@@ -894,74 +981,96 @@ impl Fly {
         }
     }
 
-    /// §3.5 heading animation. Visual, except that FACE gates the jitter.
-    ///
-    /// shortcut: §3.5 gives the rules but not the frame rate or what a key change does mid-turn;
-    /// one frame per tick, a turn-in finishes before it reacts, and a turn-out lands on the
-    /// target held when it ends. Revisit if the idle jitter's rand count drifts from a capture.
+    /// §3.5 heading animation at one frame per tick (answers.md "Fly heading machine: mid-turn
+    /// reversals and opposite keys"). Visual, except that FACE gates the jitter. Key patterns
+    /// other than none, one key or one diagonal change nothing.
     fn heading_step(&mut self, pad: &FlyPad) {
-        self.heading_target = Heading::from_pad(pad);
-        if self.heading == Heading::Face {
-            self.leave_face();
+        let Some(t) = Heading::from_pad(pad) else {
             return;
-        }
-        match self.heading_turn {
-            Turn::In => {
-                self.heading_frame += 1;
-                if self.heading_frame >= TURN_IN_END {
-                    self.heading_frame = TURN_IN_END;
-                    self.heading_turn = Turn::Loop;
-                }
-            }
-            Turn::Loop if self.heading_target == self.heading => {
-                self.heading_frame = loop_frame(self.heading_frame);
-            }
-            Turn::Loop if self.heading.shares_a_direction(self.heading_target) => {
-                self.heading = self.heading_target;
-                self.heading_frame = TURN_IN_END;
-            }
-            Turn::Loop => self.heading_turn = Turn::Out,
-            Turn::Out => {
-                self.heading_frame -= 1;
-                if self.heading_frame >= 0 {
-                    return;
-                }
-                self.heading = Heading::Face;
-                self.heading_frame = 0;
-                self.leave_face();
-            }
+        };
+        if t == Heading::Face {
+            self.heading_release();
+        } else if self.heading == Heading::Face {
+            (self.heading, self.heading_frame, self.heading_turn) = (t, 0, Turn::In);
+        } else if self.heading_turn == Turn::Loop {
+            self.heading_steady(t);
+        } else {
+            self.heading_turning(t);
         }
     }
 
-    /// At FACE: cycle the idle frames, or start turning in to the held direction.
-    fn leave_face(&mut self) {
-        if self.heading_target == Heading::Face {
+    /// No key: FACE cycles its frames; a heading turns out, onto FACE below frame 0.
+    fn heading_release(&mut self) {
+        if self.heading == Heading::Face {
             self.heading_frame = (self.heading_frame + 1) % FACE_FRAMES;
             return;
         }
-        self.heading = self.heading_target;
-        self.heading_frame = 0;
-        self.heading_turn = Turn::In;
+        self.heading_turn = Turn::Out;
+        self.heading_frame -= 1;
+        if self.heading_frame < 0 {
+            (self.heading, self.heading_frame, self.heading_turn) = (Heading::Face, 0, Turn::Loop);
+        }
+    }
+
+    /// Steady on a heading with `t` held. An opposite flag turns out from frame 3. A single key
+    /// with a perpendicular flag set switches to `t` at frame 4. A diagonal from a pure
+    /// horizontal heading keeps it (E held with Right+Up stays E); otherwise `t` loops.
+    fn heading_steady(&mut self, t: Heading) {
+        if self.heading.opposes(t) {
+            (self.heading_frame, self.heading_turn) = (TURN_OUT_FRAME, Turn::Out);
+            return;
+        }
+        if t.is_diagonal() {
+            if self.heading.contains(t.vertical()) {
+                self.heading = t;
+            }
+            self.heading_frame = loop_frame(self.heading_frame);
+        } else if self.heading != t {
+            (self.heading, self.heading_frame) = (t, TURN_IN_END);
+        } else {
+            self.heading_frame = loop_frame(self.heading_frame);
+        }
+    }
+
+    /// Mid-turn with `t` held: toward frame 4 while every flag of `t` is set, else turn out and,
+    /// below frame 0, start the turn-in toward `t`.
+    fn heading_turning(&mut self, t: Heading) {
+        if !self.heading.contains(t) {
+            self.heading_turn = Turn::Out;
+            self.heading_frame -= 1;
+            if self.heading_frame < 0 {
+                (self.heading, self.heading_frame, self.heading_turn) = (t, 0, Turn::In);
+            }
+        } else if self.heading_turn == Turn::Out {
+            self.heading_turn = Turn::In;
+            self.heading_frame = (self.heading_frame + 1).min(TURN_IN_END);
+        } else if self.heading_frame + 1 > TURN_IN_END {
+            (self.heading_frame, self.heading_turn) = (TURN_IN_END, Turn::Loop);
+        } else {
+            self.heading_frame += 1;
+        }
     }
 }
 
 impl Heading {
-    /// shortcut: §3.5 does not say which of two opposite keys wins; Right and Up do.
-    fn from_pad(pad: &FlyPad) -> Self {
-        match (pad.right, pad.left, pad.up, pad.down) {
-            (true, _, true, _) => Heading::NE,
-            (true, _, _, true) => Heading::SE,
-            (true, ..) => Heading::E,
-            (_, true, true, _) => Heading::NW,
-            (_, true, _, true) => Heading::SW,
-            (_, true, ..) => Heading::W,
-            (.., true, _) => Heading::N,
-            (.., true) => Heading::S,
-            _ => Heading::Face,
-        }
+    /// The exact key patterns the heading machine reads: none, one key, or one diagonal.
+    /// Opposite keys or three and more keys are None.
+    fn from_pad(pad: &FlyPad) -> Option<Self> {
+        Some(match (pad.right, pad.left, pad.up, pad.down) {
+            (false, false, false, false) => Heading::Face,
+            (true, false, false, false) => Heading::E,
+            (false, true, false, false) => Heading::W,
+            (false, false, true, false) => Heading::N,
+            (false, false, false, true) => Heading::S,
+            (true, false, true, false) => Heading::NE,
+            (true, false, false, true) => Heading::SE,
+            (false, true, true, false) => Heading::NW,
+            (false, true, false, true) => Heading::SW,
+            _ => return None,
+        })
     }
 
-    /// Direction flags (east, west, north, south).
+    /// Direction flags [E, W, N, S]; a flag's opposite is at index ^ 1.
     fn flags(self) -> [bool; 4] {
         match self {
             Heading::Face => [false; 4],
@@ -976,8 +1085,28 @@ impl Heading {
         }
     }
 
-    fn shares_a_direction(self, o: Heading) -> bool {
-        self.flags().iter().zip(o.flags()).any(|(a, b)| *a && b)
+    /// Every flag of `t` is set here.
+    fn contains(self, t: Heading) -> bool {
+        self.flags().iter().zip(t.flags()).all(|(h, t)| *h || !t)
+    }
+
+    /// A flag opposite one of `t`'s is set here.
+    fn opposes(self, t: Heading) -> bool {
+        let h = self.flags();
+        t.flags().iter().enumerate().any(|(d, on)| *on && h[d ^ 1])
+    }
+
+    fn is_diagonal(self) -> bool {
+        matches!(self, Heading::NE | Heading::SE | Heading::NW | Heading::SW)
+    }
+
+    /// The vertical part of a heading (FACE for E, W and FACE).
+    fn vertical(self) -> Heading {
+        match self {
+            Heading::N | Heading::NE | Heading::NW => Heading::N,
+            Heading::S | Heading::SE | Heading::SW => Heading::S,
+            _ => Heading::Face,
+        }
     }
 }
 
@@ -988,6 +1117,11 @@ fn toward_zero(v: i32, d: i32) -> i32 {
     } else {
         (v + d).min(0)
     }
+}
+
+/// The buzz volume's off-screen part: |x| left of 0, x − 800 right of the screen.
+fn offscreen_px(x: i32) -> i32 {
+    if x < 0 { -x } else { (x - SCREEN_W).max(0) }
 }
 
 /// The loop frames 4..=9: one step, past 9 wraps to 4.
@@ -1140,13 +1274,13 @@ impl World {
 
     /// Step 9: re-roll while overlapping an object (≤ [`RESPAWN_TRIES`]), then appear.
     pub fn respawn_placement(&mut self, cx: &mut Ctx) {
-        self.place_fly(RESPAWN_TRIES, cx);
+        self.place_fly(RESPAWN_TRIES, true, cx);
     }
 
     /// Step 9 with a try cap: [`RESPAWN_TRIES`], or [`RESPAWN_TRIES_PERIOD_START`] from
     /// [`World::new`]. Reads and clears the request, re-rolls while the inner box (§4.5) touches
-    /// an object, then starts the appear.
-    pub(super) fn place_fly(&mut self, tries: u32, cx: &mut Ctx) {
+    /// an object, then resets: the appear, or at period start reset(0).
+    pub(super) fn place_fly(&mut self, tries: u32, appear: bool, cx: &mut Ctx) {
         if !std::mem::take(&mut self.fly.respawn_request) {
             return;
         }
@@ -1156,7 +1290,7 @@ impl World {
             }
             self.fly.reroll_position(cx);
         }
-        self.fly.reset(true, cx);
+        self.fly.reset(appear, cx);
     }
 
     /// Step 11: fly not alive → both goodie selectors 0, inverted controls off.
@@ -1169,10 +1303,11 @@ impl World {
         self.goodies.fly_mystery = Mystery::None;
     }
 
-    /// Step 18b: appear done → alive (`FUN_004387d5`, slot 38, survival timer); splat done →
-    /// kill recorded and respawn requested.
+    /// Step 18b: the hits and damage stats; appear done → alive (`FUN_004387d5`, slot 38,
+    /// survival timer); splat done → kill recorded and respawn requested.
     pub fn fly_render_driven(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let fly = &mut self.fly;
+        fly.count_hit(m);
         if fly.appearing {
             if fly.appear_ticks >= APPEAR_TICKS {
                 fly.become_alive(cx);
@@ -1304,8 +1439,9 @@ mod tests {
         (fly.aspirating, fly.carrying) = (true, true);
         b.with(|cx| fly.start_superfly(cx));
         b.with(|cx| fly.splat(0, cx));
-        // gaps §2.1: 7 draws per blood particle, 6 per body piece, after Fly::new's one draw.
-        assert_eq!(b.draws_since(1, 1), 60 * 7 + 11 * 6);
+        // gaps §2.1: 7 draws per blood particle, 6 per body piece, after Fly::new's one draw and
+        // SuperFly's 5 start sparkles of 7.
+        assert_eq!(b.draws_since(1, 1 + 5 * 7), 60 * 7 + 11 * 6);
         assert_eq!(fly.life(), Life::Splatted);
         assert_eq!((fly.vx, fly.vy, fly.hits_this_life), (0, 0, 1));
         assert!(!fly.carrying && !fly.aspirating && !fly.superfly && !fly.turbo.active);
@@ -1318,7 +1454,7 @@ mod tests {
         assert_eq!(fly.splat_gravity, 12);
         // Already splatted: nothing more happens.
         b.with(|cx| fly.splat(0, cx));
-        assert_eq!(b.draws_since(1, 1), 60 * 7 + 11 * 6);
+        assert_eq!(b.draws_since(1, 1 + 5 * 7), 60 * 7 + 11 * 6);
         assert_eq!(fly.hits_this_life, 1);
     }
 
@@ -1468,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_with_appear_starts_the_appear_and_without_it_is_alive() {
+    fn reset_with_appear_starts_the_appear() {
         let mut b = Bench::new(1);
         let mut fly = b.fly();
         b.with(|cx| fly.splat(0, cx));
@@ -1481,8 +1617,55 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::Effect(Effect::Stardust { .. })))
         );
+    }
+
+    /// answers.md "Fly reset(0) and SuperFly sparkles": argument 0 is alive at once with sound
+    /// 38, the survival stat started and a 45-sparkle burst of 7 draws each.
+    #[test]
+    fn reset_without_appear_plays_38_starts_survival_and_bursts_45_sparkles() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        (fly.appearing, fly.dying, fly.phase) = (true, true, 1);
+        fly.life_started_ms = None;
+        b.now = 700;
+        let before = b.draws_since(1, 0);
         b.with(|cx| fly.reset(false, cx));
-        assert!(fly.alive());
+        assert_eq!(b.draws_since(1, before), 45 * 7);
+        assert!(fly.alive() && fly.phase == 0);
+        assert_eq!(fly.life_started_ms, Some(700));
+        assert_eq!(b.sounds(SoundSlot::GOODIE_FLY).len(), 1);
+    }
+
+    /// SuperFly: 5 sparkles at the start, then 5 per firing of the 40 ms timer while it lasts.
+    #[test]
+    fn superfly_sparkles_5_at_the_start_and_5_every_40_ms() {
+        let mut b = Bench::new(1);
+        let mut fly = centred(&mut b);
+        let before = b.draws_since(1, 0);
+        b.with(|cx| fly.start_superfly(cx));
+        assert_eq!(b.draws_since(1, before), 5 * 7);
+        // Each physics call draws the buzz's R(1000); heading E skips the jitter.
+        for (now, sparkles) in [(40, 0), (41, 5), (81, 0), (82, 5)] {
+            b.now = now;
+            let before = b.draws_since(1, 0);
+            b.with(|cx| fly.physics(&NONE, cx));
+            assert_eq!(b.draws_since(1, before), 1 + sparkles * 7, "at {now} ms");
+        }
+    }
+
+    /// answers.md "Fly survival stat: the period end also stops it": the life in progress is
+    /// added, and only once.
+    #[test]
+    fn the_period_end_adds_the_life_in_progress() {
+        let mut b = Bench::new(1);
+        let (mut m, mut w) = world(&mut b);
+        w.fly.life_started_ms = Some(1000);
+        w.fly.stop_survival(&mut m, 5000);
+        w.fly.stop_survival(&mut m, 9000);
+        assert_eq!(
+            (m.stats.survival_max_ms, m.stats.survival_total_ms),
+            (4000, 4000)
+        );
     }
 
     fn fall_ticks(fly: &mut Fly, y: i32, vy: i32, g: i32) -> u32 {
@@ -1712,11 +1895,13 @@ mod tests {
         b.with(|cx| fly.update(&NONE, hit, false, m, cx));
     }
 
-    /// Acceptance W1 4.
+    /// Acceptance W1 4. The hit (A) and the stun (B) are exclusive branches of one call
+    /// (answers.md "Fly hit: a new hit does not run B in the same call"), so the hit frame is 0
+    /// on the hit tick and the kick comes on the fifth call.
     #[test]
     fn a_hit_stuns_kicks_and_ricochets_for_23_ticks() {
         let mut b = Bench::new(1);
-        let (mut m, _) = world(&mut b);
+        let (mut m, mut w) = world(&mut b);
         // Fresh stream so the kick's draws are seed 1's 2nd and 3rd values.
         b.rng = MsvcRand::new(1);
         let mut fly = centred(&mut b);
@@ -1726,8 +1911,10 @@ mod tests {
         assert!(fly.stunned && fly.hit_in_progress && fly.alive());
         update(&mut b, &mut m, &mut fly, 40);
         frames.push(fly.hit_frame);
-        update(&mut b, &mut m, &mut fly, 0);
-        frames.push(fly.hit_frame);
+        for _ in 0..2 {
+            update(&mut b, &mut m, &mut fly, 0);
+            frames.push(fly.hit_frame);
+        }
         assert_eq!(
             (fly.damage_total, fly.hits_this_life),
             (40, 1),
@@ -1736,7 +1923,7 @@ mod tests {
         assert_eq!(fly.ricochet, 0);
         update(&mut b, &mut m, &mut fly, 0);
         frames.push(fly.hit_frame);
-        assert_eq!(frames, [1, 2, 3, 3]);
+        assert_eq!(frames, [0, 1, 2, 3, 3]);
         // v was 0: kick = trunc(U × 500). 18467 / 32767 × 500 = 281.8 → vx += 281;
         // 6334 / 32767 × 500 = 96.7 → vy −= 96.
         assert_eq!(
@@ -1745,7 +1932,6 @@ mod tests {
         );
         assert_eq!((fly.ricochet, fly.phase), (1, 1));
         assert_eq!(b.sounds(SoundSlot::FLY_RICOCHET).len(), 1);
-        assert_eq!((m.stats.hits, m.stats.damage), (1, 40));
 
         for _ in 0..23 {
             b.with(|cx| fly.physics(&NONE, cx));
@@ -1764,6 +1950,39 @@ mod tests {
         update(&mut b, &mut m, &mut fly, 0);
         assert!(!fly.stunned && !fly.hit_in_progress && fly.post_stun);
         assert_eq!((fly.phase, fly.hit_frame, fly.heading), (0, 0, Heading::E));
+
+        // answers.md "Fly hits and damage stats": the render counts the hit once the stun ends.
+        assert_eq!((m.stats.hits, m.stats.damage), (0, 0));
+        w.fly = fly;
+        for _ in 0..2 {
+            b.with(|cx| w.fly_render_driven(&mut m, cx));
+        }
+        assert_eq!(
+            (m.stats.hits, m.stats.damage, w.fly.post_stun),
+            (1, 40, false)
+        );
+    }
+
+    /// The render counts a non-fatal fan or arc hit with the damage passed in (SuperFly already
+    /// applied), and never a fatal hit.
+    #[test]
+    fn raw_hits_count_in_the_render_and_fatal_hits_never() {
+        let mut b = Bench::new(1);
+        let (mut m, mut w) = world(&mut b);
+        b.with(|cx| w.fly.add_raw_damage(45, RawDamage::Fan { dir: 1 }, cx));
+        b.with(|cx| w.fly.add_raw_damage(1, RawDamage::ZapperArc, cx));
+        b.with(|cx| w.fly_render_driven(&mut m, cx));
+        assert_eq!((m.stats.hits, m.stats.damage), (1, 1));
+        b.with(|cx| w.fly.add_raw_damage(60, RawDamage::Fan { dir: 1 }, cx));
+        b.with(|cx| w.fly_render_driven(&mut m, cx));
+        assert!(w.fly.splatted);
+        assert_eq!((m.stats.hits, m.stats.damage), (1, 1));
+
+        let mut fly = centred(&mut b);
+        update(&mut b, &mut m, &mut fly, 120);
+        w.fly = fly;
+        b.with(|cx| w.fly_render_driven(&mut m, cx));
+        assert_eq!((m.stats.hits, m.stats.damage), (1, 1));
     }
 
     #[test]
@@ -1773,7 +1992,7 @@ mod tests {
         let mut fly = centred(&mut b);
         b.with(|cx| fly.start_superfly(cx));
         let before = b.rng.state();
-        for _ in 0..4 {
+        for _ in 0..5 {
             update(&mut b, &mut m, &mut fly, 40);
         }
         assert_eq!(fly.damage_total, 16);
@@ -1835,7 +2054,7 @@ mod tests {
             w.objects.list.push(wall);
             b.with(|cx| w.fly.request_respawn(cx));
             let before = b.draws_since(1, 0);
-            b.with(|cx| w.place_fly(tries, cx));
+            b.with(|cx| w.place_fly(tries, true, cx));
             assert_eq!(b.draws_since(1, before), tries);
             assert!(w.fly.appearing && !w.fly.respawn_request);
         }
@@ -1901,5 +2120,174 @@ mod tests {
         assert!((5 + 51..=5 + 51 + 10).contains(&ticks), "{ticks}");
         assert!(!fly.aspirating && fly.heading == Heading::Face);
         assert_eq!(b.sounds(SoundSlot::ASPIRATE).len(), 1, "held, not fresh");
+    }
+
+    fn pad(right: bool, left: bool, up: bool, down: bool) -> FlyPad {
+        FlyPad {
+            right,
+            left,
+            up,
+            down,
+            ..FlyPad::default()
+        }
+    }
+
+    /// Runs the heading machine over `pads` from (heading, frame, turn), recording each tick.
+    fn headings(start: (Heading, i32, Turn), pads: &[FlyPad]) -> Vec<(Heading, i32, Turn)> {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        (fly.heading, fly.heading_frame, fly.heading_turn) = start;
+        pads.iter()
+            .map(|p| {
+                fly.heading_step(p);
+                (fly.heading, fly.heading_frame, fly.heading_turn)
+            })
+            .collect()
+    }
+
+    /// answers.md "Fly heading machine": FACE + Right starts the turn-in at frame 0; the turn-in
+    /// ends one tick past frame 4; then the loop runs 5..9 and wraps to 4.
+    #[test]
+    fn a_held_key_turns_in_past_frame_4_then_loops() {
+        let r = pad(true, false, false, false);
+        let got = headings((Heading::Face, 7, Turn::Loop), &[r; 11]);
+        let frames: Vec<i32> = got.iter().map(|g| g.1).collect();
+        assert_eq!(frames, [0, 1, 2, 3, 4, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(got[4], (Heading::E, 4, Turn::In));
+        assert_eq!(got[5], (Heading::E, 4, Turn::Loop));
+        let more = headings((Heading::E, 9, Turn::Loop), &[r]);
+        assert_eq!(more, [(Heading::E, 4, Turn::Loop)]);
+    }
+
+    /// A turn-in reverses at once when its key is released, and lands on FACE below frame 0.
+    #[test]
+    fn a_released_turn_in_reverses_at_once() {
+        let none = pad(false, false, false, false);
+        let got = headings((Heading::E, 2, Turn::In), &[none; 4]);
+        assert_eq!(
+            got,
+            [
+                (Heading::E, 1, Turn::Out),
+                (Heading::E, 0, Turn::Out),
+                (Heading::Face, 0, Turn::Loop),
+                (Heading::Face, 1, Turn::Loop),
+            ]
+        );
+    }
+
+    /// Mid-turn, a different key turns out; below 0 the turn-in toward the new key starts.
+    #[test]
+    fn a_new_key_mid_turn_turns_out_then_in_toward_it() {
+        let up = pad(false, false, true, false);
+        let got = headings((Heading::E, 1, Turn::In), &[up; 3]);
+        assert_eq!(
+            got,
+            [
+                (Heading::E, 0, Turn::Out),
+                (Heading::N, 0, Turn::In),
+                (Heading::N, 1, Turn::In),
+            ]
+        );
+    }
+
+    /// Steady with the opposite set: frame 3 and the turn-out. Pressing the heading's own key
+    /// mid turn-out turns back in, capped at frame 4.
+    #[test]
+    fn the_opposite_key_turns_out_and_the_own_key_turns_back_in() {
+        let (r, l) = (
+            pad(true, false, false, false),
+            pad(false, true, false, false),
+        );
+        let got = headings((Heading::E, 8, Turn::Loop), &[l, r, r]);
+        assert_eq!(
+            got,
+            [
+                (Heading::E, 3, Turn::Out),
+                (Heading::E, 4, Turn::In),
+                (Heading::E, 4, Turn::Loop),
+            ]
+        );
+        let none = pad(false, false, false, false);
+        let out = headings((Heading::E, 8, Turn::Loop), &[none, r]);
+        assert_eq!(out, [(Heading::E, 7, Turn::Out), (Heading::E, 4, Turn::In)]);
+    }
+
+    /// Steady with a perpendicular set: clear it, set the key's direction, frame 4.
+    #[test]
+    fn a_perpendicular_key_switches_the_heading_at_frame_4() {
+        let r = pad(true, false, false, false);
+        assert_eq!(
+            headings((Heading::NE, 7, Turn::Loop), &[r]),
+            [(Heading::E, 4, Turn::Loop)]
+        );
+        assert_eq!(
+            headings((Heading::N, 7, Turn::Loop), &[r]),
+            [(Heading::E, 4, Turn::Loop)]
+        );
+    }
+
+    /// Diagonals: E held with Right+Up stays E (the quirk), N goes to NE, S turns out.
+    #[test]
+    fn a_diagonal_from_a_horizontal_heading_stays_on_it() {
+        let ru = pad(true, false, true, false);
+        let from = |h| headings((h, 6, Turn::Loop), &[ru])[0];
+        assert_eq!(from(Heading::E), (Heading::E, 7, Turn::Loop));
+        assert_eq!(from(Heading::N), (Heading::NE, 7, Turn::Loop));
+        assert_eq!(from(Heading::NE), (Heading::NE, 7, Turn::Loop));
+        assert_eq!(from(Heading::S), (Heading::S, 3, Turn::Out));
+        assert_eq!(from(Heading::W), (Heading::W, 3, Turn::Out));
+        let face = headings((Heading::Face, 2, Turn::Loop), &[ru]);
+        assert_eq!(face, [(Heading::NE, 0, Turn::In)]);
+    }
+
+    /// Two opposite keys, or three keys, leave the heading and its frame alone for the tick.
+    #[test]
+    fn opposite_or_three_keys_freeze_the_heading() {
+        for p in [
+            pad(true, true, false, false),
+            pad(false, false, true, true),
+            pad(true, false, true, true),
+            pad(true, true, true, true),
+        ] {
+            for start in [
+                (Heading::Face, 3, Turn::Loop),
+                (Heading::E, 2, Turn::In),
+                (Heading::NW, 6, Turn::Loop),
+            ] {
+                assert_eq!(headings(start, &[p]), [start]);
+            }
+        }
+    }
+
+    /// answers.md "Fly buzz: pitch, pan and volume", seed 1 after the init's x draw. x 100 (≤ 400
+    /// − 120 = 280): pan −trunc((1 − 100 / 280) × 2000) = −1285; R(1000) = 18467 % 1000 = 467;
+    /// frequency 10000 + 467 + 200 × 1500 / 700 (428) + 300 × 2500 / 700 (1071) = 11966; volume
+    /// −700. Then x 500: pan trunc(100 / 400 × 2000) = 500, R(1000) = 334, frequency 10334 −
+    /// 350 × 1500 / 700 (750) = 9584. Then x 300: pan 0, R(1000) = 500, frequency 10500.
+    #[test]
+    fn the_buzz_pans_and_pitches_from_position_and_speed() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        (fly.x, fly.vx, fly.vy) = (100, -300, 200);
+        b.with(|cx| fly.buzz(cx));
+        (fly.x, fly.vx, fly.vy) = (500, 0, -350);
+        b.with(|cx| fly.buzz(cx));
+        (fly.x, fly.vx, fly.vy) = (300, 0, 0);
+        b.with(|cx| fly.buzz(cx));
+        let start = PlayParams {
+            volume_cb: -700,
+            freq_hz: Some(11966),
+            pan: Pan::Fixed(-1285),
+        };
+        assert_eq!(
+            b.sounds(SoundSlot::FLY_BUZZ),
+            [
+                SoundOp::Loop(start),
+                SoundOp::Move(Pan::Fixed(500)),
+                SoundOp::SetFrequency(9584),
+                SoundOp::Move(Pan::Fixed(0)),
+                SoundOp::SetFrequency(10500),
+            ]
+        );
     }
 }
