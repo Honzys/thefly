@@ -100,20 +100,29 @@ mod tests {
     }
 
     /// The 2P match script of the headless run: 2 Players → Normal → 2 days, then in each shop
-    /// skip the tally, buy once per side and leave, leave a traps shop at once, and go on from
+    /// skip the fly tally, buy on the fly side and leave, then skip the kill tally, try a buy on
+    /// the farmer side and leave, leave a traps shop at once, and go on from
     /// the bourse, bonus, winner and stats. Tick numbers follow the 2 min period (7800 ticks).
     fn two_player_match_keys() -> String {
         const MENU: &str =
             "200:Return,400:Return,460:Return,600:Down,620:Return,760:Return,900:Return";
-        // shop entry → tally skip, farmer buy, farmer done, fly buy, fly done, traps done, bourse
-        const SHOP: [(u64, &str); 10] = [
+        // shop entry → fly tally skip (a buy that fails when nothing was saved), turbo (button 2,
+        // the one item the bonus money pays for), fly done; the fade to the farmer; kill tally
+        // skip, farmer buy, farmer done; traps done; bourse. A buy drops for 54 ticks, so the
+        // next press waits at least 55.
+        const SHOP: [(u64, &str); 15] = [
             (160, "Return"),
-            (260, "Tab"),
-            (360, "F"),
-            (420, "Tab"),
-            (560, "Return"),
-            (660, "Left"),
-            (720, "Return"),
+            (200, "Right"),
+            (220, "Right"),
+            (260, "Return"),
+            (330, "Right"),
+            (350, "Right"),
+            (370, "Right"),
+            (400, "Return"),
+            (520, "Return"),
+            (600, "Tab"),
+            (680, "F"),
+            (740, "Tab"),
             (860, "F"),
             (920, "Tab"),
             (1060, "Return"),
@@ -154,12 +163,30 @@ mod tests {
         }
     }
 
-    /// Acceptance W4.2 in the sim: the headless run's script plays a 2P, 2-day match from boot
-    /// through the banner, six periods, the shops, bourses and bonus rounds, to the winner, the
-    /// stats and back to the menu, with sounds under the banner.
-    #[test]
-    fn a_scripted_two_player_match_runs_to_the_stats() {
-        use thefly_sim::data::GameData;
+    /// What the scripted 2P match did.
+    struct Run {
+        /// The screens it passed through, each with the tick it started on.
+        seen: Vec<(&'static str, u64)>,
+        /// Sounds played under the banner.
+        banner_sounds: usize,
+        /// Per goodies shop, the sides it showed in order.
+        shop_sides: Vec<Vec<thefly_sim::shop::ShopSide>>,
+        /// Goodies-shop purchases: the side of each drop.
+        buys: Vec<thefly_sim::shop::ShopSide>,
+    }
+
+    fn goodies_shop(s: &thefly_sim::sim::State) -> Option<&thefly_sim::shop::GoodiesShop> {
+        use thefly_sim::screen::{MatchScreen, Screen};
+        let Screen::Match(im) = &s.screen else {
+            return None;
+        };
+        match &im.screen {
+            MatchScreen::GoodiesShop(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn run_script(data: thefly_sim::data::GameData) -> Run {
         use thefly_sim::event::Event;
         use thefly_sim::input::KeyState;
         use thefly_sim::saves::Persisted;
@@ -172,9 +199,14 @@ mod tests {
         let mut codes: Vec<Scancode> = script.holds.iter().map(|h| h.key).collect();
         codes.sort_by_key(|k| k.0);
         codes.dedup();
-        let mut sim = Sim::new(1, GameData::synthetic(), Persisted::default());
-        let mut seen: Vec<&str> = Vec::new();
-        let mut banner_sounds = 0;
+        let mut sim = Sim::new(1, data, Persisted::default());
+        let mut run = Run {
+            seen: Vec::new(),
+            banner_sounds: 0,
+            shop_sides: Vec::new(),
+            buys: Vec::new(),
+        };
+        let mut dropping = false;
         for t in 0..TICKS {
             let at: Vec<_> = codes.iter().map(|&k| (k, script.at(t, k))).collect();
             let keys = |pick: fn((bool, bool, bool)) -> bool| {
@@ -187,15 +219,65 @@ mod tests {
             ));
             let kind = screen_kind(sim.state());
             if kind == "Banner" {
-                banner_sounds += events
+                run.banner_sounds += events
                     .iter()
                     .filter(|e| matches!(e, Event::Sound { .. }))
                     .count();
             }
-            if seen.last() != Some(&kind) {
-                seen.push(kind);
+            let entered = run.seen.last().map(|s| s.0) != Some(kind);
+            if entered {
+                run.seen.push((kind, t));
             }
+            let Some(shop) = goodies_shop(sim.state()) else {
+                continue;
+            };
+            if entered {
+                run.shop_sides.push(Vec::new());
+            }
+            if let Some(sides) = run
+                .shop_sides
+                .last_mut()
+                .filter(|v| v.last() != Some(&shop.side))
+            {
+                sides.push(shop.side);
+            }
+            if shop.conveyor.is_some() && !dropping {
+                run.buys.push(shop.side);
+            }
+            dropping = shop.conveyor.is_some();
         }
+        run
+    }
+
+    /// The match reaches the winner, the stats and the menu, in that order; each goodies shop
+    /// shows the fly side and then the farmer side, and the fly buys something once it has money.
+    fn assert_full_run(run: &Run) {
+        use thefly_sim::shop::ShopSide;
+        const SHOPS: usize = 5;
+        let kinds: Vec<&str> = run.seen.iter().map(|s| s.0).collect();
+        for want in ["Winner", "Stats", "Menu"] {
+            assert!(
+                kinds.contains(&want),
+                "never reached {want}: {:?}",
+                run.seen
+            );
+        }
+        let tail = &kinds[kinds.len().saturating_sub(3)..];
+        assert_eq!(tail, ["Winner", "Stats", "Menu"], "{:?}", run.seen);
+        assert_eq!(
+            run.shop_sides,
+            vec![vec![ShopSide::Fly, ShopSide::Farmer]; SHOPS]
+        );
+        assert!(run.buys.contains(&ShopSide::Fly), "buys {:?}", run.buys);
+        assert!(run.banner_sounds > 0, "no sound under the banner");
+    }
+
+    /// Acceptance W4.2 in the sim: the headless run's script plays a 2P, 2-day match from boot
+    /// through the banner, six periods, the shops, bourses and bonus rounds, to the winner, the
+    /// stats and back to the menu, with sounds under the banner.
+    #[test]
+    fn a_scripted_two_player_match_runs_to_the_stats() {
+        let run = run_script(thefly_sim::data::GameData::synthetic());
         let period = ["Loading", "Banner", "Playing"];
         let shop = ["GoodiesShop", "Bourse"];
         let day: Vec<&str> = [&period[..], &shop, &period, &shop, &period, &["Bonus"]].concat();
@@ -207,8 +289,24 @@ mod tests {
             &["Winner", "Stats", "Menu"],
         ]
         .concat();
-        assert_eq!(seen, expected);
-        assert!(banner_sounds > 0, "no sound under the banner");
+        let kinds: Vec<&str> = run.seen.iter().map(|s| s.0).collect();
+        assert_eq!(kinds, expected, "{:?}", run.seen);
+        assert_full_run(&run);
+    }
+
+    /// The same script on the real data also reaches the menu the same way.
+    #[test]
+    #[ignore = "needs THEFLY_DATA; run with --ignored"]
+    fn the_scripted_match_reaches_the_menu_on_real_data() {
+        use std::path::Path;
+        let Some(env) = std::env::var_os("THEFLY_DATA").map(PathBuf::from) else {
+            eprintln!("THEFLY_DATA not set, skipping");
+            return;
+        };
+        let dir = thefly_platform::data_dir::resolve(None, Some(env), Path::new("."), Path::is_dir)
+            .expect("THEFLY_DATA");
+        let data = crate::assets::game_data(&dir).expect("real game data");
+        assert_full_run(&run_script(data));
     }
 
     #[test]
