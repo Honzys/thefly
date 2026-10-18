@@ -24,10 +24,38 @@ const MAX_PRELOAD_MIDI: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Voice(u64);
 
-/// Decoded PCM plus the format SDL needs to convert it.
+/// How a voice starts. `gain` is per channel `(left, right)`, so panning is the caller's curve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayParams {
+    pub volume: f32,
+    pub pan: (f32, f32),
+    /// Playback rate in Hz; `None` keeps the file's own rate.
+    pub freq_hz: Option<u32>,
+    pub looping: bool,
+}
+
+impl PlayParams {
+    pub fn new(volume: f32) -> Self {
+        Self {
+            volume,
+            pan: (1.0, 1.0),
+            freq_hz: None,
+            looping: false,
+        }
+    }
+}
+
+/// Decoded PCM as interleaved f32 at the file's own rate.
 struct Sound {
-    spec: AudioSpec,
-    pcm: Vec<u8>,
+    rate: i32,
+    channels: usize,
+    samples: Vec<f32>,
+}
+
+impl Sound {
+    fn frames(&self) -> usize {
+        self.samples.len() / self.channels.max(1)
+    }
 }
 
 struct Playing {
@@ -35,7 +63,17 @@ struct Playing {
     stream: AudioStreamOwner,
     sound: Rc<Sound>,
     looping: bool,
+    pan: (f32, f32),
+    /// Next frame of `sound` to queue.
+    cursor: usize,
 }
+
+/// Seconds of a voice queued ahead of the device, so a pan change is heard within about this long.
+const LEAD_SECONDS: f32 = 0.08;
+/// SDL's accepted frequency-ratio range.
+const RATIO_RANGE: (f32, f32) = (0.01, 100.0);
+/// Queued chunks per voice per pump; bounds the refill loop for very short looping sounds.
+const MAX_CHUNKS_PER_PUMP: usize = 64;
 
 struct Device {
     subsystem: AudioSubsystem,
@@ -102,19 +140,32 @@ impl Audio {
     /// Plays `name` (a `.wav` in `data/sons/`) once at `volume` (1.0 = original).
     /// `Ok(None)` means nothing plays (no audio device); it is not an error.
     pub fn play(&mut self, name: &str, volume: f32) -> Result<Option<Voice>, Error> {
-        self.start(name, volume, false).map(|p| self.keep(p))
+        self.play_with(name, PlayParams::new(volume))
     }
 
     /// Like [`Audio::play`] but repeats until [`Audio::stop`].
     pub fn play_loop(&mut self, name: &str, volume: f32) -> Result<Option<Voice>, Error> {
-        self.start(name, volume, true).map(|p| self.keep(p))
+        let params = PlayParams {
+            looping: true,
+            ..PlayParams::new(volume)
+        };
+        self.play_with(name, params)
+    }
+
+    /// Plays `name` with explicit pan, rate and looping.
+    pub fn play_with(&mut self, name: &str, params: PlayParams) -> Result<Option<Voice>, Error> {
+        self.start(name, params).map(|p| self.keep(p))
     }
 
     /// Replaces the music channel with `name` (`.wav` or `.mid` in `data/sons/`), looping.
     /// `Ok(None)` means nothing plays: no audio device, or MIDI without a SoundFont (warned).
     pub fn play_music(&mut self, name: &str, volume: f32) -> Result<Option<Voice>, Error> {
         self.music = None;
-        self.music = self.start(name, volume, true)?;
+        let params = PlayParams {
+            looping: true,
+            ..PlayParams::new(volume)
+        };
+        self.music = self.start(name, params)?;
         Ok(self.music.as_ref().map(|p| p.id))
     }
 
@@ -125,6 +176,19 @@ impl Audio {
         }
     }
 
+    /// Changes the playback rate; heard immediately, including the audio already queued.
+    pub fn set_frequency(&mut self, voice: Voice, hz: u32) {
+        let Some(p) = self.find(voice) else { return };
+        set_ratio(p, hz);
+    }
+
+    /// Changes the `(left, right)` gains; heard once the queued lead ([`LEAD_SECONDS`]) plays out.
+    pub fn set_pan(&mut self, voice: Voice, pan: (f32, f32)) {
+        if let Some(p) = self.voices.iter_mut().find(|p| p.id == voice) {
+            p.pan = pan;
+        }
+    }
+
     pub fn stop(&mut self, voice: Voice) {
         self.voices.retain(|p| p.id != voice);
         if self.music.as_ref().is_some_and(|p| p.id == voice) {
@@ -132,13 +196,17 @@ impl Audio {
         }
     }
 
-    /// Refills looping voices and drops finished ones. Called once per frame by the loop.
+    /// True while `voice` still has sound to play.
+    pub fn is_playing(&self, voice: Voice) -> bool {
+        self.find(voice).is_some()
+    }
+
+    /// Queues more audio and drops finished voices. Called once per frame by the loop.
     pub(crate) fn pump(&mut self) {
-        self.voices
-            .retain(|p| p.looping || p.stream.queued_bytes().unwrap_or(0) > 0);
-        for p in self.voices.iter().chain(self.music.as_ref()) {
+        for p in self.voices.iter_mut().chain(self.music.as_mut()) {
             refill(p);
         }
+        self.voices.retain(|p| !finished(p));
     }
 
     fn find(&self, voice: Voice) -> Option<&Playing> {
@@ -156,7 +224,7 @@ impl Audio {
     }
 
     /// `None` when there is nothing to play (no device, or MIDI without a SoundFont).
-    fn start(&mut self, name: &str, volume: f32, looping: bool) -> Result<Option<Playing>, Error> {
+    fn start(&mut self, name: &str, params: PlayParams) -> Result<Option<Playing>, Error> {
         if self.device.is_none() {
             return Ok(None);
         }
@@ -166,24 +234,24 @@ impl Audio {
         let Some(dev) = &self.device else {
             return Ok(None);
         };
-        let stream = dev
-            .subsystem
-            .new_playback_stream(&sound.spec, None)
-            .map_err(sdl)?;
+        let spec = AudioSpec::new(Some(sound.rate), Some(2), Some(AudioFormat::F32LE));
+        let stream = dev.subsystem.new_playback_stream(&spec, None).map_err(sdl)?;
         dev.device.bind_stream(&stream).map_err(sdl)?;
-        stream.set_gain(volume).map_err(sdl)?;
-        stream.put_data(&sound.pcm).map_err(sdl)?;
-        if !looping {
-            // lets SDL play out the last partial sample frame so queued_bytes reaches 0
-            stream.flush().map_err(sdl)?;
-        }
+        stream.set_gain(params.volume).map_err(sdl)?;
         self.next_id += 1;
-        Ok(Some(Playing {
+        let mut p = Playing {
             id: Voice(self.next_id),
             stream,
             sound,
-            looping,
-        }))
+            looping: params.looping,
+            pan: params.pan,
+            cursor: 0,
+        };
+        if let Some(hz) = params.freq_hz {
+            set_ratio(&p, hz);
+        }
+        refill(&mut p);
+        Ok(Some(p))
     }
 
     fn sound(&mut self, name: &str) -> Result<Option<Rc<Sound>>, Error> {
@@ -214,29 +282,90 @@ impl Audio {
     }
 }
 
-/// Keeps at least one copy of a looping sound queued; a frame stall longer than the sound leaves a gap.
-fn refill(p: &Playing) {
-    if !p.looping {
+fn set_ratio(p: &Playing, hz: u32) {
+    let ratio = (hz as f32 / p.sound.rate.max(1) as f32).clamp(RATIO_RANGE.0, RATIO_RANGE.1);
+    // SAFETY: the stream pointer is valid for as long as `p.stream` lives.
+    let ok = unsafe { sdl3::sys::audio::SDL_SetAudioStreamFrequencyRatio(p.stream.raw(), ratio) };
+    if !ok {
+        eprintln!("warning: set frequency: {}", sdl3::get_error());
+    }
+}
+
+/// A one-shot voice is done once all of it is queued and the device has drained it.
+fn finished(p: &Playing) -> bool {
+    !p.looping && p.cursor >= p.sound.frames() && p.stream.queued_bytes().unwrap_or(0) == 0
+}
+
+/// Queues stereo frames from the cursor, panned, until [`LEAD_SECONDS`] are ahead of the device.
+fn refill(p: &mut Playing) {
+    let total = p.sound.frames();
+    if total == 0 {
         return;
     }
-    let queued = p.stream.queued_bytes().unwrap_or(0);
-    if usize::try_from(queued).unwrap_or(0) < p.sound.pcm.len() {
-        if let Err(e) = p.stream.put_data(&p.sound.pcm) {
+    let lead = (LEAD_SECONDS * p.sound.rate as f32) as usize;
+    let chunk = lead.clamp(1, total);
+    for _ in 0..MAX_CHUNKS_PER_PUMP {
+        let queued = usize::try_from(p.stream.queued_bytes().unwrap_or(0)).unwrap_or(0);
+        if queued / STEREO_FRAME_BYTES >= lead {
+            return;
+        }
+        if p.cursor >= total && !p.looping {
+            // lets SDL play out the last partial sample frame so queued_bytes reaches 0
+            if let Err(e) = p.stream.flush() {
+                eprintln!("warning: audio flush: {e}");
+            }
+            return;
+        }
+        p.cursor %= total;
+        let end = (p.cursor + chunk).min(total);
+        let buf = stereo(&p.sound, p.cursor..end, p.pan);
+        p.cursor = end;
+        if let Err(e) = p.stream.put_data_f32(&buf) {
             eprintln!("warning: audio refill: {e}");
+            return;
         }
     }
+}
+
+const STEREO_FRAME_BYTES: usize = 2 * std::mem::size_of::<f32>();
+
+/// Frames `range` of `sound` as interleaved stereo, each channel scaled by `pan`.
+fn stereo(sound: &Sound, range: std::ops::Range<usize>, pan: (f32, f32)) -> Vec<f32> {
+    let ch = sound.channels.max(1);
+    range
+        .flat_map(|f| {
+            let s = &sound.samples[f * ch..f * ch + ch];
+            let (l, r) = (s[0], s[ch - 1]);
+            [l * pan.0, r * pan.1]
+        })
+        .collect()
 }
 
 fn load_wav(path: &Path) -> Result<Sound, Error> {
     let wav =
         AudioSpecWAV::load_wav(path).map_err(|e| Error::Sdl(format!("{}: {e}", path.display())))?;
+    let bytes = wav.buffer();
+    let samples: Vec<f32> = match wav.format {
+        AudioFormat::U8 => bytes.iter().map(|&b| (f32::from(b) - 128.0) / 128.0).collect(),
+        AudioFormat::S16LE => bytes
+            .chunks_exact(2)
+            .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+            .collect(),
+        AudioFormat::F32LE => bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+        other => {
+            return Err(Error::Sdl(format!(
+                "{}: unsupported sample format {other:?}",
+                path.display()
+            )));
+        }
+    };
     Ok(Sound {
-        spec: AudioSpec::new(
-            Some(wav.freq),
-            Some(i32::from(wav.channels)),
-            Some(wav.format),
-        ),
-        pcm: wav.buffer().to_vec(),
+        rate: wav.freq,
+        channels: usize::from(wav.channels).max(1),
+        samples,
     })
 }
 
@@ -297,15 +426,15 @@ fn render_midi(path: &Path, sf: &Arc<SoundFont>) -> Result<Sound, Error> {
     let frames = (midi.get_length() * f64::from(MIDI_RATE)).ceil() as usize;
     let (mut left, mut right) = (vec![0.0f32; frames], vec![0.0f32; frames]);
     seq.render(&mut left, &mut right);
-    let pcm = left
+    let samples = left
         .iter()
         .zip(&right)
         .flat_map(|(l, r)| [*l, *r])
-        .flat_map(f32::to_le_bytes)
         .collect();
     Ok(Sound {
-        spec: AudioSpec::new(Some(MIDI_RATE), Some(2), Some(AudioFormat::F32LE)),
-        pcm,
+        rate: MIDI_RATE,
+        channels: 2,
+        samples,
     })
 }
 
@@ -320,5 +449,25 @@ mod tests {
         assert!(a.play("x.wav", 1.0).unwrap().is_none());
         assert!(a.play_loop("x.wav", 1.0).unwrap().is_none());
         assert!(a.play_music("x.mid", 1.0).unwrap().is_none());
+    }
+
+    #[test]
+    fn mono_is_spread_to_both_channels_and_panned() {
+        let s = Sound {
+            rate: 11_025,
+            channels: 1,
+            samples: vec![0.5, -1.0, 0.25],
+        };
+        assert_eq!(stereo(&s, 1..3, (1.0, 0.5)), vec![-1.0, -0.5, 0.25, 0.125]);
+    }
+
+    #[test]
+    fn stereo_keeps_its_channels() {
+        let s = Sound {
+            rate: 44_100,
+            channels: 2,
+            samples: vec![0.1, 0.2, 0.3, 0.4],
+        };
+        assert_eq!(stereo(&s, 0..2, (1.0, 1.0)), vec![0.1, 0.2, 0.3, 0.4]);
     }
 }
