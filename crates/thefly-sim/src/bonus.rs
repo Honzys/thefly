@@ -1,16 +1,16 @@
 //! W3. The bonus round (0x64): handicaps, countdown, coins, targets, counting, the end tally and
 //! the bonus AI (ai-and-rules §8.3). The AI reuses W2's [`Aligner`].
 //!
-//! Coin entry is decoded (gaps §7.3, `sin`). Open item O3: the layout, the intro, the coins'
-//! leftward motion and how the bonus fly and swatter move (proposal: the world's fly physics and
-//! farmer movement on the bonus play field).
+//! Coin entry is decoded (gaps §7.3, `sin`); the bar, the movers, the swing and the boxes follow
+//! answers.md "Bonus round movers, boxes and target spawns". shortcut: the swatter-on-fly knock
+//! (`FUN_004485ed`), the shockwave and the positional buzz are not modelled; revisit with O3.
 
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::event::{Event, Music, PlayParams, SoundOp, SoundSlot};
 use crate::input::{FarmerPad, FlyPad, KeyState, Scancode};
 use crate::match_state::{MatchState, Players};
-use crate::mover::Wander;
+use crate::mover::{FpsRun, Wander};
 use crate::screen::{MatchFlow, MatchScreen};
 use crate::shop::GoodiesShop;
 use crate::winner::Winner;
@@ -105,7 +105,10 @@ pub enum BonusPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Piece {
     pub active: bool,
+    /// Screen x; a coin's is trunc(`layer_x` × 1.25).
     pub x: f64,
+    /// Coins only: the x on the coin's 1.25 layer, moved by the bar step.
+    pub layer_x: f64,
     pub y: f64,
     pub vx: f64,
     pub vy: f64,
@@ -117,30 +120,184 @@ pub struct Piece {
     pub mover: Wander,
 }
 
-/// A bonus-round actor's position and velocity. Open item O3: its motion rule.
+/// A bonus-round actor: position and velocity (px/s, whole values), moved by the FPS integrator.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BonusMover {
     pub x: f64,
     pub y: f64,
     pub vx: f64,
     pub vy: f64,
+    run: FpsRun,
 }
 
-/// shortcut: the coins' leftward speed and the fly and swatter move speeds are unresolved
-/// (answers.md "Bonus round movers, boxes and target spawns"); revisit when `FUN_00448302`,
-/// `FUN_00448c31` and the coin mover are read.
-pub const SCROLL_PX: f64 = 4.0;
-pub const MOVE_PX: f64 = 6.0;
-/// shortcut: the bonus swatter sprite (`FUN_00449203`) and its reach are not decoded [I]; an
-/// 80 × 80 swatter whose top is the reach. Revisit when `FUN_00448110` is read.
-pub const SWATTER_BOX: (f64, f64) = (80.0, 80.0);
+impl BonusMover {
+    /// x += v·dt + the bar step, y += v·dt (answers.md "Bonus round movers"). shortcut: the dt
+    /// split is [I]; the FPS integrator stands in for it.
+    fn integrate(&mut self, bar_step: i32) {
+        let (dx, dy) = self.run.step([self.vx as i32, self.vy as i32]);
+        self.x += f64::from(dx + bar_step);
+        self.y += f64::from(dy);
+    }
+}
+
+/// `bckbonusbarre` (1.0 layer) scrolls at −600 px/s; its per-tick step also moves the coins,
+/// the fly and the swatter. When the round ends, vx += 2 per tick until it is above −81, then
+/// 0; the step keeps its last value (the bar writes it only while vx ≠ 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Bar {
+    pub vx: i32,
+    /// The last per-tick step, in layer px.
+    pub step: i32,
+    /// The bar's scroll offset, in layer px.
+    pub x: i32,
+    run: FpsRun,
+}
+
+pub const BAR_VX: i32 = -600;
+const BAR_BRAKE: i32 = 2;
+const BAR_STOP_ABOVE: i32 = -81;
+
+impl Bar {
+    // shortcut: the bar's per-tick split (`FUN_004135c2`) is [I]; the FPS integrator stands in.
+    fn tick(&mut self) {
+        if self.vx == 0 {
+            return;
+        }
+        self.step = self.run.step([self.vx, 0]).0;
+        self.x += self.step;
+    }
+
+    fn brake(&mut self) {
+        self.vx += BAR_BRAKE;
+        if self.vx > BAR_STOP_ABOVE {
+            self.vx = 0;
+        }
+    }
+}
+
+/// The bonus fly (`FUN_004481c2`, `FUN_00448302`): `j_transi_est` 120×94 at (R(300), 150);
+/// a held key adds 0.1 × cap (the float 0.1 widened to a double) per tick, caps 890 / 670, a
+/// released axis decays by 9; x in [0, 680], y in [bg y − 15, bg y + bg h + 15 − 94].
+const FLY_START_X_RAND: i32 = 300;
+const FLY_START_Y: f64 = 150.0;
+const FLY_CAP: (i32, i32) = (890, 670);
+const FLY_DECAY: i32 = 9;
+const FLY_MAX_X: f64 = 680.0;
+const FLY_Y_MARGIN: f64 = 15.0;
+/// The bonus swatter (`FUN_00448802`, `FUN_00448c31`): `j_tapette_1..5`, 181×178, start y 351.
+/// A held key adds 400 (x) or 200 (y) per tick, capped at 900 / 400; a released axis stops.
+/// x in [0, 800], y in [351, 472].
+pub const SWATTER_W: f64 = 181.0;
+pub const SWATTER_H: f64 = 178.0;
+const SWATTER_ACCEL: (i32, i32) = (400, 200);
+const SWATTER_CAP: (i32, i32) = (900, 400);
+const SWATTER_MAX_X: f64 = 800.0;
+pub const SWATTER_MIN_Y: f64 = 351.0;
+pub const SWATTER_MAX_Y: f64 = 472.0;
+/// shortcut: the swatter's start x is not given (answers.md "Bonus round movers"); 400.
+const SWATTER_START_X: f64 = 400.0;
+/// Reach (+0x98) = (1 − (472 − y) / 121) × 375.
+const REACH_SPAN: f64 = 121.0;
+pub const REACH_MAX: f64 = 375.0;
+/// The move sound: slot 22 + R(5), every 31 ticks, or after 21 while vx ≠ 0 (`FUN_0044936a`).
+const MOVE_SOUNDS: i32 = 5;
+const MOVE_SOUND_TICKS: (i32, i32) = (31, 21);
+/// The swing (`FUN_004490be`): frames 1..4, sound 27 at R(15000) + 35000 Hz and a 30 % shout
+/// (34) at frame 1, hitting while frame > 2, then a retract and a cooldown that must pass 20.
+pub const SWING_FRAMES: i32 = 4;
+const SWING_HIT_ABOVE: i32 = 2;
+const SWING_COOLDOWN: i32 = 20;
+const SWING_FREQ: (u32, i32) = (35_000, 15_000);
+const SHOUT_ROLL: i32 = 100;
+const SHOUT_BELOW: i32 = 30;
+
+/// The swatter's reach from its y: 0 at y 351, 375 at y 472.
+pub fn reach(y: f64) -> f64 {
+    (1.0 - (SWATTER_MAX_Y - y) / REACH_SPAN) * REACH_MAX
+}
+
+/// The swing state: `frame` climbs 1..=4 one per tick, then retracts one per tick to 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Swing {
+    pub frame: i32,
+    pub retract: bool,
+    /// Idle ticks since the last swing ended.
+    pub cooldown: i32,
+}
+
+impl Default for Swing {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            retract: false,
+            cooldown: SWING_COOLDOWN + 1,
+        }
+    }
+}
+
+impl Swing {
+    /// The hitting state (`FUN_00448110`). shortcut: whether the retract also hits is [I]; here
+    /// it does not.
+    pub fn hitting(&self) -> bool {
+        self.frame > SWING_HIT_ABOVE && !self.retract
+    }
+
+    /// One tick; `start` is the swing edge. Returns true on the tick a swing starts.
+    // shortcut: the shockwave (`FUN_00449428`, at x − 5 + 65) is not modelled, and when the
+    // cooldown starts counting (taken as the first idle tick) is [I].
+    fn tick(&mut self, start: bool) -> bool {
+        if self.frame == 0 {
+            self.cooldown += 1;
+            if !start || self.cooldown <= SWING_COOLDOWN {
+                return false;
+            }
+            *self = Self {
+                frame: 1,
+                retract: false,
+                cooldown: 0,
+            };
+            return true;
+        }
+        if self.retract {
+            self.frame -= 1;
+            self.retract = self.frame > 0;
+            return false;
+        }
+        self.frame += 1;
+        if self.frame > SWING_FRAMES {
+            self.frame = SWING_FRAMES;
+            self.retract = true;
+        }
+        false
+    }
+}
+
+/// A held key adds `accel` per tick (truncated), capped at ±cap; a released axis decays by
+/// `decay` toward 0 (`None`: it stops at once). Opposite keys cancel.
+fn axis(v: f64, neg: bool, pos: bool, accel: f64, cap: i32, decay: Option<i32>) -> f64 {
+    let dir = i32::from(pos) - i32::from(neg);
+    let v = v as i32;
+    if dir != 0 {
+        let v = (f64::from(v) + f64::from(dir) * accel).trunc() as i32;
+        return f64::from(v.clamp(-cap, cap));
+    }
+    let Some(d) = decay else { return 0.0 };
+    f64::from(v - v.signum() * v.abs().min(d))
+}
+
+/// 0.1 × cap, with the float 0.1 widened to a double: 89.0000013 for 890.
+fn tenth_of(cap: i32) -> f64 {
+    f64::from(cap) * f64::from(0.1_f32)
+}
 /// The swatter's hit box is (x + 30, reach, w − 60, 154) (`FUN_00431e58`).
 const SWAT_INSET: f64 = 30.0;
 const SWAT_H: f64 = 154.0;
 /// The fly's coin box is (x + 50, y + 40, w − 100, h − 80) on its `Face` frame (120 × 94).
 const FLY_INSET: (i32, i32) = (50, 40);
 const FLY_SIZE: (i32, i32) = (120, 94);
+/// Coins and targets launch at x 810; a coin's is its 1.25-layer x.
 pub const SPAWN_X: f64 = 810.0;
+const COIN_LAYER: f64 = 1.25;
 /// A target enters at x 810 + R(150).
 const TARGET_SPAWN_RAND: i32 = 150;
 /// Target wander (answers.md "Bonus round movers"): reroll 500 ms, x speed range 1, y range
@@ -158,8 +315,7 @@ const FIELD_H: i32 = 440;
 const COIN_H: i32 = 45;
 const TARGET_W: f64 = 48.0;
 const TARGET_H: f64 = 44.0;
-/// The wings (`ailesgoodies`) follow at (x − 24, y − 12). shortcut: their frame count is not
-/// decoded; a third of the 300 px sheet. Revisit with the wing render.
+/// The wings (`ailesgoodies`, cut at 100 × 44: 3 frames) follow at (x − 24, y − 12).
 const WING_DX: f64 = -24.0;
 const WING_W: f64 = 100.0;
 /// Setup: 99 stardust delays R(100) + 700 and one wing delay R(10) + 10 per target slot.
@@ -181,7 +337,7 @@ impl BonusAi {
         let controller = Controller {
             target: Target::BonusTarget(0),
             ring: TARGET_RING,
-            spread: (SWATTER_BOX.0 * params.spread_of_width) as i32,
+            spread: (SWATTER_W * params.spread_of_width) as i32,
             ..Controller::default()
         };
         let aligner = Aligner {
@@ -225,6 +381,8 @@ impl BonusAi {
     }
 
     /// Aims at the nearest active target by |Δx| and returns the pad, swing included.
+    // shortcut: AR §8.3 does not say which swatter y the AI aligns; it aligns the hit box's top,
+    // trunc(reach), which y moves monotonically.
     fn pad(&mut self, swatter: &BonusMover, targets: &[Piece], h: f64, cx: &mut Ctx) -> FarmerPad {
         self.frenzy_step(h, cx);
         let nearest = targets
@@ -241,7 +399,7 @@ impl BonusAi {
         };
         self.controller.target = Target::BonusTarget(i);
         self.controller.refresh(
-            (swatter.x as i32, swatter.y as i32),
+            (swatter.x as i32, reach(swatter.y) as i32),
             (t.x as i32, t.y as i32),
         );
         let aligned = self
@@ -274,6 +432,10 @@ pub struct BonusRound {
     pub hits: i32,
     pub fly: BonusMover,
     pub swatter: BonusMover,
+    pub swing: Swing,
+    /// Ticks since the swatter's last move sound.
+    pub move_ticks: i32,
+    pub bar: Bar,
     pub ai: Option<BonusAi>,
     /// Coin wave amplitude A = trunc((bgH − 2.5 × coinH) / 2) (gaps §7.3).
     pub amplitude: i32,
@@ -307,12 +469,25 @@ fn caught(b: (f64, f64, f64, f64), piece: &Piece, size: (f64, f64)) -> bool {
     (b.0 - size.0..=b.0 + b.2).contains(&piece.x) && (b.1 - size.1..=b.1 + b.3).contains(&piece.y)
 }
 
-fn steer(m: &mut BonusMover, left: bool, right: bool, up: bool, down: bool, w: f64, h: f64) {
-    let axis = |neg: bool, pos: bool| f64::from(i8::from(pos) - i8::from(neg)) * MOVE_PX;
-    m.vx = axis(left, right);
-    m.vy = axis(up, down);
-    m.x = (m.x + m.vx).clamp(0.0, 800.0 - w);
-    m.y = (m.y + m.vy).clamp(0.0, f64::from(FIELD_H) - h);
+/// `FUN_00448302`: right is +x, up is −y.
+fn fly_step(m: &mut BonusMover, pad: &FlyPad, bar_step: i32, bg_h: f64, h: f64) {
+    let (cx, cy) = FLY_CAP;
+    m.vx = axis(m.vx, pad.left, pad.right, tenth_of(cx), cx, Some(FLY_DECAY));
+    m.vy = axis(m.vy, pad.up, pad.down, tenth_of(cy), cy, Some(FLY_DECAY));
+    m.integrate(bar_step);
+    m.x = if m.x < 1.0 { 0.0 } else { m.x.min(FLY_MAX_X) };
+    m.y = m.y.clamp(-FLY_Y_MARGIN, bg_h + FLY_Y_MARGIN - h);
+}
+
+/// `FUN_00448c31`.
+fn swatter_step(m: &mut BonusMover, pad: &FarmerPad, bar_step: i32) {
+    let (ax, ay) = SWATTER_ACCEL;
+    let (cx, cy) = SWATTER_CAP;
+    m.vx = axis(m.vx, pad.left, pad.right, f64::from(ax), cx, None);
+    m.vy = axis(m.vy, pad.up, pad.down, f64::from(ay), cy, None);
+    m.integrate(bar_step);
+    m.x = m.x.clamp(0.0, SWATTER_MAX_X);
+    m.y = m.y.clamp(SWATTER_MIN_Y, SWATTER_MAX_Y);
 }
 
 impl BonusRound {
@@ -326,6 +501,9 @@ impl BonusRound {
         let stardust_ms = (0..STARDUST).map(|_| cx.rng.r(100) + 700).collect();
         let wing_ms = std::array::from_fn(|_| cx.rng.r(10) + 10);
         let coin_rate = wave_rate(h_fly, cx);
+        // shortcut: where the fly setup's R(300) falls in this order is not given (answers.md
+        // "Bonus round movers"); taken after the ω re-roll, before the AI.
+        let fly_x = f64::from(cx.rng.r(FLY_START_X_RAND));
         let fly_size = cx.data.sizes.get("Face").map_or(FLY_SIZE, |s| (s.w, s.h));
         let ai = (m.config.players == Players::One)
             .then(|| BonusAi::new(m.config.ai_level, h_farmer, cx));
@@ -346,14 +524,20 @@ impl BonusRound {
             coins_taken: 0,
             hits: 0,
             fly: BonusMover {
-                x: 100.0,
-                y: 200.0,
+                x: fly_x,
+                y: FLY_START_Y,
                 ..BonusMover::default()
             },
             swatter: BonusMover {
-                x: 400.0,
-                y: 200.0,
+                x: SWATTER_START_X,
+                y: SWATTER_MIN_Y,
                 ..BonusMover::default()
+            },
+            swing: Swing::default(),
+            move_ticks: 0,
+            bar: Bar {
+                vx: BAR_VX,
+                ..Bar::default()
             },
             ai,
             amplitude: ((f64::from(bg_h) - 2.5 * f64::from(COIN_H)) / 2.0) as i32,
@@ -368,6 +552,13 @@ impl BonusRound {
 
     /// After the result: match over → winner, else → goodies shop.
     pub fn tick(&mut self, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
+        // shortcut: the bar and the pieces move first in the tick, before the spawns; the
+        // order inside `FUN_00446030` is [I].
+        if matches!(self.phase, BonusPhase::End { .. } | BonusPhase::Result) {
+            self.bar.brake();
+        }
+        self.bar.tick();
+        self.scroll(cx.now);
         match self.phase {
             BonusPhase::Countdown { count, mut next } => {
                 if next.expired_rearm(cx.now) {
@@ -415,32 +606,20 @@ impl BonusRound {
         if round.expired(cx.now) {
             return self.end(m, cx);
         }
-        let fly = FlyPad::read(keys);
-        steer(
-            &mut self.fly,
-            fly.left,
-            fly.right,
-            fly.up,
-            fly.down,
-            f64::from(self.fly_size.0),
-            f64::from(self.fly_size.1),
-        );
+        let step = self.bar.step;
+        let (bg_h, fly_h) = (f64::from(self.bg_h), f64::from(self.fly_size.1));
+        fly_step(&mut self.fly, &FlyPad::read(keys), step, bg_h, fly_h);
         let pad = match &mut self.ai {
             Some(ai) => ai.pad(&self.swatter, &self.targets, self.h_farmer, cx),
             None => FarmerPad::read(keys),
         };
-        let (w, h) = SWATTER_BOX;
-        steer(
-            &mut self.swatter,
-            pad.left,
-            pad.right,
-            pad.up,
-            pad.down,
-            w,
-            h,
-        );
-        let swing = pad.swing && !self.swing_held;
+        swatter_step(&mut self.swatter, &pad, step);
+        self.move_sound(cx);
+        let edge = pad.swing && !self.swing_held;
         self.swing_held = pad.swing;
+        if self.swing.tick(edge) {
+            swing_sounds(cx);
+        }
         if self.coin_timer.expired_rearm(cx.now) {
             self.spawn_coin(cx);
         }
@@ -448,12 +627,25 @@ impl BonusRound {
             self.spawn_target(cx);
         }
         self.drift_targets(cx);
-        self.scroll(cx.now);
         self.collect(cx);
-        if swing {
+        if self.swing.hitting() {
             self.swat(cx);
         }
         self.phase = BonusPhase::Play { round };
+    }
+
+    /// `FUN_0044936a`: slot 22 + R(5) once the tick count passes 31, or 21 while vx ≠ 0.
+    // shortcut: "every 31 ticks, or after 21" is read as count ≥ 31 (≥ 21 moving), then 0 [I].
+    fn move_sound(&mut self, cx: &mut Ctx) {
+        self.move_ticks += 1;
+        let (idle, moving) = MOVE_SOUND_TICKS;
+        let due = if self.swatter.vx == 0.0 { idle } else { moving };
+        if self.move_ticks < due {
+            return;
+        }
+        self.move_ticks = 0;
+        let slot = SoundSlot::STEP_FIRST.0 + cx.rng.r(MOVE_SOUNDS) as u8;
+        cx.emit(Event::play(SoundSlot(slot)));
     }
 
     /// gaps §7.3: the counter always counts; a coin only enters a free slot.
@@ -470,9 +662,11 @@ impl BonusRound {
         let wave = (f64::from(self.coin_spawns) * self.coin_rate).sin() + 1.0;
         let y = (wave * f64::from(self.amplitude)) as i32 + COIN_H;
         let anim_ms = cx.rng.r(30) + 15;
+        // shortcut: the launch x 810 is taken as the layer x (screen x 1012) [I].
         self.coins[slot] = Piece {
             active: true,
-            x: SPAWN_X,
+            layer_x: SPAWN_X,
+            x: (SPAWN_X * COIN_LAYER).trunc(),
             y: f64::from(y),
             until: Timer::armed(cx.now, LIFETIME_MS),
             frame,
@@ -513,14 +707,24 @@ impl BonusRound {
         }
     }
 
-    /// A coin leaves once x + w < 0, a target once its wings (x − 24 + wing w) do, or either at
-    /// the end of its lifetime.
+    /// Each tick a coin's layer x moves by the bar step, its screen x = trunc(layer x × 1.25)
+    /// (`FUN_004180af` with the bar's camera delta). A coin leaves once x + w < 0, a target once
+    /// its wings (x − 24 + wing w) do, or either at the end of its lifetime.
+    // shortcut: answers.md "Bonus round movers" gives the bar step only for the coins; the
+    // targets (1.0 layer) are moved by it too, or they would hardly enter the screen [I].
     fn scroll(&mut self, now: u64) {
+        let step = f64::from(self.bar.step);
+        for c in self.coins.iter_mut().filter(|c| c.active) {
+            c.layer_x += step;
+            c.x = (c.layer_x * COIN_LAYER).trunc();
+        }
+        for t in self.targets.iter_mut().filter(|t| t.active) {
+            t.x += step;
+        }
         let coin_w = f64::from(COIN_H);
         let pieces = (self.coins.iter_mut().map(|p| (p, coin_w)))
             .chain(self.targets.iter_mut().map(|p| (p, WING_DX + WING_W)));
         for (p, right) in pieces {
-            p.x -= SCROLL_PX;
             if p.x + right < 0.0 || p.until.expired(now) {
                 p.active = false;
             }
@@ -553,13 +757,13 @@ impl BonusRound {
         }
     }
 
-    /// The swing edge is the hitting state (shortcut, see [`SWATTER_BOX`]).
+    /// While hitting: the box (x + 30, trunc(reach), 121, 154) against each target.
     fn swat(&mut self, cx: &mut Ctx) {
         let s = &self.swatter;
         let sw = (
             s.x + SWAT_INSET,
-            s.y.trunc(),
-            SWATTER_BOX.0 - 2.0 * SWAT_INSET,
+            reach(s.y).trunc(),
+            SWATTER_W - 2.0 * SWAT_INSET,
             SWAT_H,
         );
         for i in 0..TARGETS {
@@ -602,6 +806,16 @@ fn target_mover(h_farmer: f64) -> Wander {
         TARGET_RUNS,
         TARGET_ACCEL,
     )
+}
+
+/// Frame 1 of a swing: sound 27 at R(15000) + 35000 Hz, then R(100) < 30 adds sound 34.
+fn swing_sounds(cx: &mut Ctx) {
+    let (base, spread) = SWING_FREQ;
+    let freq = base + cx.rng.r(spread) as u32;
+    cx.sound(SoundSlot::SWING, play_at(freq));
+    if cx.rng.r(SHOUT_ROLL) < SHOUT_BELOW {
+        cx.emit(Event::play(SoundSlot::VOICE_SHOUT));
+    }
 }
 
 fn play_at(freq: u32) -> SoundOp {
@@ -726,20 +940,22 @@ mod tests {
     }
 
     /// answers.md "Bonus round movers": ω R(60), 99 stardust R(100) + 700, 10 wings R(10) + 10,
-    /// then the ω re-roll (h 0.5: (R(60) + 1) / 100). Seed 1: the first stardust is
-    /// 18467 % 100 + 700 = 767.
+    /// then the ω re-roll (h 0.5: (R(60) + 1) / 100), then the fly's start x R(300). Seed 1:
+    /// the first stardust is 18467 % 100 + 700 = 767.
     #[test]
     fn the_setup_draws_the_stardust_and_wings_before_the_rate() {
         let mut rig = Rig::new(1);
         let (_, b) = two_player_round(&mut rig);
         let mut probe = MsvcRand::new(1);
-        let draws: Vec<i32> = (0..111).map(|_| probe.rand()).collect();
+        let draws: Vec<i32> = (0..112).map(|_| probe.rand()).collect();
         assert_eq!(b.stardust_ms.len(), 99);
         assert_eq!(b.stardust_ms[0], 767);
         assert_eq!(b.stardust_ms[98], draws[99] % 100 + 700);
         assert_eq!(b.wing_ms[0], draws[100] % 10 + 10);
         assert_eq!(b.wing_ms[9], draws[109] % 10 + 10);
         assert_eq!(b.coin_rate, f64::from(draws[110] % 60 + 1) / 100.0);
+        assert_eq!((b.fly.x, b.fly.y), (f64::from(draws[111] % 300), 150.0));
+        assert_eq!((b.swatter.x, b.swatter.y), (400.0, 351.0));
         assert_eq!(rig.rng, probe);
     }
 
@@ -827,26 +1043,171 @@ mod tests {
         assert_eq!(got, [(501.0, 15.0), (501.0, 381.0)]);
     }
 
-    /// The swatter at (400, 200) hits through (430, 200, 20, 154) grown by the 48 × 44 target.
+    /// The swatter at (400, 472) has reach 375 and hits through (430, 375, 121, 154) grown by
+    /// the 48 × 44 target: x 382..=551, y 331..=529.
     #[test]
     fn a_target_is_hit_by_its_top_left_in_the_grown_swatter_box() {
         let mut rig = Rig::new(1);
         let (_, mut b) = two_player_round(&mut rig);
-        (b.swatter.x, b.swatter.y) = (400.0, 200.0);
+        (b.swatter.x, b.swatter.y) = (400.0, 472.0);
         let at = |x: f64, y: f64| Piece {
             active: true,
             x,
             y,
             ..Piece::default()
         };
-        b.targets[0] = at(382.0, 156.0);
-        b.targets[1] = at(450.0, 354.0);
-        b.targets[2] = at(381.0, 156.0);
-        b.targets[3] = at(451.0, 354.0);
-        b.targets[4] = at(450.0, 355.0);
+        b.targets[0] = at(382.0, 331.0);
+        b.targets[1] = at(551.0, 529.0);
+        b.targets[2] = at(381.0, 331.0);
+        b.targets[3] = at(552.0, 529.0);
+        b.targets[4] = at(551.0, 530.0);
         rig.cx(|cx| b.swat(cx));
         let hit: Vec<bool> = b.targets[..5].iter().map(|t| !t.active).collect();
         assert_eq!(hit, [true, true, false, false, false]);
         assert_eq!(b.hits, 2);
+    }
+
+    /// answers.md "Bonus round movers": reach 0 at y 351, 375 at y 472; y 412 gives
+    /// 61 / 121 × 375 = 189.05.
+    #[test]
+    fn the_reach_runs_0_to_375_with_the_swatter_y() {
+        assert_eq!(reach(SWATTER_MIN_Y), 0.0);
+        assert_eq!(reach(SWATTER_MAX_Y), 375.0);
+        assert_eq!(reach(412.0).trunc(), 189.0);
+    }
+
+    /// The fly: +trunc(v + 89.0000013) per held tick to the 890 cap (ten ticks), +90 from −100,
+    /// a released axis decays by 9. y adds 67.000001 to 670.
+    #[test]
+    fn the_fly_accelerates_by_a_tenth_of_its_cap_and_decays_by_9() {
+        let a = tenth_of(890);
+        let held: Vec<f64> = (0..10)
+            .scan(0.0, |v, _| {
+                *v = axis(*v, false, true, a, 890, Some(9));
+                Some(*v)
+            })
+            .collect();
+        assert_eq!(held[..3], [89.0, 178.0, 267.0]);
+        assert_eq!(held[9], 890.0);
+        assert_eq!(axis(890.0, false, true, a, 890, Some(9)), 890.0);
+        assert_eq!(axis(-100.0, false, true, a, 890, Some(9)), -10.0);
+        assert_eq!(axis(-100.0, true, false, a, 890, Some(9)), -189.0);
+        assert_eq!(axis(890.0, false, false, a, 890, Some(9)), 881.0);
+        assert_eq!(axis(-5.0, false, false, a, 890, Some(9)), 0.0);
+        assert_eq!(axis(0.0, true, false, tenth_of(670), 670, Some(9)), -67.0);
+    }
+
+    /// The swatter: ±400 / ±200 per held tick, capped at 900 / 400, zeroed on release.
+    #[test]
+    fn the_swatter_accelerates_in_steps_and_stops_on_release() {
+        let x: Vec<f64> = (0..3)
+            .scan(0.0, |v, _| {
+                *v = axis(*v, false, true, 400.0, 900, None);
+                Some(*v)
+            })
+            .collect();
+        assert_eq!(x, [400.0, 800.0, 900.0]);
+        assert_eq!(axis(900.0, false, false, 400.0, 900, None), 0.0);
+        assert_eq!(axis(-200.0, true, false, 200.0, 400, None), -400.0);
+    }
+
+    /// −600 px/s over 65 ticks: 9 px with a 15 carry, so the first step is −9. The brake adds 2
+    /// per tick: −600 + 2 × 259 = −82, and the 260th gives −80 > −81, so 0. The step then stays.
+    #[test]
+    fn the_bar_steps_brakes_to_0_and_keeps_its_last_step() {
+        let mut bar = Bar {
+            vx: BAR_VX,
+            ..Bar::default()
+        };
+        bar.tick();
+        assert_eq!((bar.step, bar.x), (-9, -9));
+        for _ in 0..259 {
+            bar.brake();
+        }
+        assert_eq!(bar.vx, -82);
+        bar.brake();
+        assert_eq!(bar.vx, 0);
+        let step = bar.step;
+        bar.tick();
+        assert_eq!((bar.step, bar.x), (step, -9));
+    }
+
+    /// The fly at x 100 with vx 89 (1 px this tick) and the bar step −9 lands on 92; x stays in
+    /// [0, 680] and y in [−15, 440 + 15 − 94].
+    #[test]
+    fn the_fly_moves_with_the_bar_step_inside_its_bounds() {
+        let pad = FlyPad {
+            right: true,
+            ..FlyPad::default()
+        };
+        let mut fly = BonusMover {
+            x: 100.0,
+            y: 150.0,
+            ..BonusMover::default()
+        };
+        fly_step(&mut fly, &pad, -9, 440.0, 94.0);
+        assert_eq!((fly.x, fly.y, fly.vx), (92.0, 150.0, 89.0));
+        let mut edge = BonusMover {
+            x: 5.0,
+            y: 360.0,
+            vy: 670.0,
+            ..BonusMover::default()
+        };
+        fly_step(&mut edge, &FlyPad::default(), -9, 440.0, 94.0);
+        assert_eq!((edge.x, edge.y), (0.0, 361.0));
+    }
+
+    /// Swing from rest (seed 1): frames 1, 2, 3, 4, 4 (retract), 3, 2, 1, 0; it hits on 3 and 4
+    /// only. The start plays 27 at 35000 + 41 % 15000 = 35041 Hz; 18467 % 100 = 67 ≥ 30, so no
+    /// shout. The next swing needs 21 idle ticks: ticks 9..=28 are refused, 29 starts.
+    #[test]
+    fn a_swing_climbs_hits_on_frames_3_and_4_retracts_and_cools_down() {
+        let mut s = Swing::default();
+        let mut frames = Vec::new();
+        let mut hits = Vec::new();
+        let mut starts = Vec::new();
+        for tick in 0..30 {
+            if s.tick(true) {
+                starts.push(tick);
+            }
+            frames.push(s.frame);
+            hits.push(s.hitting());
+        }
+        assert_eq!(frames[..9], [1, 2, 3, 4, 4, 3, 2, 1, 0]);
+        let hit_ticks: Vec<usize> = (0..9).filter(|&t| hits[t]).collect();
+        assert_eq!(hit_ticks, [2, 3]);
+        assert_eq!(starts, [0, 29]);
+        let mut rig = Rig::new(1);
+        rig.cx(swing_sounds);
+        let swing = Event::Sound {
+            slot: SoundSlot::SWING,
+            op: play_at(35_041),
+        };
+        assert_eq!(rig.events, [swing]);
+    }
+
+    /// A coin's layer x moves by the bar step: 810 − 9 = 801, screen x trunc(801 × 1.25) = 1001;
+    /// a target (1.0 layer) moves 9 screen px.
+    #[test]
+    fn coins_move_by_the_bar_step_on_their_layer() {
+        let mut rig = Rig::new(1);
+        let (_, mut b) = two_player_round(&mut rig);
+        b.coins[0] = Piece {
+            active: true,
+            layer_x: SPAWN_X,
+            x: 1012.0,
+            until: Timer::armed(0, LIFETIME_MS),
+            ..Piece::default()
+        };
+        b.targets[0] = Piece {
+            active: true,
+            x: 500.0,
+            until: Timer::armed(0, LIFETIME_MS),
+            ..Piece::default()
+        };
+        b.bar.tick();
+        b.scroll(0);
+        assert_eq!((b.coins[0].layer_x, b.coins[0].x), (801.0, 1001.0));
+        assert_eq!(b.targets[0].x, 491.0);
     }
 }
