@@ -339,8 +339,15 @@ impl Zapper {
         self.retry.arm(cx.now, ARC_RETRY_MS);
         self.arcing = true;
         let freq = cx.rng.r(ARC_HZ_RAND) + ARC_HZ;
+        // Once per arc, at the fitted arc x and the unscaled cell width [C] (answers.md "Zapper
+        // arc sound 39").
         let params = PlayParams {
             freq_hz: u32::try_from(freq).ok(),
+            pan: Pan::ScreenX {
+                x: self.arc.x,
+                w: ARC_FRAME_W as i32,
+                wrap: crate::event::PAN_WRAP_OBJECT,
+            },
             ..PlayParams::default()
         };
         cx.sound(SoundSlot::ZAPPER_ARC, SoundOp::Play(params));
@@ -1198,6 +1205,11 @@ mod layout_tests {
         assert_eq!((w.fly.vy, w.fly.damage_total), (-180, 1));
         let freq = PlayParams {
             freq_hz: Some(11_759),
+            pan: Pan::ScreenX {
+                x: 1038,
+                w: 125,
+                wrap: 5000,
+            },
             ..PlayParams::default()
         };
         assert_eq!(sounds(&rig, SoundSlot::ZAPPER_ARC), [SoundOp::Play(freq)]);
@@ -1315,6 +1327,11 @@ mod layout_tests {
         assert_eq!(z.retry.remaining_ms(now), 100);
         let freq = PlayParams {
             freq_hz: Some(11_125),
+            pan: Pan::ScreenX {
+                x: 1055,
+                w: 125,
+                wrap: 5000,
+            },
             ..PlayParams::default()
         };
         assert_eq!(sounds(&rig, SoundSlot::ZAPPER_ARC), [SoundOp::Play(freq)]);
