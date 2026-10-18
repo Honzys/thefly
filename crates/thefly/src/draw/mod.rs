@@ -71,7 +71,7 @@ fn in_match(g: &mut Gfx, v: &View, m: &MatchState, s: &MatchScreen) -> Result<()
         MatchScreen::KeysPage(p) => front::keys_page(g, p.players),
         MatchScreen::TutorialPage => g.spr("page_mongol", 0.0, 0.0, 0),
         MatchScreen::Gameplay(gp) => play::gameplay(g, v, m, gp),
-        MatchScreen::Bonus(b) => between::bonus(g, v, m, b),
+        MatchScreen::Bonus(b) => between::bonus(g, v, b),
         MatchScreen::GoodiesShop(s) => between::goodies_shop(g, v, m, s),
         MatchScreen::TrapsShop(s) => between::traps_shop(g, v, m, s),
         MatchScreen::Bourse(b) => between::bourse(g, v, m, b),
