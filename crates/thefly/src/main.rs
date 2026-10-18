@@ -9,6 +9,8 @@ mod lerp;
 mod mixer;
 mod script;
 mod shot;
+#[cfg(test)]
+mod soak;
 mod viewer;
 
 use std::path::{Path, PathBuf};
