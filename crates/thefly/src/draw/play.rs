@@ -136,13 +136,15 @@ fn scene(g: &mut Gfx, v: &View, m: &MatchState, w: &World, p: Option<&World>) ->
         &w.ambient_midges.slots,
         p.map(|p| p.ambient_midges.slots.as_slice()),
     )?;
+    // SR §4.3 step 6: the table front goes under the objects and actors, as the captures show;
+    // §4.2's "layer 3 last" is the coarse pass list
+    layers(g, v, sc, w, p, &[3])?;
     let cam = object_cam(v, w, p);
     objects(g, v, w, p)?;
     lift(g, v, w, p, cam)?;
     traps_back(g, w, cam)?;
     fly(g, v, &w.fly, p.map(|p| &p.fly))?;
     boot(g, v, w, p)?;
-    layers(g, v, sc, w, p, &[3])?;
     hud(g, v, m, w)?;
     flyers(g, v, w, p)?;
     swatter(g, v, w, p)?;
