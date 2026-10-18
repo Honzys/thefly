@@ -52,22 +52,16 @@ pub fn winner(g: &mut Gfx, v: &View, w: &Winner) -> Result<(), Error> {
     let yh = bar_height(w.fly_counter, top);
     g.fill(16.0, BAR_BOTTOM - fh, 10.0, fh, FARMER_BAR)?;
     g.fill(774.0, BAR_BOTTOM - yh, 10.0, yh, FLY_BAR)?;
-    g.text(
-        JOINT,
-        25,
-        &format!("{} $", w.farmer_counter),
-        18.0,
-        51.0,
-        RED,
-    )?;
-    g.text(
-        JOINT,
-        25,
-        &format!("{} $", w.fly_counter),
-        690.0,
-        51.0,
-        BLUE,
-    )?;
+    // SR §5.1 writes "<n> $"; the captures (60-winner-*) show the "$" fixed at the box's right
+    // end whatever the width of the number, so it is drawn on its own (observed x).
+    let counters = [
+        (w.farmer_counter, 18.0, 92.0, RED),
+        (w.fly_counter, 690.0, 763.0, BLUE),
+    ];
+    for (n, x, dollar_x, c) in counters {
+        g.text(JOINT, 25, &n.to_string(), x, 51.0, c)?;
+        g.text(JOINT, 25, "$", dollar_x, 51.0, c)?;
+    }
 
     if let Some(landed) = v.trophy_landed_ms {
         let since = v.now.saturating_sub(landed);
@@ -120,7 +114,8 @@ pub fn stats(g: &mut Gfx, _v: &View, m: &MatchState, s: &StatsScreen) -> Result<
     g.text_outlined(JOINT, 70, "Stats", (320.0, 30.0), (TITLE_RED, WHITE))?;
     // SR frame numbers are 1-based (SR §1.1), sheet indices 0-based
     g.spr("transi-est", 100.0, 160.0, 4)?;
-    g.spr("tapette-8", 100.0, 340.0, 0)?;
+    // SR §5.2 cuts `tapette-8` to 134 × 187: the handle ends at y 527 (68-stats-2p)
+    g.spr_part("tapette-8", 0, (0.0, 0.0, 134.0, 187.0), 100.0, 340.0)?;
     let p = &s.page;
     rows(
         g,
@@ -132,7 +127,7 @@ pub fn stats(g: &mut Gfx, _v: &View, m: &MatchState, s: &StatsScreen) -> Result<
                 format!("{:.0} %", p.delivered_percent),
             ),
             (
-                "Average price of saved objects",
+                "Average price of saved obj",
                 format!("{:.0}", p.avg_price.trunc()),
             ),
             ("Maximum life time", format!("{:.0} s", p.max_survival_s)),
@@ -145,9 +140,9 @@ pub fn stats(g: &mut Gfx, _v: &View, m: &MatchState, s: &StatsScreen) -> Result<
             363.0,
             &[
                 ("Flies killed", p.kills.to_string()),
-                ("Average flies killed", format!("{:.2}", p.kills_per_period)),
-                ("Swatter hits", p.swings.to_string()),
-                ("Average damage", format!("{:.0}", p.avg_damage)),
+                ("Average Flies killed", format!("{:.2}", p.kills_per_period)),
+                ("Fly swater Hits", p.swings.to_string()),
+                ("Average damage done", format!("{:.0}", p.avg_damage)),
                 ("Ratio", format!("{:.0} %", p.hit_ratio_percent)),
             ],
         )?;
