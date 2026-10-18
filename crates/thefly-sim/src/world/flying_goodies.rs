@@ -1,5 +1,5 @@
 //! W2. Flying goodies: luck, spawn, the wander mover, update and catch (fly-and-world §6,
-//! ai-and-rules §6.2). Ticks step 16. [`Wander`] is the shared mover (`FUN_004172a8`).
+//! ai-and-rules §6.2). Ticks step 16. [`Wander`] is the wander mover the midges share.
 
 use super::collision::Rect;
 use super::goodies::{MYSTERY_MS, Mystery};
@@ -32,15 +32,15 @@ pub const REARM_SPAN_MS: f64 = 8000.0;
 pub const NO_SPAWN_REARM_BASE_MS: u64 = 8000;
 pub const FLY_REARM_BASE_MS: u64 = 16_000;
 pub const FARMER_REARM_BASE_MS: u64 = 20_000;
-/// Launch at (R(800), R(500)); the mover re-rolls every R(500) ms at R(30) + 65 px/s, runs 8
-/// (x) and 6 (y), acceleration 5; y stays in [0, 500 − h], x ≤ W + 100 − w.
+/// Launch at (R(800), R(500)) with the wander mover (answers.md "Flying goodie launch draws no
+/// speed"): re-roll R(500) ms, speed R(30) + 65, runs 8 (x) and 6 (y), acceleration 5 on both
+/// axes; y stays in [0, 500 − h], x ≤ W + 100 − w.
 pub const LAUNCH_W: i32 = 800;
 pub const LAUNCH_H: i32 = 500;
 pub const SPEED_RAND: i32 = 30;
-pub const SPEED_BASE: i32 = 65;
 pub const REROLL_RAND_MS: i32 = 500;
 pub const RUNS: (i32, i32) = (8, 6);
-pub const ACCEL: i32 = 5;
+pub const ACCEL: (i32, i32) = (5, 5);
 pub const RIGHT_MARGIN: i32 = 100;
 /// A mystery catch: R(100) below 50 is the first effect, else Turbo 25 s or Nuclear 20 s.
 pub const MYSTERY_FIRST_BELOW: i32 = 50;
@@ -53,114 +53,100 @@ pub enum Side {
     Farmer,
 }
 
-/// The wander mover: per-axis target speed re-rolled every R(reroll) ms, ramped by `accel`.
-// shortcut: FW §6.2 gives the mover's parameters, not its internals (`FUN_004172a8`,
-// `FUN_004174c0`). The port keeps each axis's direction for `run` re-rolls, then takes a fresh
-// sign roll (x before y), and ramps |v| toward the target by `accel` per tick. Revisit with
-// those functions.
+/// The wander mover: `FUN_004174c0`, moved by the shared mover `FUN_004172a8` (answers.md
+/// "Wander mover internals"). The flying goodies and the midges use it; the bonus round and the
+/// credits are meant to.
+///
+/// [`Wander::new`]`(reroll_ms, speed, run_max, accel)` builds it at rest, both axis timers
+/// unarmed. Each [`Wander::step`] does, per axis, x first, when that axis's timer has expired (an
+/// unarmed one has): re-arm it with R(reroll_ms); d = R(10) picks the direction from the axis's
+/// run count, its `run_max` and the sign of v; then v = (R(speed) + 65) × direction, set directly.
+/// Every step then adds sign(v) × accel to each axis and moves by v px/s through the FPS
+/// integrator, returning the (dx, dy) px moved. A caller that steers writes [`Wander::v`]
+/// between steps; one that only needs the integrator calls [`Wander::integrate`]. Bounds belong
+/// to the caller: clamp the position and leave the velocity, there is no bounce.
+///
+/// Not modelled, as no user sets them: the accel flags (+0xa8, +0xac; set, an axis never
+/// re-rolls) and true gravity (+0x130; v += accel instead of sign(v) × accel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Wander {
-    pub reroll_rand_ms: i32,
-    pub speed_x: i32,
-    pub speed_y: i32,
-    /// Same-direction run lengths per axis.
-    pub run_x: i32,
-    pub run_y: i32,
-    pub accel: i32,
-    pub vx: i32,
-    pub vy: i32,
-    pub target_vx: i32,
-    pub target_vy: i32,
-    pub timer: Timer,
+pub(crate) struct Wander {
+    reroll_ms: i32,
+    speed: [i32; 2],
+    run_max: [i32; 2],
+    accel: [i32; 2],
+    run: [i32; 2],
+    timers: [Timer; 2],
+    /// (vx, vy) in px/s.
+    pub(crate) v: [i32; 2],
     /// Remainder state of the FPS-based integrator (`FUN_004180af`).
-    pub frames: i32,
-    pub rem_x: i32,
-    pub rem_y: i32,
-    /// Re-rolls left in the current direction run, per axis.
-    pub left_x: i32,
-    pub left_y: i32,
+    frames: i32,
+    rem: [i32; 2],
     /// The velocity the integrator's current run started with.
-    pub run_vx: i32,
-    pub run_vy: i32,
+    run_v: [i32; 2],
 }
 
-/// UB guard: `rand % 0` for a mover built with no re-roll spread.
-pub const MIN_REROLL_RAND: i32 = 1;
+/// The re-rolled speed is R(speed) + this (answers.md "Wander mover internals").
+pub const WANDER_SPEED_BASE: i32 = 65;
+/// d = R(10) below this takes the first branch of the direction table.
+pub const WANDER_DIR_ROLL: i32 = 10;
+pub const WANDER_DIR_BELOW: i32 = 5;
+/// UB guard: `rand % 0` for a mover built with no re-roll or speed spread.
+pub const MIN_WANDER_RAND: i32 = 1;
 
 impl Wander {
-    pub fn new(reroll_rand_ms: i32, speed: (i32, i32), run: (i32, i32), accel: i32) -> Self {
+    pub(crate) fn new(
+        reroll_ms: i32,
+        speed: (i32, i32),
+        run_max: (i32, i32),
+        accel: (i32, i32),
+    ) -> Self {
         Self {
-            reroll_rand_ms,
-            speed_x: speed.0,
-            speed_y: speed.1,
-            run_x: run.0,
-            run_y: run.1,
-            accel,
+            reroll_ms,
+            speed: [speed.0, speed.1],
+            run_max: [run_max.0, run_max.1],
+            accel: [accel.0, accel.1],
             ..Self::default()
         }
     }
 
-    /// One tick: maybe re-roll, ramp, integrate; returns (dx, dy) in px.
-    pub fn step(&mut self, cx: &mut Ctx) -> (i32, i32) {
-        self.step_toward([None, None], cx)
-    }
-
-    /// Like [`Wander::step`], but an axis given as `Some(d)` (signed distance to a homing point,
-    /// already outside its tolerance) heads toward it at that axis's speed.
-    pub fn step_toward(&mut self, home: [Option<i32>; 2], cx: &mut Ctx) -> (i32, i32) {
-        if !self.timer.is_armed() || self.timer.expired(cx.now) {
-            self.reroll(cx);
+    /// One tick: re-roll the expired axes, accelerate, integrate; returns (dx, dy) in px.
+    pub(crate) fn step(&mut self, cx: &mut Ctx) -> (i32, i32) {
+        for a in 0..2 {
+            let t = self.timers[a];
+            if !t.is_armed() || t.expired(cx.now) {
+                self.reroll(a, cx);
+            }
+            self.v[a] += self.v[a].signum() * self.accel[a];
         }
-        if let Some(d) = home[0] {
-            self.target_vx = d.signum() * self.speed_x;
-        }
-        if let Some(d) = home[1] {
-            self.target_vy = d.signum() * self.speed_y;
-        }
-        self.vx = ramp(self.vx, self.target_vx, self.accel);
-        self.vy = ramp(self.vy, self.target_vy, self.accel);
         self.integrate()
     }
 
-    fn reroll(&mut self, cx: &mut Ctx) {
-        let ms = cx.rng.r(self.reroll_rand_ms.max(MIN_REROLL_RAND));
-        self.timer.arm(cx.now, u64::try_from(ms).unwrap_or(0));
-        let dx = run_direction(&mut self.left_x, self.run_x, self.target_vx.signum(), cx);
-        let dy = run_direction(&mut self.left_y, self.run_y, self.target_vy.signum(), cx);
-        self.target_vx = dx * self.speed_x;
-        self.target_vy = dy * self.speed_y;
+    fn reroll(&mut self, a: usize, cx: &mut Ctx) {
+        let ms = cx.rng.r(self.reroll_ms.max(MIN_WANDER_RAND));
+        self.timers[a].arm(cx.now, u64::try_from(ms).unwrap_or(0));
+        let low = cx.rng.r(WANDER_DIR_ROLL) < WANDER_DIR_BELOW;
+        let (v, run) = (self.v[a], self.run[a]);
+        let sign_ok = if low { v < 0 } else { v >= 0 };
+        let (run, dir) = if sign_ok && run <= self.run_max[a] {
+            (run + 1, 1)
+        } else {
+            (1, -1)
+        };
+        self.run[a] = run;
+        self.v[a] = (cx.rng.r(self.speed[a].max(MIN_WANDER_RAND)) + WANDER_SPEED_BASE) * dir;
     }
 
     /// `FUN_004180af`: exactly |v| px per run of FPS frames; the run restarts when v changes or
     /// the frame count reaches FPS.
-    pub(super) fn integrate(&mut self) -> (i32, i32) {
-        if self.vx != self.run_vx || self.vy != self.run_vy || self.frames >= FPS {
-            (self.frames, self.rem_x, self.rem_y) = (0, 0, 0);
-            (self.run_vx, self.run_vy) = (self.vx, self.vy);
+    pub(crate) fn integrate(&mut self) -> (i32, i32) {
+        if self.v != self.run_v || self.frames >= FPS {
+            (self.frames, self.rem, self.run_v) = (0, [0, 0], self.v);
         }
         self.frames += 1;
         (
-            fps_share(self.vx, &mut self.rem_x),
-            fps_share(self.vy, &mut self.rem_y),
+            fps_share(self.v[0], &mut self.rem[0]),
+            fps_share(self.v[1], &mut self.rem[1]),
         )
-    }
-}
-
-fn run_direction(left: &mut i32, run: i32, current: i32, cx: &mut Ctx) -> i32 {
-    if *left > 0 && current != 0 {
-        *left -= 1;
-        return current;
-    }
-    *left = run - 1;
-    cx.rng.sign()
-}
-
-/// |v| ramps toward |target| by `accel`; the sign follows the target.
-fn ramp(v: i32, target: i32, accel: i32) -> i32 {
-    if v < target {
-        (v + accel).min(target)
-    } else {
-        (v - accel).max(target)
     }
 }
 
@@ -188,7 +174,7 @@ pub struct Flyer {
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    pub mover: Wander,
+    pub(crate) mover: Wander,
     pub lifetime: Timer,
 }
 
@@ -228,13 +214,9 @@ impl World {
     /// The farmer catches only while the swing frame is 3 or more and the "cannot hit" flag is
     /// clear, against the box (x, trunc(reach), 131, 154), bounds inclusive (gaps §5.1). The
     /// trailing-side re-roll is `R(100) <= 2q` for the fly and `< 2q` for the farmer (gaps §5.2).
-    // shortcut: the order of the two sides' spawn checks within a tick is not documented; the
-    // port checks the farmer first, as the timers are armed (FW §6.2). Revisit with FUN_00432684.
     pub fn flying_goodies_step(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let size = cx.data.size(GOODIES_SPRITE);
-        for side in [Side::Farmer, Side::Fly] {
-            self.flying_goodies.check(side, || luck(m, side), size, cx);
-        }
+        self.flying_goodies.checks(|side| luck(m, side), size, cx);
         let delta = self.camera.delta;
         self.flying_goodies.fly.update(delta, cx);
         self.flying_goodies.farmer.update(delta, cx);
@@ -300,6 +282,13 @@ impl World {
 }
 
 impl FlyingGoodies {
+    /// Both sides, the fly first (answers.md, `FUN_00432684`).
+    fn checks(&mut self, luck: impl Fn(Side) -> f64, size: Size, cx: &mut Ctx) {
+        for side in [Side::Fly, Side::Farmer] {
+            self.check(side, || luck(side), size, cx);
+        }
+    }
+
     /// FW §6.2: when the side's timer fires, read the meter, maybe launch a goodie and re-arm.
     fn check(&mut self, side: Side, luck: impl FnOnce() -> f64, size: Size, cx: &mut Ctx) {
         let (timer, flyer, rearm_base) = match side {
@@ -357,12 +346,12 @@ fn trailing_reroll(side: Side, roll: i32, q: i32) -> bool {
 }
 
 impl Flyer {
-    // shortcut: FW §6.2 gives one "target speed (R(30) + 65)" for both axes; the port draws it
-    // once, after x and y. Revisit with FUN_00431c64.
+    /// `FUN_00431c64`: the caller draws x then y; the launch itself draws nothing. The wander
+    /// draws each axis's speed on its first step (answers.md "Flying goodie launch draws no
+    /// speed").
     fn launch(side: Side, kind: i32, frame: i32, size: Size, cx: &mut Ctx) -> Self {
         let x = cx.rng.r(LAUNCH_W);
         let y = cx.rng.r(LAUNCH_H);
-        let speed = cx.rng.r(SPEED_RAND) + SPEED_BASE;
         let lifetime = match side {
             Side::Fly => FLY_LIFETIME_MS,
             Side::Farmer => FARMER_LIFETIME_MS,
@@ -375,7 +364,7 @@ impl Flyer {
             y,
             w: size.w,
             h: size.h,
-            mover: Wander::new(REROLL_RAND_MS, (speed, speed), RUNS, ACCEL),
+            mover: Wander::new(REROLL_RAND_MS, (SPEED_RAND, SPEED_RAND), RUNS, ACCEL),
             lifetime: Timer::armed(cx.now, lifetime),
         };
         cx.emit(Event::Effect(Effect::GoodieSpawn { x, y }));
@@ -434,10 +423,10 @@ mod tests {
     }
 
     /// p = 0.5, seed 1: roll 41 < 50 spawns; 18467 % 100 = 67 is not a mystery; kind
-    /// 6334 % 3 + 3 = 4; x 26500 % 800 = 100, y 19169 % 500 = 169, speed 15724 % 30 + 65 = 69;
-    /// re-arm 4000 + 16000.
+    /// 6334 % 3 + 3 = 4; x 26500 % 800 = 100, y 19169 % 500 = 169; no speed draw, so 15724 is
+    /// next; re-arm 4000 + 16000.
     #[test]
-    fn a_spawn_draws_kind_position_and_speed_in_order() {
+    fn a_spawn_draws_kind_then_position_and_no_speed() {
         let mut rig = Rig::new(1);
         let mut g = FlyingGoodies {
             fly_check: Timer::armed(0, 0),
@@ -447,7 +436,8 @@ mod tests {
         let f = g.fly;
         assert!(f.active);
         assert_eq!((f.kind, f.frame, f.x, f.y), (4, 4, 100, 169));
-        assert_eq!((f.mover.speed_x, f.mover.speed_y), (69, 69));
+        assert_eq!(f.mover.v, [0, 0]);
+        assert_eq!(rig.rng.rand(), 15724);
         assert_eq!(f.lifetime.remaining_ms(0), FLY_LIFETIME_MS);
         assert_eq!(g.fly_check.remaining_ms(0), 20_000);
         assert!(
@@ -505,20 +495,61 @@ mod tests {
         }
     }
 
-    /// The speed ramps by `accel` per tick toward the target and holds there.
+    /// Seed 1, both checks due at p = 0.5: the fly side takes 41 (spawn), 67, kind 4, x 100,
+    /// y 169; then the farmer side 15724 % 100 = 24 (spawn), 78, kind 29358 % 3 + 3 = 3,
+    /// x 26962 % 800 = 562, y 24464 % 500 = 464.
     #[test]
-    fn the_mover_ramps_toward_its_target_speed() {
+    fn the_fly_side_is_checked_before_the_farmer_side() {
         let mut rig = Rig::new(1);
-        let mut w = Wander::new(500, (69, 69), (8, 6), 5);
-        w.step(&mut rig.at(0));
-        assert_eq!(w.vx.abs(), 5);
-        for tick in 1..20 {
-            w.step(&mut rig.at(tick));
-        }
-        assert_eq!((w.vx.abs(), w.vy.abs()), (69, 69));
+        let mut g = FlyingGoodies {
+            fly_check: Timer::armed(0, 0),
+            farmer_check: Timer::armed(0, 0),
+            ..FlyingGoodies::default()
+        };
+        g.checks(|_| 0.5, SIZE, &mut rig.cx(0));
+        assert_eq!((g.fly.kind, g.fly.x, g.fly.y), (4, 100, 169));
+        assert_eq!((g.farmer.kind, g.farmer.frame), (3, 8));
+        assert_eq!((g.farmer.x, g.farmer.y), (562, 464));
     }
 
-    /// The fly's goodie lives 8000 ms (tick 520), clamps to y ≤ 450 and scrolls by −delta.
+    /// The launch above, then the first update draws per axis (answers.md, Wander): x timer
+    /// 15724 % 500, d = 11478 % 10 = 8 (≥ 5, v = 0, run 0 ≤ 8: +1), v = 29358 % 30 + 65 = 83;
+    /// y timer 26962 % 500, d = 24464 % 10 = 4 (< 5, v not < 0: −1), v = −(5705 % 30 + 65) = −70.
+    /// Accel 5 gives (88, −75), which moves 1 px each way this tick (88 = 65 + 23).
+    #[test]
+    fn the_first_wander_step_draws_x_then_y_and_accelerates() {
+        let mut rig = Rig::new(1);
+        for _ in 0..3 {
+            rig.rng.rand();
+        }
+        let mut f = Flyer::launch(Side::Fly, 4, 4, SIZE, &mut rig.cx(0));
+        assert_eq!((f.x, f.y), (100, 169));
+        f.update(0.0, &mut rig.at(1));
+        assert_eq!(f.mover.v, [88, -75]);
+        assert_eq!((f.x, f.y), (101, 168));
+        assert_eq!(rig.rng.rand(), 28145);
+    }
+
+    /// Seed 1, re-roll 0 ms and speed spread 1 (v = ±65), caps 1, no accel. Draws per axis:
+    /// timer, d, speed. x: d 7, 8, 7, 6; y: d 9, 5, 5, 2. Tick 2 passes the cap (run 2 > 1) and
+    /// flips both to −1; tick 3 keeps x at −1 (d ≥ 5 with v < 0) and turns y to +1 (d < 5 with
+    /// v < 0 and run 1 ≤ 1).
+    #[test]
+    fn the_direction_table_follows_the_run_cap_and_the_roll() {
+        let mut rig = Rig::new(1);
+        let mut w = Wander::new(0, (1, 1), (1, 1), (0, 0));
+        let v: Vec<[i32; 2]> = (0..4)
+            .map(|tick| {
+                w.step(&mut rig.at(tick));
+                w.v
+            })
+            .collect();
+        assert_eq!(v, [[65, 65], [65, 65], [-65, -65], [-65, 65]]);
+    }
+
+    /// The fly's goodie lives 8000 ms (tick 520), clamps to y ≤ 450 and scrolls by −delta. Tick 1,
+    /// seed 1, the default mover (reroll, speed and runs 0): x draws 41, 18467 % 10 = 7 (≥ 5, v 0,
+    /// run 0 ≤ 0: +1), 6334 % 1 → vx 65; y draws 26500, 19169 % 10 = 9 → vy 65; each moves 1 px.
     #[test]
     fn a_goodie_expires_and_scrolls_with_the_layer() {
         let mut rig = Rig::new(1);
@@ -533,7 +564,7 @@ mod tests {
             ..Flyer::default()
         };
         f.update(10.6, &mut rig.at(1));
-        assert_eq!((f.x, f.y), (390, 449));
+        assert_eq!((f.x, f.y), (400 + 1 - 10, 449 + 1));
         for tick in 2..520 {
             f.update(0.0, &mut rig.at(tick));
             assert!((0..=450).contains(&f.y));
