@@ -4,7 +4,7 @@
 use thefly_platform::{Color, Error};
 use thefly_sim::highscores::{HighScoreScreen, ROW_SWEEP_MS, ROWS};
 use thefly_sim::match_state::Players;
-use thefly_sim::menu::{BOOT_X, Menu, Page, SlidePhase};
+use thefly_sim::menu::{BOOT_KICK_MS, BOOT_X, Menu, Page, SlidePhase};
 use thefly_sim::screen::{Logo, QuitDialog, Screen};
 
 use super::View;
@@ -35,6 +35,10 @@ const TOP_ITEMS: [(f32, f32); 4] = [
 ];
 /// The boot's rest top y: 350 − h for the 575-px `i_botte` (SR §2.2 boot slide).
 const BOOT_REST_Y: f32 = 350.0 - 575.0;
+const BOOT_W: f32 = 270.0;
+/// SR §2.2 boot slide: pig and boot jiggle at 250 px/s between rest y and rest y + 15.
+const JIGGLE_PX: f32 = 15.0;
+const JIGGLE_PX_PER_MS: f32 = 0.25;
 
 /// A sub-page item: label, dx from bootX − 55, and y (SR §2.2 sub-page table).
 type Item = (&'static str, f32, f32);
@@ -97,7 +101,8 @@ pub fn menu(g: &mut Gfx, v: &View, m: &Menu) -> Result<(), Error> {
 
     g.spr("i_decors1", 0.0, decor_y, 0)?;
     g.spr("i_soleil", 162.0, decor_y + 450.0, v.anim(100, 8))?;
-    v.fx.draw_clouds(g, v.l, dy)?;
+    // clouds ride the decor (its y −50..699): sky-high at rest, across the screen at intro start
+    v.fx.draw_clouds(g, v.l, decor_y)?;
     g.spr("i_decors2", 231.0, decor_y + 610.0, 0)?;
     if m.intro.step == Some(2) {
         // the big fly crossing (SR §2.2 intro step 2): transi-est frames 6–9 at 20 ms
@@ -130,34 +135,53 @@ fn pig(g: &mut Gfx, v: &View, m: &Menu, p: Option<&Menu>, dy: f32) -> Result<(),
         Some(_) => return Ok(()),
         None => rest as f32,
     } + dy;
-    g.spr("i_cochon_corps", 0.0, y, 0)?;
-    let kicked = m.boot.phase == SlidePhase::Kick;
-    let head = if kicked { v.anim(50, 2) } else { 0 };
-    g.spr("i_cochon_tete", PIG_HEAD_X, y, head)
+    let jiggle = kick_jiggle(v, m);
+    let head = if kicking(v, m) { v.anim(50, 2) } else { 0 };
+    g.spr("i_cochon_corps", 0.0, y + jiggle, 0)?;
+    g.spr("i_cochon_tete", PIG_HEAD_X, y + jiggle, head)
+}
+
+/// The 1000 ms after the boot lands on the pig.
+fn kicking(v: &View, m: &Menu) -> bool {
+    m.boot.phase == SlidePhase::Kick && !m.boot.kick.expired(v.now)
+}
+
+fn kick_jiggle(v: &View, m: &Menu) -> f32 {
+    if !kicking(v, m) {
+        return 0.0;
+    }
+    let elapsed = BOOT_KICK_MS.saturating_sub(m.boot.kick.remaining_ms(v.now));
+    let t = (elapsed as f32 * JIGGLE_PX_PER_MS) % (2.0 * JIGGLE_PX);
+    if t < JIGGLE_PX {
+        t
+    } else {
+        2.0 * JIGGLE_PX - t
+    }
 }
 
 fn boot_page(g: &mut Gfx, v: &View, m: &Menu, p: Option<&Menu>) -> Result<(), Error> {
     if m.boot.phase == SlidePhase::Parked && m.page == Page::Top {
         return Ok(());
     }
-    let boot_y = v.l.f(p.map(|p| p.boot.y), m.boot.y);
+    let boot_y = v.l.f(p.map(|p| p.boot.y), m.boot.y) + kick_jiggle(v, m);
     g.spr("i_botte", BOOT_X as f32, boot_y, 0)?;
     // the labels ride with the boot: listed y is for the boot at rest
     let ride = boot_y - BOOT_REST_Y;
-    let x0 = (BOOT_X - 55) as f32;
+    // observed: the labels centre on bootX − 55 + dx + 135, half the boot's width
+    let x0 = (BOOT_X - 55) as f32 + BOOT_W / 2.0;
     for (i, &(label, dx, y)) in page_items(m.page).iter().enumerate() {
         let c = if i == m.selected { SELECTED } else { NORMAL };
-        g.text(JOINT, 25, label, x0 + dx, y + ride, c)?;
+        g.text_centred(JOINT, 25, label, (x0 + dx, y + ride), c)?;
         let subtitle = matches!(m.page, Page::OnePlayerMode | Page::TwoPlayerMode);
         if subtitle {
-            g.text(JOINT, 25, "Mode", x0 + dx, y + 25.0 + ride, c)?;
+            g.text_centred(JOINT, 25, "Mode", (x0 + dx, y + 25.0 + ride), c)?;
         }
     }
     if m.page == Page::Options {
         let on_off = |b: bool| if b { "On" } else { "Off" };
         let o = &v.cur.options;
-        g.text(JOINT, 25, on_off(o.music), x0, 140.0 + ride, NORMAL)?;
-        g.text(JOINT, 25, on_off(o.tutorial), x0, 195.0 + ride, NORMAL)?;
+        g.text_centred(JOINT, 25, on_off(o.music), (x0, 140.0 + ride), NORMAL)?;
+        g.text_centred(JOINT, 25, on_off(o.tutorial), (x0, 195.0 + ride), NORMAL)?;
     }
     Ok(())
 }

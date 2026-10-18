@@ -250,6 +250,15 @@ impl Renderer<'_, '_> {
         self.canvas.copy(tex, None, dst).map_err(sdl)
     }
 
+    /// Width in logical pixels of `text` as [`Self::draw_text`] would draw it.
+    pub fn text_width(&mut self, font: &str, size: u16, text: &str) -> Result<f32, Error> {
+        if text.is_empty() {
+            return Ok(0.0);
+        }
+        let (w, _) = self.assets.font(font, size)?.size_of(text).map_err(sdl)?;
+        Ok(w as f32)
+    }
+
     /// The logical frame drawn so far as tightly packed RGBA rows, for screenshots.
     pub fn read_pixels(&mut self, size: (u32, u32)) -> Result<Vec<u8>, Error> {
         let rect = sdl3::rect::Rect::new(0, 0, size.0, size.1);
