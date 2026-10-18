@@ -149,6 +149,9 @@ impl World {
             };
             world.ai = Some(ai::FarmerAi::new(m.config.ai_level, &view, cx));
         }
+        // shortcut: answers.md (O2) draws R(15) ambient midges "at period load" without the slot
+        // in `FUN_004015c8`; the port draws them last. Revisit when its call order is read.
+        world.ambient_midges = midges::AmbientMidges::spawn(cx);
         world
     }
 
