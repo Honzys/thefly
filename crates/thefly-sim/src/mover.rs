@@ -91,6 +91,10 @@ impl Wander {
         }
     }
 
+    pub fn set_accel(&mut self, accel: (i32, i32)) {
+        self.accel = [accel.0, accel.1];
+    }
+
     pub fn with_gravity(self) -> Self {
         Self {
             gravity: true,
