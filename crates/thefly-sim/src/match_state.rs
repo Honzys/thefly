@@ -346,22 +346,27 @@ impl MatchState {
         }
     }
 
-    /// `FUN_0040bc5e`: kills + 1, stats kills + 1, kill type by this life's hits (3/2/1).
+    /// `FUN_0040bc5e`: kills + 1, stats kills + 1, then the type at the new index by this
+    /// life's hits: 3 for 1, 2 for 2..3, 1 for 4+. A 0-hit kill (boot, zapper) writes nothing,
+    /// so the entry keeps what an earlier period left there (answers.md "Kill type with no hit").
     pub fn record_kill(&mut self, hits: i32) {
         let e = &mut self.economy;
         e.kills += 1;
         self.stats.kills += 1;
-        // shortcut: a kill with no hit (boot, zapper) counts as the one-hit type; AR §7.6 lists
-        // only 1, 2–3 and 4+. Revisit if the kill-type list is re-read.
-        let kind = match hits {
-            ..=1 => 3,
+        // Index 0 of the original list is unused, so it holds KILL_LOG_CAP − 1 types.
+        let i = usize::try_from(e.kills - 1).unwrap_or(0);
+        if i >= KILL_LOG_CAP - 1 {
+            return;
+        }
+        if e.kill_log.len() <= i {
+            e.kill_log.resize(i + 1, 0);
+        }
+        e.kill_log[i] = match hits {
+            ..=0 => e.kill_log[i],
+            1 => 3,
             2..=3 => 2,
             _ => 1,
         };
-        // Index 0 of the original list is unused, so it holds KILL_LOG_CAP − 1 types.
-        if e.kill_log.len() < KILL_LOG_CAP - 1 {
-            e.kill_log.push(kind);
-        }
     }
 
     /// Delivery (ai-and-rules §7.5): `saved[type] += 1`, stats delivered and price total. The
@@ -541,6 +546,21 @@ mod tests {
         }
         assert_eq!(m.economy.kills, 105);
         assert_eq!(m.economy.kill_log.len(), KILL_LOG_CAP - 1);
+    }
+
+    /// answers.md "Kill type with no hit": a 0-hit kill counts but writes no type, so its entry
+    /// keeps the previous value (0 after a fresh match, the old type after a payout).
+    #[test]
+    fn a_kill_with_no_hit_writes_no_type() {
+        let (mut m, _) = build(MatchConfig::default(), false);
+        m.record_kill(0);
+        m.record_kill(4);
+        assert_eq!((m.economy.kills, m.stats.kills), (2, 2));
+        assert_eq!(m.economy.kill_log, [0, 1]);
+        m.economy.pay_farmer();
+        m.record_kill(2);
+        m.record_kill(-1);
+        assert_eq!(m.economy.kill_log, [2, 1]);
     }
 
     /// AR §7.5, gaps §11.3.
