@@ -215,6 +215,9 @@ impl Gameplay {
         match self.phase {
             GamePhase::Loading { step, next } => self.load_step(step, next, cx),
             GamePhase::Banner { count, mut next } => {
+                // gaps §2.3: the appear tween runs per drawn frame, and the scene is drawn under
+                // the banner (SR §4.5), so the fly finishes appearing during the countdown.
+                self.world.fly_render_driven(m, cx);
                 if next.expired_rearm(cx.now) {
                     self.banner_step(count - 1, next, m, cx);
                 }
@@ -571,6 +574,27 @@ mod tests {
         let mut f = Fade::new(true, FADE_MS);
         let ended: Vec<usize> = (1..=40).filter(|_| f.step()).collect();
         assert_eq!(ended, [33]);
+    }
+
+    /// gaps §2.3: the appear tween is render-driven and the scene is drawn under the banner
+    /// (SR §4.5), so a period-start fly has finished appearing by "2" (33 ticks after "3").
+    #[test]
+    fn the_period_start_fly_has_appeared_by_the_second_banner_digit() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig);
+        let world = rig.cx(|cx| World::new(&mut m, cx));
+        assert!(world.fly.appearing);
+        let mut g = Gameplay::loading(world, false, rig.now());
+        let at_two = |g: &Gameplay| matches!(g.phase, GamePhase::Banner { count: 2, .. });
+        for _ in 0..TICK_CAP {
+            if at_two(&g) {
+                break;
+            }
+            rig.step(&[], |k, cx| g.tick(k, &mut m, cx));
+        }
+        assert!(at_two(&g));
+        assert!(!g.world.fly.appearing);
+        assert!(rig.events.contains(&Event::play(SoundSlot::GOODIE_FLY)));
     }
 
     /// observed.md: nine clicks 250 ms apart, slot 52 at 2750 ms, then 3, 2, 1, Go at 1000 ms.
