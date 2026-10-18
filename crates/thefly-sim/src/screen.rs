@@ -260,11 +260,12 @@ impl Gameplay {
             self.phase = GamePhase::Banner { count, next };
             return;
         }
-        // shortcut: open item O16, the world waits under the loading screen and the banner and
-        // its period clock starts here; revisit if a capture shows the clock running earlier.
+        // `FUN_004015c8`: the clock is paused through the load and the banner, so starting it here
+        // matches within one tick. Then, with music on, one parity picks the track (odd → 2).
         self.world.clock = PeriodClock::new(cx.now, m.period_minutes());
         if m.music_on {
-            cx.emit(Event::Music(Music::Game(m.music_game2)));
+            let alt = cx.rng.odd();
+            cx.emit(Event::Music(Music::Game(alt)));
         }
         self.phase = GamePhase::Playing;
     }
@@ -681,9 +682,44 @@ mod tests {
         let playing = playing_at.unwrap() - countdown_at;
         assert!((4000..4100).contains(&playing), "{playing}");
         assert_eq!(g.world.clock, PeriodClock::new(playing_at.unwrap(), 2));
+    }
+
+    /// answers.md "Period clock start": with music on, the banner end draws one parity for the
+    /// track (odd → `music_game2`); with music off it draws nothing.
+    #[test]
+    fn the_banner_end_draws_the_music_track() {
+        let run = |music: bool| {
+            let mut rig = Rig::new(1);
+            let mut m = two_player(&mut rig);
+            m.music_on = music;
+            let world = rig.cx(|cx| World::bare(&m, cx));
+            let mut g = Gameplay::loading(world, false, rig.now());
+            for _ in 0..TICK_CAP {
+                if matches!(g.phase, GamePhase::Banner { count: 0, .. }) {
+                    break;
+                }
+                rig.step(&[], |k, cx| g.tick(k, &mut m, cx));
+            }
+            let before = rig.rng.clone();
+            for _ in 0..TICK_CAP {
+                if g.phase == GamePhase::Playing {
+                    break;
+                }
+                rig.step(&[], |k, cx| g.tick(k, &mut m, cx));
+            }
+            (before, rig.rng, rig.events)
+        };
+        let (before_off, off, events_off) = run(false);
+        let (before_on, on, events_on) = run(true);
+        assert_eq!(before_off, before_on);
+        let mut probe = off.clone();
+        let alt = probe.odd();
+        assert_eq!(on, probe);
+        assert!(events_on.contains(&Event::Music(Music::Game(alt))));
         assert!(
-            rig.events
-                .contains(&Event::Music(Music::Game(m.music_game2)))
+            !events_off
+                .iter()
+                .any(|e| matches!(e, Event::Music(Music::Game(_))))
         );
     }
 
