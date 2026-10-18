@@ -159,8 +159,8 @@ pub enum GamePhase {
         step: u32,
         next: Timer,
     },
-    /// "3, 2, 1, Go!": 3 down to 0, one per 1000 ms; slot 52 at the start. Open item O16: whether
-    /// the world ticks under the banner.
+    /// "3, 2, 1, Go!": 3 down to 0, one per 1000 ms; slot 52 at the start. Open item O16: only the
+    /// render-driven step 18b runs under the banner; whether the rest of the world ticks is open.
     Banner {
         count: i32,
         next: Timer,
@@ -215,8 +215,10 @@ impl Gameplay {
         match self.phase {
             GamePhase::Loading { step, next } => self.load_step(step, next, cx),
             GamePhase::Banner { count, mut next } => {
-                // gaps §2.3: the appear tween runs per drawn frame, and the scene is drawn under
-                // the banner (SR §4.5), so the fly finishes appearing during the countdown.
+                // gaps §2.3: the appear tween runs per drawn frame; a Wine capture shows the fly fully
+                // drawn at "2", so the scene is drawn under the banner.
+                // shortcut: O16, only step 18b runs here, so slot 38 and the survival timer start
+                // during the countdown; revisit when FUN_00405538 is read.
                 self.world.fly_render_driven(m, cx);
                 if next.expired_rearm(cx.now) {
                     self.banner_step(count - 1, next, m, cx);
@@ -576,8 +578,8 @@ mod tests {
         assert_eq!(ended, [33]);
     }
 
-    /// gaps §2.3: the appear tween is render-driven and the scene is drawn under the banner
-    /// (SR §4.5), so a period-start fly has finished appearing by "2" (33 ticks after "3").
+    /// gaps §2.3: the appear tween is render-driven and a Wine capture shows the fly drawn under
+    /// the banner, so a period-start fly has finished appearing by "2" (33 ticks after "3").
     #[test]
     fn the_period_start_fly_has_appeared_by_the_second_banner_digit() {
         let mut rig = Rig::new(1);
