@@ -2,10 +2,11 @@
 
 use crate::clock::Timer;
 use crate::ctx::Ctx;
-use crate::highscores::HighScoreTable;
+use crate::event::{PlayParams, SoundOp, SoundSlot};
+use crate::highscores::{HighScoreScreen, HighScoreTable};
 use crate::input::KeyState;
 use crate::match_state::MatchState;
-use crate::screen::{Fade, MatchFlow};
+use crate::screen::{FADE_END_MS, Fade, Flow, MatchFlow, Screen};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
@@ -92,10 +93,32 @@ pub const MIN_SHOW_MS: u64 = 3000;
 pub const BREAKDOWN_KILLS_AFTER_MS: u64 = 1500;
 pub const BREAKDOWN_KILL_STEP_MS: u64 = 30;
 
+/// The recorded high score loses this per kill (ai-and-rules §8.5).
+pub const KILL_PENALTY: i32 = 10;
+/// The second key's fade-out is armed this long after the first (SR §5.2).
+pub const SECOND_KEY_MS: u64 = 500;
+
 impl StatsScreen {
     pub fn new(m: &MatchState, cx: &mut Ctx) -> Self {
-        let _ = (m, cx);
-        todo!("W3 screens-and-rendering §5.2")
+        let breakdown = m.config.highscore().then(|| Breakdown {
+            points: 0,
+            kills: 0,
+            kills_after: Timer::armed(cx.now, BREAKDOWN_KILLS_AFTER_MS),
+            kill_step: Timer::UNARMED,
+            finished: false,
+        });
+        Self {
+            page: m.stats.page(),
+            fade: Fade::new(false, FADE_END_MS),
+            leaving: false,
+            min_show: Timer::armed(cx.now, MIN_SHOW_MS),
+            breakdown,
+        }
+    }
+
+    /// The breakdown's result: score − 10 × kills (ai-and-rules §8.5).
+    pub fn recorded(m: &MatchState) -> i32 {
+        m.economy.fly.score - KILL_PENALTY * m.stats.kills
     }
 
     /// Highscore mode with a qualifying score → high scores with name entry, else → menu.
@@ -106,8 +129,76 @@ impl StatsScreen {
         table: &HighScoreTable,
         cx: &mut Ctx,
     ) -> MatchFlow {
-        let _ = (keys, m, table, cx);
-        todo!("W3 game-spec §2.2 statistics, ai-and-rules §8.5")
+        let faded = self.fade.step();
+        if self.leaving {
+            return if faded {
+                MatchFlow::Leave(exit(m, table, cx))
+            } else {
+                MatchFlow::Stay
+            };
+        }
+        let (score, kills) = (m.economy.fly.score, m.stats.kills);
+        if let Some(b) = &mut self.breakdown {
+            b.count(score, kills, cx);
+        }
+        if !keys.skip() {
+            return MatchFlow::Stay;
+        }
+        if let Some(b) = self.breakdown.as_mut().filter(|b| !b.finished) {
+            (b.points, b.kills, b.finished) = (score, kills, true);
+            self.min_show.arm(cx.now, SECOND_KEY_MS);
+            return MatchFlow::Stay;
+        }
+        if self.min_show.expired(cx.now) {
+            self.leaving = true;
+            self.fade = Fade::new(true, FADE_END_MS);
+        }
+        MatchFlow::Stay
+    }
+}
+
+impl Breakdown {
+    /// Points +10 per tick, then after 1500 ms kills one per 30 ms (SR §5.2). shortcut: the tick
+    /// sound's slot is not named; the bourse's ring slot is used.
+    fn count(&mut self, score: i32, kills: i32, cx: &mut Ctx) {
+        if self.finished {
+            return;
+        }
+        if self.points < score {
+            self.points = (self.points + 10).min(score);
+            let freq = 21_500 + cx.rng.r(500) as u32;
+            cx.sound(SoundSlot::RING_A, play_at(freq));
+        }
+        if self.kills_after.expired(cx.now) && !self.kill_step.is_armed() {
+            self.kill_step.arm(cx.now, BREAKDOWN_KILL_STEP_MS);
+        }
+        if self.kills < kills && self.kill_step.expired_rearm(cx.now) {
+            self.kills += 1;
+            let freq = 18_500 + cx.rng.r(500) as u32;
+            cx.sound(SoundSlot::RING_A, play_at(freq));
+        }
+        self.finished = self.points >= score && self.kills >= kills;
+    }
+}
+
+fn play_at(freq: u32) -> SoundOp {
+    SoundOp::Play(PlayParams {
+        freq_hz: Some(freq),
+        ..PlayParams::default()
+    })
+}
+
+/// ai-and-rules §8.5: qualify on the fly score; the entry stores the lower recorded value.
+fn exit(m: &MatchState, table: &HighScoreTable, cx: &mut Ctx) -> Flow {
+    let row = table.qualifies(m.economy.fly.score);
+    match row.filter(|_| m.config.highscore()) {
+        Some(row) => {
+            let entry = Some((row, StatsScreen::recorded(m)));
+            Flow::Go(Screen::HighScores(Box::new(HighScoreScreen::new(
+                entry, cx,
+            ))))
+        }
+        None => Flow::Menu,
     }
 }
 

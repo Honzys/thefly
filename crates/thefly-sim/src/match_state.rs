@@ -225,6 +225,8 @@ pub struct MatchState {
     pub traps: TrapLayout,
     /// The three winch slots (lift anchors), stored units.
     pub winch: [i32; 3],
+    /// The Options toggle at match start.
+    pub music_on: bool,
     /// Picked per match when music is on.
     pub music_game2: bool,
 }
@@ -251,6 +253,7 @@ impl MatchState {
             stats: Stats::default(),
             traps: TrapLayout::default(),
             winch,
+            music_on,
             music_game2,
         }
     }

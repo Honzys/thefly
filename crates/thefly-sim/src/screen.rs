@@ -6,10 +6,10 @@ use crate::bonus::BonusRound;
 use crate::bourse::Bourse;
 use crate::clock::{FPS, Timer};
 use crate::ctx::Ctx;
-use crate::event::Event;
+use crate::event::{Event, Music, SoundSlot};
 use crate::highscores::{HighScoreScreen, HighScoreTable};
 use crate::input::{KeyState, Scancode};
-use crate::match_state::{MatchState, Players};
+use crate::match_state::{Advance, MatchState, PeriodClock, Players};
 use crate::menu::Menu;
 use crate::shop::{GoodiesShop, TrapsShop};
 use crate::stats::StatsScreen;
@@ -130,8 +130,7 @@ pub struct KeysPage {
 impl KeysPage {
     /// True when Esc or Enter closes the page.
     pub fn tick(&mut self, keys: &KeyState) -> bool {
-        let _ = keys;
-        todo!("W3 game-spec §2.2 keys page, screens-and-rendering §2.6")
+        keys.skip()
     }
 }
 
@@ -142,6 +141,16 @@ pub fn tutorial_page_tick(keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> 
     }
     Gameplay::enter(m, cx)
 }
+
+/// Farewell length. shortcut: open item O5, the timing was not read; revisit with a capture.
+pub const FAREWELL_MS: u64 = 3000;
+
+/// The UI click on a selection move.
+pub const CLICK: Event = Event::Click {
+    volume_cb: 0,
+    freq_hz: None,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GamePhase {
     /// The loading screen's fixed busy-waits, replayed as time (one click per step).
@@ -163,33 +172,135 @@ pub enum GamePhase {
 pub struct Gameplay {
     pub phase: GamePhase,
     pub world: World,
+    /// The loading backdrop: `LOADING2` when true (picked 50/50).
+    pub loading_alt: bool,
 }
 
 impl Gameplay {
     /// Entry (`FUN_00408c2a`): advance the period; over → menu, else build the world.
     pub fn enter(m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
-        let _ = (m, cx);
-        todo!(
-            "W3 game-spec §2.2 gameplay, ai-and-rules §9.1; open item O16: timers armed before the loading waits"
-        )
+        if m.advance(cx) == Advance::Over {
+            return MatchFlow::Leave(Flow::Menu);
+        }
+        // shortcut: open item O16, the backdrop pick is drawn before the world is built;
+        // revisit if a capture shows the other order.
+        let loading_alt = cx.rng.odd();
+        let world = World::new(m, cx);
+        MatchFlow::Next(MatchScreen::Gameplay(Box::new(Self::loading(
+            world,
+            loading_alt,
+            cx.now,
+        ))))
+    }
+
+    /// The period's first phase, around a built world.
+    pub fn loading(world: World, loading_alt: bool, now: u64) -> Self {
+        Self {
+            phase: GamePhase::Loading {
+                step: 0,
+                next: Timer::armed(now, 0),
+            },
+            world,
+            loading_alt,
+        }
     }
 
     /// Esc opens the quit dialog unless game+0x407bc blocks it; period over → bonus or shop.
     pub fn tick(&mut self, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
-        let _ = (keys, m, cx);
-        todo!("W3 ai-and-rules §9.2, screens-and-rendering §4.1, §4.5")
+        match self.phase {
+            GamePhase::Loading { step, next } => self.load_step(step, next, cx),
+            GamePhase::Banner { count, mut next } => {
+                if next.expired_rearm(cx.now) {
+                    self.banner_step(count - 1, next, m, cx);
+                }
+            }
+            GamePhase::Playing => return self.play(keys, m, cx),
+        }
+        MatchFlow::Stay
+    }
+
+    /// screens-and-rendering §4.1: nine clicks 200 ms apart, then 500 ms more.
+    fn load_step(&mut self, step: u32, next: Timer, cx: &mut Ctx) {
+        if !next.expired(cx.now) {
+            return;
+        }
+        if step == LOADING_STEPS {
+            cx.emit(Event::play(SoundSlot::COUNTDOWN));
+            self.phase = GamePhase::Banner {
+                count: 3,
+                next: Timer::armed(cx.now, BANNER_STEP_MS),
+            };
+            return;
+        }
+        cx.emit(Event::Click {
+            volume_cb: -1000,
+            freq_hz: Some(33_000),
+        });
+        let wait = if step + 1 == LOADING_STEPS {
+            LOADING_STEP_MS + LOADING_TAIL_MS
+        } else {
+            LOADING_STEP_MS
+        };
+        self.phase = GamePhase::Loading {
+            step: step + 1,
+            next: Timer::armed(cx.now, wait),
+        };
+    }
+
+    /// "3, 2, 1, Go!"; below 0 the period starts.
+    fn banner_step(&mut self, count: i32, next: Timer, m: &MatchState, cx: &mut Ctx) {
+        if count >= 0 {
+            self.phase = GamePhase::Banner { count, next };
+            return;
+        }
+        // shortcut: open item O16, the world waits under the loading screen and the banner and
+        // its period clock starts here; revisit if a capture shows the clock running earlier.
+        self.world.clock = PeriodClock::new(cx.now, m.period_minutes());
+        if m.music_on {
+            cx.emit(Event::Music(Music::Game(m.music_game2)));
+        }
+        self.phase = GamePhase::Playing;
+    }
+
+    /// ai-and-rules §9.2: the flag set by the previous world tick is acted on here.
+    fn play(&mut self, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
+        if self.world.period_over {
+            cx.emit(Event::Music(Music::Stop));
+            return MatchFlow::Next(after_period(m, cx));
+        }
+        if self.world.paused {
+            return MatchFlow::Stay;
+        }
+        if keys.pressed(Scancode::ESCAPE) {
+            return MatchFlow::Leave(Flow::Quit);
+        }
+        self.world.tick(keys, m, cx);
+        MatchFlow::Stay
     }
 
     /// The quit dialog opened: freeze the period clock and the paused steps.
     pub fn pause(&mut self, now: u64) {
-        let _ = now;
-        todo!("W3 ai-and-rules §8.6")
+        self.world.paused = true;
+        self.world.clock.pause(now);
     }
 
     /// Dialog answered No: resume, and block the action/swing keys until released.
     pub fn resume(&mut self, now: u64) {
-        let _ = now;
-        todo!("W3 ai-and-rules §8.6, fly-and-world §2 step 1")
+        self.world.paused = false;
+        self.world.clock.resume(now);
+        self.world.fly_action_memory = 10;
+        self.world.farmer_swing_memory = 10;
+    }
+}
+
+/// ai-and-rules §9.2 steps 2–4.
+fn after_period(m: &mut MatchState, cx: &mut Ctx) -> MatchScreen {
+    if m.bonus_due() {
+        MatchScreen::Bonus(Box::new(BonusRound::new(m, cx)))
+    } else if m.over_after_period() {
+        MatchScreen::Winner(Box::new(Winner::new(m, cx)))
+    } else {
+        MatchScreen::GoodiesShop(Box::new(GoodiesShop::new(m, cx)))
     }
 }
 
@@ -201,13 +312,17 @@ pub struct Farewell {
 
 impl Farewell {
     pub fn new(cx: &mut Ctx) -> Self {
-        let _ = cx;
-        todo!("W3 screens-and-rendering §5.4; open item")
+        Self {
+            until: Timer::armed(cx.now, FAREWELL_MS),
+        }
     }
 
     pub fn tick(&mut self, cx: &mut Ctx) -> Flow {
-        let _ = cx;
-        todo!("W3 screens-and-rendering §5.4; open item")
+        if self.until.expired(cx.now) {
+            Flow::Go(Screen::Exit)
+        } else {
+            Flow::Stay
+        }
     }
 }
 
@@ -230,8 +345,24 @@ impl QuitDialog {
 
     /// Left/Right toggle, Enter answers. Some(true) is YES.
     pub fn tick(&mut self, keys: &KeyState, cx: &mut Ctx) -> Option<bool> {
-        let _ = (keys, cx);
-        todo!("W3 screens-and-rendering §2.5; Esc behaviour is open item O15")
+        // shortcut: open item O15, Esc answers No (dialogs read only arrows and Enter, gaps
+        // §1.3); revisit if a capture shows Esc ignored.
+        if keys.pressed(Scancode::ESCAPE) {
+            return Some(false);
+        }
+        if keys.pressed(Scancode::RETURN) {
+            return Some(self.yes);
+        }
+        let yes = if keys.pressed(Scancode::LEFT) {
+            true
+        } else if keys.pressed(Scancode::RIGHT) {
+            false
+        } else {
+            return None;
+        };
+        self.yes = yes;
+        cx.emit(CLICK);
+        None
     }
 }
 
