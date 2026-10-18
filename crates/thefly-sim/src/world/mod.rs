@@ -23,7 +23,7 @@ pub mod traps;
 
 use crate::ctx::Ctx;
 use crate::input::{FarmerPad, FlyPad, KeyState};
-use crate::match_state::{MatchState, PeriodClock, Players};
+use crate::match_state::{MatchState, Meal, PeriodClock, Players};
 
 /// The world's ring width W in fly-layer pixels: the main scenery layer's width (game-spec §4.1).
 /// `Maison`, `dehors` and `arene` are all 4000 wide (gaps §4.2); `GameData::check` rejects data where they are not.
@@ -85,6 +85,11 @@ impl World {
             m.config.players == Players::Two,
             "World::bare has no AI; use World::new for one player"
         );
+        Self::build(m, cx)
+    }
+
+    /// Every actor from its own constructor, in the order the original constructs them.
+    fn build(m: &MatchState, cx: &mut Ctx) -> Self {
         let data = cx.data;
         let layers = camera::layer_images(m.scene()).map(|name| data.size(name).w);
         let boot = data.size("i_botte");
@@ -122,9 +127,29 @@ impl World {
 
     /// Builds the period: the loading work of `FUN_004015c8` (placement, respawn with 3000 tries,
     /// AI creation, trap entities from the shop layout, timers armed at `cx.now`).
+    ///
+    /// shortcut: the docs name the calls of `FUN_004015c8` but not their order; this takes
+    /// traps, then placement (it needs the trap spans), then the fly's 3000-try respawn (it
+    /// needs the objects), then the AI [I]. The AI gets a view holding only the fly centre.
+    /// Revisit when `FUN_004015c8` is read in order.
     pub fn new(m: &mut MatchState, cx: &mut Ctx) -> Self {
-        let _ = (m, cx);
-        todo!("W1: period start, fly-and-world §5.2, §3.7; screens §4.1")
+        let mut world = Self::build(m, cx);
+        world.traps = traps::Traps::from_layout(&m.traps, cx);
+        // shortcut: no meal before the first period is impossible after `advance`; breakfast
+        // keeps a hand-built match playable. Revisit if a caller builds without advancing.
+        let meal = m.progress.meal.unwrap_or(Meal::Breakfast);
+        world.objects = objects::Objects::place(m, meal, &world.traps, cx);
+        world.fly.request_respawn(cx);
+        world.place_fly(fly::RESPAWN_TRIES_PERIOD_START, cx);
+        if m.config.players == Players::One {
+            let f = &world.fly;
+            let view = ai::AiView {
+                fly_centre: (f.x + f.size.w / 2, f.y + f.size.h / 2),
+                ..ai::AiView::default()
+            };
+            world.ai = Some(ai::FarmerAi::new(m.config.ai_level, &view, cx));
+        }
+        world
     }
 
     /// One 65 Hz gameplay tick.
@@ -237,9 +262,26 @@ mod tests {
         World::bare(&m, &mut cx);
     }
 
-    /// The tick itself needs W1's fly physics and objects and W2's farmer and traps.
+    /// A 2P period at seed 1: placement and the fly's period-start respawn, with the fly clear
+    /// of every object and appearing.
     #[test]
-    #[ignore = "needs W1/W2"]
+    #[ignore = "needs W2 (Traps::from_layout)"]
+    fn a_new_period_places_objects_and_respawns_the_fly_clear_of_them() {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
+        let mut m = MatchState::new(two_player(), false, &mut cx);
+        m.advance(&mut cx);
+        let world = World::new(&mut m, &mut cx);
+        let placed = world.objects.list.iter().filter(|o| o.collectible).count();
+        assert!(placed > 0 && placed <= objects::MAX_PLACED);
+        assert_eq!(m.stats.available, placed as i32);
+        assert!(!world.objects.box_hit(&world.fly.inner_box()));
+        assert!(world.fly.appearing && world.ai.is_none());
+    }
+
+    /// The tick itself needs W2's farmer and traps.
+    #[test]
+    #[ignore = "needs W2"]
     fn a_built_world_ticks_with_no_input() {
         let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
         let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
