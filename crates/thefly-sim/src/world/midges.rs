@@ -181,6 +181,15 @@ impl Midge {
         Rect::new(self.x, self.y, s.w, s.h)
     }
 
+    /// The zapper tests a midge at (x, y + 7) (gaps §8.1).
+    fn arc_target(&self, cx: &Ctx) -> Rect {
+        let r = self.rect(cx);
+        Rect {
+            y: r.y + ARC_TEST_DY,
+            ..r
+        }
+    }
+
     /// `FUN_00442f95`, after the contact step (answers.md "Midge homing"): maybe new speeds,
     /// then x steers toward farmer x + home x and y toward farmer y + home y outside ±tol_y
     /// (inside, y wanders). The x tolerance is not used.
@@ -362,7 +371,7 @@ impl World {
     pub fn ambient_midges_step(&mut self, cx: &mut Ctx) {
         let swatter = self.swatter_gate();
         for m in &mut self.ambient_midges.slots {
-            let zapped = self.traps.arc_touches(m.x, m.y + ARC_TEST_DY, cx);
+            let zapped = self.traps.arcs_at(m.arc_target(cx), cx) > 0;
             m.contact(swatter, zapped, cx);
             m.ambient_update(cx);
             m.ambient_fan_push(&self.traps, cx);
@@ -387,7 +396,7 @@ impl World {
         let (mut k, mut in_box) = (0, 0);
         for m in self.midges.slots.iter_mut().filter(|m| m.active) {
             if k < SWAT_KILLS {
-                let zapped = self.traps.arc_touches(m.x, m.y + ARC_TEST_DY, cx);
+                let zapped = self.traps.arcs_at(m.arc_target(cx), cx) > 0;
                 let (hit, respawned) = m.contact(swatter, zapped, cx);
                 k += usize::from(zapped) + usize::from(hit);
                 m.dead |= respawned;

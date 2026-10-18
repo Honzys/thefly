@@ -239,8 +239,8 @@ impl Objects {
     /// §5.5 step 1 for every active object: landing dust, the object–object interaction
     /// (collectible, weight > 0), then the motion of §5.4 when not held.
     ///
-    /// shortcut: the fan push of objects (`FUN_0042754d`) is not documented beyond "sideways"
-    /// and needs the fan strength (open item O9); it is not applied. Revisit with O9.
+    /// shortcut: the fan push of objects (`FUN_0042754d`) is not applied; answers.md "Fan
+    /// strength" decodes the blow field for the fly only. Revisit when `FUN_0042754d` is read.
     pub fn step_objects(&mut self, delta: f64, cx: &mut Ctx) {
         for i in 0..self.list.len() {
             if !self.list[i].active {
@@ -613,7 +613,8 @@ impl Objects {
     ///
     /// shortcut: on a collision the object goes back to its previous position before the fly
     /// is placed on it (§5.5 step 8.5 does not say). Revisit when `FUN_0042f3b1` is read. The
-    /// fan push between the carry and vy += weight is skipped with the object fan push (O9).
+    /// fan push between the carry and vy += weight is skipped with the object fan push (the port
+    /// rewrites the carried object's v from the fly on every carry).
     fn carry(&mut self, fly: &mut Fly, cx: &mut Ctx) {
         let Some(i) = self.carried else {
             return;

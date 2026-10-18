@@ -4,11 +4,11 @@
 use super::collision::{Rect, Shape, fly_outline, outlines_overlap};
 use super::fly::RawDamage;
 use super::lift::SHOP_SCALE;
-use super::{OBJECT_PARALLAX, W, World};
+use super::{OBJECT_PARALLAX, SCREEN_W, W, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::data::Size;
-use crate::event::{Event, Pan, PlayParams, SoundOp, SoundSlot};
+use crate::event::{Pan, PlayParams, SoundOp, SoundSlot};
 use crate::match_state::TrapLayout;
 
 pub const MAX_FLYPAPERS: usize = 7;
@@ -18,7 +18,7 @@ pub const MAX_ZAPPERS: usize = 2;
 pub const FAN_REHIT_MS: u64 = 100;
 /// Flypaper divides both velocity components by this each tick of overlap.
 pub const FLYPAPER_DRAG: f64 = 1.4;
-/// Zapper arc: upward push and damage per tick.
+/// Zapper arc on the fly: upward push and damage per arc.
 pub const ARC_PUSH: i32 = 180;
 pub const ARC_DAMAGE: i32 = 1;
 /// The 1.25 layer's screen wrap, trunc(W × 1.25).
@@ -27,9 +27,9 @@ pub const SCREEN_WRAP: i32 = 5000;
 pub const FLYPAPER_VARIANT_ROLL: i32 = 10;
 pub const FLYPAPER_VARIANT_ABOVE: i32 = 4;
 pub const FLYPAPER_VARIANT_SPRITE: &str = "colle_mouche2";
-/// +0x91c. Open item O9: not in the docs; a guess of the order of the fly's speeds.
-pub const FAN_STRENGTH: i32 = 400;
-/// The fan sheet's frame count: 666 / 3 = 222, the 223 stored width (GS §9.3, AR §4.1).
+/// +0x91c (answers.md "Fan strength"): the hit adds ±500 to vx and subtracts 600 from vy.
+pub const FAN_STRENGTH: i32 = 500;
+/// The fan sheet's frame count: 666 / 3 = 222, the fan width +0x54 (GS §9.3, answers.md O22).
 pub const FAN_FRAMES: i32 = 3;
 /// A fan hit: vy −= strength + 100; damage R(20) + 40, or R(10) + 20 with SuperFly; slot 45 at
 /// 20000 + R(6000) Hz (FW §7.4, game-spec §4.6).
@@ -40,17 +40,34 @@ pub const FAN_DAMAGE_SUPERFLY_RAND: i32 = 10;
 pub const FAN_DAMAGE_SUPERFLY_BASE: i32 = 20;
 pub const FAN_HIT_HZ: i32 = 20_000;
 pub const FAN_HIT_HZ_RAND: i32 = 6000;
-/// The fan loop at −100 while blowing; fans always blow (O9), so the −400 idle level is unused.
+/// The blow field `FUN_00429cbc` (answers.md "Fan strength"): the cone reaches 500 px past the
+/// mouth, its rows slant up by 0.5 (top) and 0.35 (bottom) per px from the base; the push
+/// P = trunc((1 − |mouth − x| / 500) × 200) goes 0.75 to vx and 0.25 to −vy.
+pub const BLOW_REACH: i32 = 500;
+pub const BLOW_PEAK: f64 = 200.0;
+pub const BLOW_TOP_SLANT: f64 = 0.5;
+pub const BLOW_BOTTOM_SLANT: f64 = 0.35;
+pub const BLOW_X_SHARE: f64 = 0.75;
+pub const BLOW_Y_SHARE: f64 = 0.25;
+/// answers.md "Trap loop volumes": fans −100 (any on screen, or a single positional fan), else
+/// −400; zappers −200 (any on screen), else −500, a single positional zapper −450.
 pub const FAN_LOUD_CB: i32 = -100;
-/// The zapper loop: −500 idle (−450 for a single zapper), −200 while arcing.
+pub const FAN_QUIET_CB: i32 = -400;
+pub const ZAPPER_SEEN_CB: i32 = -200;
 pub const ZAPPER_IDLE_CB: i32 = -500;
 pub const ZAPPER_SINGLE_CB: i32 = -450;
-pub const ZAPPER_ARC_CB: i32 = -200;
 /// A fly whose top is within (zapper height − 80) of the zapper's top is grilled.
 pub const GRILL_MARGIN: i32 = 80;
-/// Open item O9: the arc schedule, idle then arcing.
-pub const ARC_IDLE_MS: u64 = 3000;
-pub const ARC_MS: u64 = 400;
+/// The arc test `FUN_00428b47` (answers.md "Zapper arc reach and schedule"): reach 250 px below
+/// the zapper's bottom, chance trunc((1 − d / 250) × 100) against R(100), a 100 ms retry, an arc
+/// of R(80) + 30 ms and slot 39 at R(800) + 11025 Hz.
+pub const ARC_REACH: i32 = 250;
+pub const ARC_ROLL: i32 = 100;
+pub const ARC_RETRY_MS: u64 = 100;
+pub const ARC_LEN_RAND: i32 = 80;
+pub const ARC_LEN_BASE_MS: i32 = 30;
+pub const ARC_HZ_RAND: i32 = 800;
+pub const ARC_HZ: i32 = 11_025;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrapKind {
@@ -132,13 +149,14 @@ pub struct Flypaper {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fan {
+    /// Fan type 1 (+0x918), which pushes right; type 2 pushes left.
     pub facing_right: bool,
     pub x: i32,
     pub y: i32,
-    /// +0x91c. Open item O9: its value.
+    /// +0x54, the frame width (222).
+    pub w: i32,
+    /// +0x91c.
     pub strength: i32,
-    /// Loud loop (−100) while blowing, else −400. Open item O9: the blow schedule.
-    pub blowing: bool,
     pub rehit: Timer,
 }
 
@@ -146,9 +164,11 @@ pub struct Fan {
 pub struct Zapper {
     pub x: i32,
     pub y: i32,
-    /// Arc active (loop −200, slot 39). Open item O9: the arc schedule (`FUN_00428b47`).
+    /// An arc is on (slot 39 played at its start), until `arc_timer` runs out.
     pub arcing: bool,
     pub arc_timer: Timer,
+    /// +0x948: after a failed arc roll, no arc for 100 ms.
+    pub retry: Timer,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -156,6 +176,96 @@ pub struct Traps {
     pub flypapers: Vec<Flypaper>,
     pub fans: Vec<Fan>,
     pub zappers: Vec<Zapper>,
+    /// The last volume set on the fan (44) and zapper (40) loops.
+    pub fan_cb: i32,
+    pub zapper_cb: i32,
+}
+
+/// One fan type's cone, as offsets from the fan's screen x and y (answers.md "Fan strength").
+struct Cone {
+    base: i32,
+    mouth: i32,
+    top: i32,
+    bottom: i32,
+}
+
+const CONE_RIGHT: Cone = Cone {
+    base: 0,
+    mouth: 135,
+    top: 42,
+    bottom: 249,
+};
+const CONE_LEFT: Cone = Cone {
+    base: 222,
+    mouth: 93,
+    top: 43,
+    bottom: 279,
+};
+
+impl Fan {
+    /// `FUN_00429cbc`: the (dvx, dvy) this fan's wind gives a point (the fly's centre).
+    // shortcut: answers.md says type 2 "unwraps cx near the wrap edge" without the rule; the
+    // port adds the wrap when the cone's base is past it and the point is left of the wrapped
+    // base. Revisit when FUN_00429cbc's unwrap is read.
+    fn blow(&self, (px, py): (i32, i32)) -> (i32, i32) {
+        let x = screen_x(self.x);
+        let (cone, dir) = if self.facing_right {
+            (CONE_RIGHT, 1)
+        } else {
+            (CONE_LEFT, -1)
+        };
+        let (a, m) = (x + cone.base, x + cone.mouth);
+        let wrapped = !self.facing_right && a > SCREEN_WRAP && px < a - SCREEN_WRAP;
+        let px = if wrapped { px + SCREEN_WRAP } else { px };
+        let inside = if self.facing_right {
+            a < px && px < m + BLOW_REACH
+        } else {
+            m - BLOW_REACH < px && px < a
+        };
+        let d = f64::from((a - px).abs());
+        let top = f64::from(self.y + cone.top) - BLOW_TOP_SLANT * d;
+        let bottom = f64::from(self.y + cone.bottom) - BLOW_BOTTOM_SLANT * d;
+        let py = f64::from(py);
+        if !inside || py <= top || py >= bottom {
+            return (0, 0);
+        }
+        let p = (1.0 - f64::from((m - px).abs()) / f64::from(BLOW_REACH)) * BLOW_PEAK;
+        let p = f64::from(p as i32);
+        (
+            dir * (BLOW_X_SHARE * p) as i32,
+            -((BLOW_Y_SHARE * p) as i32),
+        )
+    }
+}
+
+impl Zapper {
+    /// `FUN_00428b47` for one target (answers.md "Zapper arc reach and schedule"): column, no
+    /// arc on or retry running, reach, then the R(100) chance. True when an arc starts.
+    fn arc_at(&mut self, t: Rect, size: Size, cx: &mut Ctx) -> bool {
+        let zx = visible_x(self.x, size.w);
+        let column = t.x - size.w <= zx && zx <= t.x + t.w;
+        let retrying = self.retry.is_armed() && !self.retry.expired(cx.now);
+        let bottom = self.y + size.h;
+        if !column || self.arcing || retrying || t.y > bottom + ARC_REACH {
+            return false;
+        }
+        let d = f64::from((t.y - bottom).abs());
+        let chance = ((1.0 - d / f64::from(ARC_REACH)) * 100.0) as i32;
+        if cx.rng.r(ARC_ROLL) > chance {
+            self.retry.arm(cx.now, ARC_RETRY_MS);
+            return false;
+        }
+        let ms = cx.rng.r(ARC_LEN_RAND) + ARC_LEN_BASE_MS;
+        self.arc_timer.arm(cx.now, u64::try_from(ms).unwrap_or(0));
+        self.arcing = true;
+        let freq = cx.rng.r(ARC_HZ_RAND) + ARC_HZ;
+        let params = PlayParams {
+            freq_hz: u32::try_from(freq).ok(),
+            ..PlayParams::default()
+        };
+        cx.sound(SoundSlot::ZAPPER_ARC, SoundOp::Play(params));
+        true
+    }
 }
 
 impl Traps {
@@ -165,6 +275,7 @@ impl Traps {
     /// Starts the fan (44) and zapper (40) loops.
     pub fn from_layout(layout: &TrapLayout, cx: &mut Ctx) -> Self {
         let mut t = Self::default();
+        let fan_w = fan_frame(cx).w;
         for slot in &layout.slots {
             let x = (f64::from(slot.x) / OBJECT_PARALLAX) as i32;
             let spec = slot.kind.spec();
@@ -184,8 +295,8 @@ impl Traps {
                         facing_right: slot.kind == TrapKind::FanRight,
                         x,
                         y,
+                        w: fan_w,
                         strength: FAN_STRENGTH,
-                        blowing: true,
                         rehit: Timer::UNARMED,
                     });
                 }
@@ -194,7 +305,8 @@ impl Traps {
                         x,
                         y,
                         arcing: false,
-                        arc_timer: Timer::armed(cx.now, ARC_IDLE_MS),
+                        arc_timer: Timer::UNARMED,
+                        retry: Timer::UNARMED,
                     });
                 }
                 _ => {}
@@ -204,63 +316,98 @@ impl Traps {
         t
     }
 
-    fn start_loops(&self, cx: &mut Ctx) {
+    fn start_loops(&mut self, cx: &mut Ctx) {
+        (self.fan_cb, self.zapper_cb) = self.loop_levels(cx);
         if !self.fans.is_empty() {
             let params = PlayParams {
-                volume_cb: FAN_LOUD_CB,
+                volume_cb: self.fan_cb,
                 ..PlayParams::default()
             };
             cx.sound(SoundSlot::FAN, SoundOp::Loop(params));
         }
         if !self.zappers.is_empty() {
             let params = PlayParams {
-                volume_cb: self.zapper_idle_cb(),
+                volume_cb: self.zapper_cb,
                 ..PlayParams::default()
             };
             cx.sound(SoundSlot::ZAPPER_HUM, SoundOp::Loop(params));
         }
     }
 
-    /// −500 idle, −450 when there is a single (positional) zapper (game-spec §4.6).
-    fn zapper_idle_cb(&self) -> i32 {
-        if self.zappers.len() == 1 {
-            ZAPPER_SINGLE_CB
-        } else {
-            ZAPPER_IDLE_CB
+    /// The fan and zapper loop volumes (answers.md "Trap loop volumes"): a single trap plays
+    /// positionally at a fixed level, several follow "any on screen" (`FUN_00418b40`).
+    fn loop_levels(&self, cx: &Ctx) -> (i32, i32) {
+        let fan = match self.fans.as_slice() {
+            [_] => FAN_LOUD_CB,
+            fans if fans.iter().any(|f| on_screen(f.x, f.w)) => FAN_LOUD_CB,
+            _ => FAN_QUIET_CB,
+        };
+        let zw = TrapKind::Zapper.spec_size(cx).w;
+        let zapper = match self.zappers.as_slice() {
+            [_] => ZAPPER_SINGLE_CB,
+            zs if zs.iter().any(|z| on_screen(z.x, zw)) => ZAPPER_SEEN_CB,
+            _ => ZAPPER_IDLE_CB,
+        };
+        (fan, zapper)
+    }
+
+    /// Per tick: set a loop's volume when its level changes.
+    fn update_loops(&mut self, cx: &mut Ctx) {
+        let (fan, zapper) = self.loop_levels(cx);
+        if !self.fans.is_empty() && fan != self.fan_cb {
+            self.fan_cb = fan;
+            cx.sound(SoundSlot::FAN, SoundOp::SetVolume(fan));
+        }
+        if !self.zappers.is_empty() && zapper != self.zapper_cb {
+            self.zapper_cb = zapper;
+            cx.sound(SoundSlot::ZAPPER_HUM, SoundOp::SetVolume(zapper));
         }
     }
 
-    /// A zapper arc touches (x, y): the point is in an arcing zapper's column (the midge test
-    /// `FUN_004278f3` at the midge's (x, y + 7)).
-    pub fn arc_touches(&self, x: i32, y: i32, cx: &Ctx) -> bool {
-        let w = TrapKind::Zapper.spec_size(cx).w;
-        self.zappers
-            .iter()
-            .any(|z| z.arcing && in_span(x, visible_x(z.x, w), w) && y >= z.y)
+    /// The arc test of every zapper against one target (the fly, or a midge at (x, y + 7)).
+    /// Returns how many arcs started; each draws rand.
+    pub fn arcs_at(&mut self, target: Rect, cx: &mut Ctx) -> usize {
+        let size = TrapKind::Zapper.spec_size(cx);
+        let mut arcs = 0;
+        for z in &mut self.zappers {
+            arcs += usize::from(z.arc_at(target, size, cx));
+        }
+        arcs
+    }
+
+    /// The summed blow field of every fan at a point.
+    pub fn blow(&self, point: (i32, i32)) -> (i32, i32) {
+        self.fans.iter().fold((0, 0), |(x, y), f| {
+            let (dx, dy) = f.blow(point);
+            (x + dx, y + dy)
+        })
     }
 
     /// (x, y) is inside a fan's frame, where its wind blows (`FUN_00427885`).
     pub fn fan_touches(&self, x: i32, y: i32, cx: &Ctx) -> bool {
-        let size = fan_frame(cx);
+        let h = fan_frame(cx).h;
         self.fans
             .iter()
-            .any(|f| in_span(x, visible_x(f.x, size.w), size.w) && in_span(y, f.y, size.h))
+            .any(|f| in_span(x, visible_x(f.x, f.w), f.w) && in_span(y, f.y, h))
     }
 
-    /// `FUN_00427bb4`: may an object occupy [x, x + w] (object placement units, the 1.25 layer's
-    /// screen x, FW §5.2 step 3)? Used by placement.
-    // shortcut: O22, the exact test is not decoded. Only fans share the table with the objects
-    // (flypapers and zappers hang from the top, stored y 0), so only a fan's span blocks, inclusive
-    // like the object-object test. Revisit when FUN_00427bb4 is read.
-    // A span past the 5000 ring end also blocks its wrapped part at the left (FW §4.4 step 6).
+    /// `FUN_00427bb4` (answers.md "Placement test against fans (O22)"): may an object occupy
+    /// [x, x + w] (the 1.25 layer's screen x, FW §5.2 step 3)? Blocked when
+    /// fan x − w ≤ x ≤ fan x + fan width, inclusive; zappers and flypapers are not tested. The
+    /// original's second clause (x + w ≥ 6250) never blocks inside the 5000 range.
     pub fn span_free(&self, x: i32, w: i32) -> bool {
-        let fan_w = TrapKind::FanLeft.spec().stored_width();
-        let clear = |fx: i32| x + w < fx || fx + fan_w < x;
         self.fans.iter().all(|f| {
             let fx = screen_x(f.x);
-            clear(fx) && clear(fx - SCREEN_WRAP)
+            !(fx - w <= x && x <= fx + f.w)
         })
     }
+}
+
+/// `FUN_00418b40`: a trap of a 1.25-layer x is on screen when it straddles the ring end or
+/// starts within the view.
+fn on_screen(layer_x: i32, w: i32) -> bool {
+    let x = screen_x(layer_x);
+    x + w >= SCREEN_WRAP || x <= SCREEN_W
 }
 
 /// A layer x on the 1.25 layer in placement units (FW §4.1 screen x before the wrap).
@@ -309,8 +456,8 @@ fn fan_frame(cx: &Ctx) -> Size {
 }
 
 impl World {
-    /// Step 13 (`FUN_00427270`): flypaper drag, fan push and damage, zapper grill and arc, the
-    /// loops (44, 40) and their positional single-trap variants.
+    /// Step 13 (`FUN_00427270`): the loops (44, 40) and their positional single-trap variants,
+    /// then flypaper drag, the fans' blow field and hit, the zappers' grill and arc.
     pub fn traps_step(&mut self, cx: &mut Ctx) {
         let delta = self.camera.delta;
         let t = &mut self.traps;
@@ -322,15 +469,23 @@ impl World {
         }
         for z in &mut t.zappers {
             scroll(&mut z.x, delta);
+            z.arcing = z.arc_timer.is_armed() && !z.arc_timer.expired(cx.now);
         }
-        self.zapper_schedule(cx);
+        t.update_loops(cx);
         self.single_trap_pan(delta, cx);
-        if !self.fly.alive() {
-            return;
+        if self.fly.alive() {
+            self.flypaper_drag(cx);
         }
-        self.flypaper_drag(cx);
-        self.fan_hits(cx);
-        self.zapper_hits(cx);
+        // answers.md "Fan strength": the fan skips the fly only while it is splatted (+0x2a4).
+        if !self.fly.splatted {
+            self.fan_blow();
+            self.fan_hits(cx);
+        }
+        // answers.md "Zapper arc reach": the fly is tested while +0x288, +0x2a4, +0x2a8 are 0.
+        let f = &self.fly;
+        if !(f.dying || f.splatted || f.zapper_splat) {
+            self.zapper_hits(cx);
+        }
     }
 
     /// FW §7.4 flypaper: both velocity components / 1.4 per overlapping tick, no sound.
@@ -349,6 +504,13 @@ impl World {
             self.fly.vx = (f64::from(self.fly.vx) / FLYPAPER_DRAG) as i32;
             self.fly.vy = (f64::from(self.fly.vy) / FLYPAPER_DRAG) as i32;
         }
+    }
+
+    /// `FUN_00429cbc`, before the hit test: the wind pushes the fly by its centre.
+    fn fan_blow(&mut self) {
+        let (dx, dy) = self.traps.blow(self.fly.centre());
+        self.fly.vx += dx;
+        self.fly.vy += dy;
     }
 
     /// FW §7.4 fan: the blades (`palesventi_*`) knock the fly at most once per 100 ms.
@@ -398,51 +560,24 @@ impl World {
         self.fly.add_raw_damage(damage, RawDamage::Fan { dir }, cx);
     }
 
-    /// FW §7.4 zapper: grill near the top of the column, else an arc pushes up and adds 1.
-    // shortcut: O9, the arc reach is not documented; the port lets an arc touch the whole column
-    // below the zapper. Revisit with FUN_00428b47.
+    /// FW §7.4 zapper: grill near the top of a column, else each arc that starts on the fly
+    /// pushes it up 180 and adds 1.
     fn zapper_hits(&mut self, cx: &mut Ctx) {
         let size = TrapKind::Zapper.spec_size(cx);
         let (fx, _) = self.fly.centre();
-        let column = self
-            .traps
-            .zappers
-            .iter()
-            .find(|z| in_span(fx, visible_x(z.x, size.w), size.w));
-        let Some(z) = column else {
-            return;
-        };
-        if self.fly.y - z.y <= size.h - GRILL_MARGIN {
+        let fy = self.fly.y;
+        let grill = self.traps.zappers.iter().any(|z| {
+            in_span(fx, visible_x(z.x, size.w), size.w) && fy - z.y <= size.h - GRILL_MARGIN
+        });
+        if grill {
             self.fly.grill(cx);
             return;
         }
-        if z.arcing {
+        let arcs = self.traps.arcs_at(self.fly_rect(), cx);
+        for _ in 0..arcs {
             self.fly.vy -= ARC_PUSH;
             self.fly
                 .add_raw_damage(ARC_DAMAGE, RawDamage::ZapperArc, cx);
-        }
-    }
-
-    /// The arc schedule: idle ARC_IDLE_MS, arc ARC_MS (slot 39, louder hum).
-    // shortcut: O9, FUN_00428b47's schedule is not decoded; a fixed idle/arc period with no rand
-    // keeps the RNG stream untouched. Revisit when it is read.
-    fn zapper_schedule(&mut self, cx: &mut Ctx) {
-        let idle_cb = self.traps.zapper_idle_cb();
-        for z in &mut self.traps.zappers {
-            if !z.arc_timer.expired(cx.now) {
-                continue;
-            }
-            z.arcing = !z.arcing;
-            let (ms, cb) = if z.arcing {
-                (ARC_MS, ZAPPER_ARC_CB)
-            } else {
-                (ARC_IDLE_MS, idle_cb)
-            };
-            z.arc_timer.arm(cx.now, ms);
-            cx.sound(SoundSlot::ZAPPER_HUM, SoundOp::SetVolume(cb));
-            if z.arcing {
-                cx.emit(Event::play(SoundSlot::ZAPPER_ARC));
-            }
         }
     }
 
@@ -452,10 +587,9 @@ impl World {
             return;
         }
         if let [f] = self.traps.fans.as_slice() {
-            let w = fan_frame(cx).w;
             let pan = Pan::ScreenX {
-                x: visible_x(f.x, w),
-                w,
+                x: visible_x(f.x, f.w),
+                w: f.w,
             };
             cx.sound(SoundSlot::FAN, SoundOp::Move(pan));
         }
@@ -490,9 +624,9 @@ mod tests {
         Fan {
             facing_right: false,
             x,
-            y: 600,
-            strength: 0,
-            blowing: false,
+            y: 300,
+            w: 222,
+            strength: FAN_STRENGTH,
             rehit: Timer::UNARMED,
         }
     }
@@ -503,7 +637,8 @@ mod tests {
         assert_eq!(w, [52, 223, 223, 638]);
     }
 
-    /// A fan at layer x 800 sits at placement x 1000 and spans [1000, 1223].
+    /// answers.md O22: a fan at layer x 800 sits at screen x 1000; a span [x, x + w] is blocked
+    /// for 1000 − w ≤ x ≤ 1000 + 222 (the frame width, not the stored 223).
     #[test]
     fn only_a_fan_span_blocks_an_object() {
         let traps = Traps {
@@ -515,28 +650,52 @@ mod tests {
             }],
             ..Traps::default()
         };
-        assert!(traps.span_free(899, 100) && traps.span_free(1224, 50));
-        assert!(!traps.span_free(900, 100) && !traps.span_free(1223, 50));
+        assert!(traps.span_free(899, 100) && traps.span_free(1223, 50));
+        assert!(!traps.span_free(900, 100) && !traps.span_free(1222, 50));
         assert!(traps.span_free(2500, 100), "flypapers hang above the table");
         assert!(Traps::default().span_free(0, 5000));
     }
 
-    /// A fan at layer 3920 (placement 4900) spans 4900..5123, which wraps onto 0..123 (FW §4.4).
+    /// answers.md O22: the original tests no wrapped copy (its x + w ≥ 6250 clause never fires),
+    /// so a fan at screen 4900 does not block the left edge.
     #[test]
-    fn a_fan_span_across_the_ring_end_blocks_the_left_edge() {
+    fn a_fan_span_at_the_ring_end_leaves_the_left_edge_free() {
         let traps = Traps {
             fans: vec![fan_at(3920)],
             ..Traps::default()
         };
-        assert!(!traps.span_free(50, 100) && !traps.span_free(4850, 100));
-        assert!(traps.span_free(124, 100));
+        assert!(traps.span_free(50, 100) && !traps.span_free(4850, 100));
+    }
+
+    /// Type 2 (left) at screen 500, y 300: base 722, mouth 593, rows 343..579. At (300, 400):
+    /// d = 422, rows 132..431.3; P = trunc((1 − 293/500) × 200) = 82; vx −61, vy −20. At
+    /// (300, 450) the point is under the slanted bottom; at 93 it is at the reach and outside.
+    #[test]
+    fn a_left_fan_blows_left_and_up_inside_its_slanted_cone() {
+        let fan = fan_at(400);
+        assert_eq!(fan.blow((300, 400)), (-61, -20));
+        assert_eq!(fan.blow((300, 450)), (0, 0));
+        assert_eq!(fan.blow((93, 400)), (0, 0));
+        assert_eq!(fan.blow((722, 400)), (0, 0));
+    }
+
+    /// Type 1 (right) at screen 500, y 300: base 500, mouth 635, rows 342..549. At (801, 350):
+    /// d = 301, rows 191.5..443.65; P = trunc((1 − 166/500) × 200) = 133; vx +99, vy −33.
+    #[test]
+    fn a_right_fan_blows_right_and_up() {
+        let fan = Fan {
+            facing_right: true,
+            ..fan_at(400)
+        };
+        assert_eq!(fan.blow((801, 350)), (99, -33));
+        assert_eq!(fan.blow((500, 400)), (0, 0));
     }
 }
-
 #[cfg(test)]
 mod layout_tests {
     use super::super::farmer::rig::Rig;
     use super::*;
+    use crate::event::Event;
     use crate::match_state::{MatchConfig, MatchState, Players, TrapSlot};
 
     fn slot(kind: TrapKind, x: i32) -> TrapSlot {
@@ -564,7 +723,8 @@ mod layout_tests {
         assert_eq!(rig.rng.rand(), 29358);
         // Stored 1000 is layer x 800; fans stand on the floor (600 − 300).
         assert_eq!((traps.fans[0].x, traps.fans[0].y), (800, 300));
-        assert!(traps.fans[0].facing_right && traps.fans[0].blowing);
+        assert!(traps.fans[0].facing_right);
+        assert_eq!((traps.fans[0].w, traps.fans[0].strength), (222, 500));
     }
 
     fn world_with(slots: Vec<TrapSlot>, rig: &mut Rig) -> World {
@@ -654,6 +814,144 @@ mod layout_tests {
         w.traps_step(&mut rig.at(1));
         assert!(w.fly.splatted);
     }
+
+    fn sounds(rig: &Rig, want: SoundSlot) -> Vec<SoundOp> {
+        rig.events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Sound { slot, op } if *slot == want => Some(*op),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Left fan at stored 500 (screen 500, y 300). A fly centred at (300, 400) is in the cone
+    /// and clear of the blades: vx −61, vy −20 (see the unit test), no hit. The blow runs on a
+    /// dying fly, not on a splatted one (answers.md "Fan strength").
+    #[test]
+    fn the_blow_field_pushes_the_fly_unless_it_is_splatted() {
+        let mut rig = Rig::new(1);
+        let mut w = world_with(vec![slot(TrapKind::FanLeft, 500)], &mut rig);
+        let place = |w: &mut World| (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (240, 353, 0, 0);
+        place(&mut w);
+        w.fly.dying = true;
+        w.traps_step(&mut rig.at(1));
+        assert_eq!((w.fly.vx, w.fly.vy), (-61, -20));
+        assert!(sounds(&rig, SoundSlot::FAN_HIT).is_empty());
+        place(&mut w);
+        w.fly.splatted = true;
+        w.traps_step(&mut rig.at(2));
+        assert_eq!((w.fly.vx, w.fly.vy), (0, 0));
+    }
+
+    /// Right fan at stored 500: a fly at (500, 350), centre (560, 397), is on the blades and
+    /// in the cone (d = 60, rows 312..528; P = trunc((1 − 75/500) × 200) = 170: +127, −42).
+    /// The hit adds +500 and −600 (answers.md "Fan strength").
+    #[test]
+    fn a_fan_hit_adds_500_and_lifts_600() {
+        let mut rig = Rig::new(1);
+        let mut w = world_with(vec![slot(TrapKind::FanRight, 500)], &mut rig);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (500, 350, 0, 0);
+        w.traps_step(&mut rig.at(1));
+        assert_eq!(sounds(&rig, SoundSlot::FAN_HIT).len(), 1);
+        assert_eq!((w.fly.vx, w.fly.vy), (127 + 500, -42 - 600));
+    }
+
+    /// Zapper at stored 1000 (screen 1000, 635 × 131 from y 0); a fly at (1000, 131) is below
+    /// the grill zone (y ≤ 51), d = 0 so the chance is 100. Seed 1: R(100) = 41 ≤ 100 arcs,
+    /// 18467 % 80 + 30 = 97 ms, slot 39 at 6334 % 800 + 11025 = 11759 Hz; vy −180, damage 1.
+    /// The next tick the arc is still on and nothing is drawn.
+    #[test]
+    fn an_arc_starts_on_the_chance_roll_and_lasts_r80_plus_30_ms() {
+        let mut rig = Rig::new(7);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
+        let mut rig = Rig::new(1);
+        (w.fly.x, w.fly.y, w.fly.vy) = (1000, 131, 0);
+        w.traps_step(&mut rig.at(1));
+        let z = w.traps.zappers[0];
+        assert!(z.arcing && !w.fly.splatted);
+        assert_eq!(z.arc_timer.remaining_ms(rig.at(1).now), 97);
+        assert_eq!((w.fly.vy, w.fly.damage_total), (-180, 1));
+        let freq = PlayParams {
+            freq_hz: Some(11_759),
+            ..PlayParams::default()
+        };
+        assert_eq!(sounds(&rig, SoundSlot::ZAPPER_ARC), [SoundOp::Play(freq)]);
+        w.traps_step(&mut rig.at(2));
+        assert_eq!(w.fly.vy, -180);
+        assert_eq!(rig.rng.rand(), 26500);
+    }
+
+    /// d = 200: chance trunc((1 − 0.8) × 100) = trunc(19.99…) = 19 < 41, so a 100 ms retry and
+    /// no draw on the next tick; past 250 below the bottom nothing is drawn at all.
+    #[test]
+    fn a_failed_roll_waits_100_ms_and_the_reach_is_250() {
+        let mut rig = Rig::new(7);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
+        let mut rig = Rig::new(1);
+        (w.fly.x, w.fly.y) = (1000, 331);
+        w.traps_step(&mut rig.at(1));
+        w.traps_step(&mut rig.at(2));
+        assert!(!w.traps.zappers[0].arcing);
+        assert_eq!(rig.rng.rand(), 18467);
+        w.traps.zappers[0].retry = Timer::UNARMED;
+        w.fly.y = 131 + 251;
+        w.traps_step(&mut rig.at(3));
+        assert_eq!(rig.rng.rand(), 6334);
+    }
+
+    /// The fly is not tested by the zapper while dying (+0x288), but is while stunned.
+    #[test]
+    fn a_dying_fly_is_not_zapped() {
+        let mut rig = Rig::new(7);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
+        let mut rig = Rig::new(1);
+        (w.fly.x, w.fly.y, w.fly.dying) = (1000, 131, true);
+        w.traps_step(&mut rig.at(1));
+        assert_eq!(rig.rng.rand(), 41);
+        (w.fly.dying, w.fly.stunned) = (false, true);
+        w.traps_step(&mut rig.at(2));
+        assert!(w.traps.zappers[0].arcing);
+    }
+
+    /// answers.md "Trap loop volumes": two fans, one on screen, start at −100; both off screen
+    /// (screen 2000 and 3000) set −400 once. Two zappers off screen start at −500; one at screen
+    /// 4500 (4500 + 635 ≥ 5000) sets −200. A single zapper stays at −450 with no volume change.
+    #[test]
+    fn several_traps_set_the_loop_volume_from_visibility() {
+        let fans = vec![slot(TrapKind::FanLeft, 500), slot(TrapKind::FanLeft, 3000)];
+        let zappers = vec![slot(TrapKind::Zapper, 2000), slot(TrapKind::Zapper, 3000)];
+        let mut rig = Rig::new(1);
+        let mut w = world_with([fans, zappers].concat(), &mut rig);
+        let looped = |cb| {
+            SoundOp::Loop(PlayParams {
+                volume_cb: cb,
+                ..PlayParams::default()
+            })
+        };
+        assert_eq!(sounds(&rig, SoundSlot::FAN), [looped(-100)]);
+        assert_eq!(sounds(&rig, SoundSlot::ZAPPER_HUM), [looped(-500)]);
+        let mut rig = Rig::new(1);
+        w.traps.fans[0].x = 1600;
+        w.traps.zappers[0].x = 3600;
+        w.traps_step(&mut rig.at(1));
+        w.traps_step(&mut rig.at(2));
+        let set = |slot| -> Vec<SoundOp> {
+            let ops = sounds(&rig, slot);
+            ops.into_iter()
+                .filter(|op| matches!(op, SoundOp::SetVolume(_)))
+                .collect()
+        };
+        assert_eq!(set(SoundSlot::FAN), [SoundOp::SetVolume(-400)]);
+        assert_eq!(set(SoundSlot::ZAPPER_HUM), [SoundOp::SetVolume(-200)]);
+        let mut rig = Rig::new(1);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 2000)], &mut rig);
+        assert_eq!(sounds(&rig, SoundSlot::ZAPPER_HUM), [looped(-450)]);
+        let mut rig = Rig::new(1);
+        w.traps_step(&mut rig.at(1));
+        let set = sounds(&rig, SoundSlot::ZAPPER_HUM);
+        assert!(!set.iter().any(|op| matches!(op, SoundOp::SetVolume(_))));
+    }
 }
 
 #[cfg(test)]
@@ -696,12 +994,12 @@ mod unit_tests {
     }
 
     /// FW §5.2 step 3: placement passes screen-unit x to `span_free`, so no placed object
-    /// overlaps the fan's stored span on any seed.
+    /// overlaps the fan's span (its 222 frame width, answers.md O22) on any seed.
     #[test]
     fn no_placed_object_overlaps_a_fan_span() {
-        let fan_w = TrapKind::FanLeft.spec().stored_width();
         for seed in 1..=SEEDS {
             let w = world_with_fan(seed);
+            let fan_w = w.traps.fans[0].w;
             let fx = placement_x(w.traps.fans[0].x);
             let clash = w
                 .objects
