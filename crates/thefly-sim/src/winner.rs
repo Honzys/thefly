@@ -132,7 +132,7 @@ impl Winner {
         } else {
             (self.fly_counter, fly, self.farmer_counter, farmer)
         };
-        // shortcut: the original switches to slot 50 when 49 has stopped and 50 has not
+        // Port decision: the original switches to slot 50 when 49 has stopped and 50 has not
         // (`FUN_0040cf55`); the sim has no slot state, so always 49.
         let freq = (loser < loser_score).then(|| 21_500 + cx_rand(cx, 500));
         cx.sound(SoundSlot::RING_A, play_at(freq, 0));
