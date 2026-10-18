@@ -1,9 +1,10 @@
 //! The one simulated clock. Every millisecond figure in the spec reads [`Clock::now_ms`].
 //!
 //! `now_ms = tick * 1000 / 65`, truncated. Consecutive ticks are 15 or 16 ms apart. A timer
-//! fires on the first tick whose `now_ms` reaches its deadline, so a duration that is not a whole
-//! number of ticks (700 ms = 45.5 ticks) fires up to one tick late. Re-arming starts from the
-//! tick it fired on, as the original's poll-and-rearm did, so the lateness repeats per period.
+//! fires on the first tick whose `now_ms` is past its deadline (answers.md conventions: strictly
+//! before now), so a deadline that lands on a tick (1000 ms = tick 65) fires on the next one, and
+//! 700 ms = 45.5 ticks fires up to one tick late. Re-arming starts from the tick it fired on, as
+//! the original's poll-and-rearm did, so the lateness repeats per period.
 
 /// Simulation rate, the original's frame timer (`game-spec.md` §5.1).
 pub const TICK_HZ: u64 = 65;
@@ -44,7 +45,9 @@ impl Clock {
     }
 }
 
-/// A deadline plus a period, as in `ai-and-rules.md` §0 ("Timers").
+/// A deadline plus a period, as in `ai-and-rules.md` §0 ("Timers"), with answers.md's expiry rule:
+/// expired once the deadline is strictly before now. A never-armed timer (the original's deadline
+/// at creation) reads as expired.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Timer {
     deadline_ms: Option<u64>,
@@ -70,6 +73,8 @@ impl Timer {
         self.period_ms = ms;
     }
 
+    /// Back to never armed, which reads as expired: a caller that means "off" guards with
+    /// [`Timer::is_armed`] or its own state.
     pub fn disarm(&mut self) {
         self.deadline_ms = None;
     }
@@ -78,9 +83,10 @@ impl Timer {
         self.deadline_ms.is_some()
     }
 
-    /// Armed and `now` has reached the deadline. Stays true until re-armed or disarmed.
+    /// The deadline is strictly before `now`, or the timer was never armed. Stays true until
+    /// re-armed.
     pub fn expired(&self, now: u64) -> bool {
-        self.deadline_ms.is_some_and(|d| now >= d)
+        self.deadline_ms.is_none_or(|d| d < now)
     }
 
     /// Like [`Timer::expired`]; on expiry the next deadline is `now + period`.
@@ -144,15 +150,33 @@ mod tests {
         assert_eq!(fired, [46, 92, 138]);
     }
 
+    /// answers.md conventions: expired once the deadline is strictly before now.
     #[test]
     fn timer_expiry_holds_until_rearmed() {
         let mut t = Timer::armed(0, 100);
-        assert!(!t.expired(99));
-        assert!(t.expired(100) && t.expired(500));
+        assert!(!t.expired(99) && !t.expired(100));
+        assert!(t.expired(101) && t.expired(500));
         assert_eq!(t.remaining_ms(40), 60);
         assert!(t.expired_rearm(120));
-        assert!(!t.expired(219) && t.expired(220));
+        assert!(!t.expired(220) && t.expired(221));
+    }
+
+    /// answers.md conventions: a created but never armed timer has its deadline at creation, so
+    /// it reads as expired on its first check; a disarmed one is back in that state.
+    #[test]
+    fn a_never_armed_timer_reads_as_expired() {
+        assert!(Timer::UNARMED.expired(0));
+        let mut t = Timer::armed(0, 100);
         t.disarm();
-        assert!(!t.expired(10_000));
+        assert!(t.expired(50) && !t.is_armed());
+    }
+
+    /// A 1000 ms timer armed on tick 0: tick 65 is exactly 1000 ms, not yet strictly past the
+    /// deadline, so it first reads expired on tick 66 (1015 ms).
+    #[test]
+    fn a_whole_tick_deadline_fires_one_tick_later() {
+        let t = Timer::armed(0, 1000);
+        let first = (0..100).find(|&k| t.expired(ms_at(k)));
+        assert_eq!(first, Some(66));
     }
 }

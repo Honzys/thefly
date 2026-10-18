@@ -244,7 +244,7 @@ impl Zapper {
     fn arc_at(&mut self, t: Rect, size: Size, cx: &mut Ctx) -> bool {
         let zx = visible_x(self.x, size.w);
         let column = t.x - size.w <= zx && zx <= t.x + t.w;
-        let retrying = self.retry.is_armed() && !self.retry.expired(cx.now);
+        let retrying = !self.retry.expired(cx.now);
         let bottom = self.y + size.h;
         if !column || self.arcing || retrying || t.y > bottom + ARC_REACH {
             return false;
@@ -469,7 +469,7 @@ impl World {
         }
         for z in &mut t.zappers {
             scroll(&mut z.x, delta);
-            z.arcing = z.arc_timer.is_armed() && !z.arc_timer.expired(cx.now);
+            z.arcing = !z.arc_timer.expired(cx.now);
         }
         t.update_loops(cx);
         self.single_trap_pan(delta, cx);
@@ -525,7 +525,7 @@ impl World {
         let size = fan_frame(cx);
         let mut hit = None;
         for (i, f) in self.traps.fans.iter().enumerate() {
-            let rehit_running = f.rehit.is_armed() && !f.rehit.expired(cx.now);
+            let rehit_running = !f.rehit.expired(cx.now);
             let blades = cx.data.outline(blades_outline(f.facing_right));
             let shape = Shape {
                 x: screen_x(f.x),

@@ -632,7 +632,9 @@ mod tests {
             }
         }
         let (play, end) = (play_at.unwrap(), end_at.unwrap());
-        assert!((4000..4020).contains(&play), "{play}");
+        // Four 1000 ms steps, each due on the first tick strictly past its deadline: 1015 (tick
+        // 66), 2030 (132; 2015 is not past), 3046 (198), 4061 (264; 4046 is not past).
+        assert_eq!(play, 4061);
         assert!((35_000..35_020).contains(&(end - play)), "{}", end - play);
         // AR §0: a 50 ms timer re-arms from the tick it fires on, so every 4 ticks (61.5 ms).
         assert!((560..=575).contains(&b.coin_spawns), "{}", b.coin_spawns);
@@ -669,7 +671,10 @@ mod tests {
         b.phase = BonusPhase::End {
             sound: Timer::armed(rig.now(), 0),
         };
-        rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+        // A 0 ms timer is due on the tick after it was armed (strictly before now).
+        for _ in 0..2 {
+            rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+        }
         assert_eq!(
             rig.events.last(),
             Some(&Event::play(SoundSlot::CHEER_FARMER))

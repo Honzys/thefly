@@ -1247,13 +1247,16 @@ mod tests {
         assert_eq!((fly.turbo.boost_x, fly.turbo.boost_y), (275, 275));
         assert_eq!((fly.vx, fly.vy), (100, -575));
         assert!(fly.turbo.active && !fly.turbo.decaying);
-        assert!(!fly.turbo.timer.expired(TURBO_MS - 1) && fly.turbo.timer.expired(TURBO_MS));
+        assert!(!fly.turbo.timer.expired(TURBO_MS) && fly.turbo.timer.expired(TURBO_MS + 1));
         assert_eq!(b.sounds(SoundSlot::TURBO).len(), 1);
 
         (fly.vx, fly.vy) = (-200, 200);
         b.with(|cx| fly.start_turbo(Some(MYSTERY_TURBO_MS), cx));
         assert_eq!((fly.vx, fly.vy), (-475, 200));
-        assert!(fly.turbo.timer.expired(MYSTERY_TURBO_MS) && !fly.turbo.timer.expired(24_999));
+        assert!(
+            fly.turbo.timer.expired(MYSTERY_TURBO_MS + 1)
+                && !fly.turbo.timer.expired(MYSTERY_TURBO_MS)
+        );
         fly.end_turbo();
         assert_eq!(fly.turbo, Turbo::default());
     }
@@ -1263,8 +1266,8 @@ mod tests {
         let mut b = Bench::new(1);
         let mut fly = b.fly();
         b.with(|cx| fly.start_superfly(cx));
-        assert!(fly.superfly && fly.superfly_timer.expired(8000));
-        assert!(!fly.superfly_timer.expired(7999));
+        assert!(fly.superfly && fly.superfly_timer.expired(8001));
+        assert!(!fly.superfly_timer.expired(8000));
         assert!(matches!(
             b.sounds(SoundSlot::SUPERFLY)[..],
             [SoundOp::Loop(_)]
@@ -1721,15 +1724,18 @@ mod tests {
                 SoundOp::Play(PlayParams::default())
             ]
         );
-        b.now = CRASH_MS - 1;
+        b.now = CRASH_MS;
         update(&mut b, &mut m, &mut fly, 0);
         assert!(!fly.respawn_timer.is_armed());
-        b.now = CRASH_MS;
+        b.now = CRASH_MS + 1;
         fly.vx = 100;
         update(&mut b, &mut m, &mut fly, 0);
         assert_eq!((fly.phase, fly.hit_frame, fly.vx), (1, 3, 0));
-        assert!(fly.respawn_timer.expired(CRASH_MS + RESPAWN_DELAY_MS));
-        assert!(!fly.respawn_timer.expired(CRASH_MS + RESPAWN_DELAY_MS - 1));
+        assert!(
+            fly.respawn_timer
+                .expired(CRASH_MS + 1 + RESPAWN_DELAY_MS + 1)
+        );
+        assert!(!fly.respawn_timer.expired(CRASH_MS + 1 + RESPAWN_DELAY_MS));
     }
 
     /// Acceptance W1 5: with an object covering the whole table every re-roll fails, so the
@@ -1761,7 +1767,7 @@ mod tests {
             let mut fly = centred(&mut b);
             update(&mut b, &mut m, &mut fly, 120);
             if crash_over {
-                b.now = CRASH_MS;
+                b.now = CRASH_MS + 1;
                 update(&mut b, &mut m, &mut fly, 0);
             }
             assert!(fly.crash_timer.is_armed() != fly.respawn_timer.is_armed());
@@ -1779,9 +1785,9 @@ mod tests {
         let (mut m, _) = world(&mut b);
         let mut fly = centred(&mut b);
         update(&mut b, &mut m, &mut fly, 120);
-        b.now = CRASH_MS;
+        b.now = CRASH_MS + 1;
         update(&mut b, &mut m, &mut fly, 0);
-        b.now = CRASH_MS + RESPAWN_DELAY_MS;
+        b.now = CRASH_MS + 1 + RESPAWN_DELAY_MS + 1;
         update(&mut b, &mut m, &mut fly, 0);
         assert_eq!((m.stats.kills, fly.hits_this_life), (1, 0));
         assert!(fly.respawn_request && !fly.respawn_timer.is_armed());

@@ -447,7 +447,7 @@ mod tests {
         boot.spawn(&mut rig.cx(0));
         assert_eq!((boot.x, boot.layer_x, boot.y), (851, 680, -475));
         assert!(boot.active && boot.chasing && boot.horizontal_on && boot.stomps == 0);
-        assert!(boot.retarget.expired(1000) && !boot.retarget.expired(999));
+        assert!(boot.retarget.expired(1001) && !boot.retarget.expired(1000));
     }
 
     /// answers.md "Boot: distance metric, spawn x and step order". Screen x 4895, target

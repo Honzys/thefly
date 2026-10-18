@@ -437,7 +437,7 @@ impl Farmer {
         } else {
             f64::from(stuck) / f64::from(total)
         };
-        let due = !self.slow_timer.is_armed() || self.slow_timer.expired(cx.now);
+        let due = self.slow_timer.expired(cx.now);
         if due && self.slowed {
             self.slowed = false;
             self.slow_timer
@@ -595,7 +595,10 @@ mod tests {
         let farmer = Farmer::new(2, &mut cx);
         assert_eq!((farmer.max_speed_x, farmer.cooldown_limit), (770, 25));
         assert_eq!((farmer.x, farmer.y, farmer.reach), (41, 351, 0.0));
-        assert!(farmer.voice_timer.expired(VOICE_FIRST_MS) && !farmer.voice_timer.expired(9999));
+        assert!(
+            farmer.voice_timer.expired(VOICE_FIRST_MS + 1)
+                && !farmer.voice_timer.expired(VOICE_FIRST_MS)
+        );
     }
 }
 
@@ -823,11 +826,12 @@ mod swing_tests {
         assert_eq!((f.triple.bursts, stats.swings), (7, 21));
     }
 
-    /// AR §1.7: −1 is 5000 ms (tick 325 = 5000 ms), the mystery 20000 ms (tick 1300); Nuclear
-    /// and Triple exclude each other.
+    /// AR §1.7: −1 is 5000 ms, the mystery 20000 ms. Tick 325 is exactly 5000 ms and tick 1300
+    /// exactly 20000 ms, not yet strictly past, so Nuclear ends a tick later. Nuclear and Triple
+    /// exclude each other.
     #[test]
     fn nuclear_lasts_its_duration_and_excludes_triple() {
-        for (ms, last_on, off) in [(None, 324, 325), (Some(MYSTERY_NUCLEAR_MS), 1299, 1300)] {
+        for (ms, last_on, off) in [(None, 325, 326), (Some(MYSTERY_NUCLEAR_MS), 1300, 1301)] {
             let mut rig = Rig::new(1);
             let mut f = farmer(0);
             let mut stats = Stats::default();
