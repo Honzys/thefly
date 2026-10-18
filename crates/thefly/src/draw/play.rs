@@ -6,7 +6,7 @@ use thefly_platform::{Color, Error};
 use thefly_sim::match_state::{MatchState, Meal, Scene};
 use thefly_sim::screen::{GamePhase, Gameplay, LOADING_STEPS, MatchScreen};
 use thefly_sim::world::camera::layer_images;
-use thefly_sim::world::fly::{APPEAR_MS, Fly, Heading};
+use thefly_sim::world::fly::{APPEAR_TICKS, Fly, Heading};
 use thefly_sim::world::flying_goodies::{Flyer, MYSTERY_KIND};
 use thefly_sim::world::midges::Midge;
 use thefly_sim::world::{OBJECT_PARALLAX, W, World};
@@ -29,7 +29,7 @@ pub fn gameplay(g: &mut Gfx, v: &View, m: &MatchState, gp: &Gameplay) -> Result<
         _ => None,
     };
     match gp.phase {
-        GamePhase::Loading { step, .. } => loading(g, v, step),
+        GamePhase::Loading { step, .. } => loading(g, gp.loading_alt, step),
         GamePhase::Banner { count, .. } => {
             scene(g, v, m, &gp.world, prev)?;
             banner(g, m, count)
@@ -51,9 +51,9 @@ pub fn loading_slice(step: u32, frame_w: f32) -> (u32, u32, f32) {
     }
 }
 
-fn loading(g: &mut Gfx, v: &View, step: u32) -> Result<(), Error> {
+fn loading(g: &mut Gfx, alt: bool, step: u32) -> Result<(), Error> {
     const AT: (f32, f32) = (674.0, 497.0);
-    g.spr(if v.loading2 { "LOADING2" } else { "LOADING" }, 0.0, 0.0, 0)?;
+    g.spr(if alt { "LOADING2" } else { "LOADING" }, 0.0, 0.0, 0)?;
     let (w, h) = g.size("spriteload")?;
     let (base, slice, sw) = loading_slice(step, w);
     g.spr("spriteload", AT.0, AT.1, base)?;
@@ -290,7 +290,7 @@ fn fly(g: &mut Gfx, v: &View, f: &Fly, p: Option<&Fly>) -> Result<(), Error> {
     let y = v.l.i(p.map(|p| p.y), f.y);
     let frame = |i: i32| u32::try_from(i).unwrap_or(0);
     if f.appearing {
-        let left = f.appear_timer.remaining_ms(v.now).min(APPEAR_MS) as f32 / APPEAR_MS as f32;
+        let left = 1.0 - f.appear_ticks.min(APPEAR_TICKS) as f32 / APPEAR_TICKS as f32;
         let (cx, cy) = (x + f.size.w as f32 / 2.0, y + f.size.h as f32 / 2.0);
         g.spr_centred(
             "onde_active",

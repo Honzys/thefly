@@ -95,33 +95,116 @@ mod tests {
         assert_eq!(s.at(11, Scancode::DOWN), (false, false, false));
     }
 
-    /// Acceptance W4.2 in the sim: boot → menu → 2 Players → Normal → 2 days → keys page →
-    /// loading → the "3, 2, 1, Go!" banner, driven by the same script the headless run uses.
+    /// The 2P match script of the headless run: 2 Players → Normal → 2 days, then in each shop
+    /// skip the tally, buy once per side and leave, leave a traps shop at once, and go on from
+    /// the bourse, bonus, winner and stats. Tick numbers follow the 2 min period (7800 ticks).
+    fn two_player_match_keys() -> String {
+        const MENU: &str =
+            "200:Return,400:Return,460:Return,600:Down,620:Return,760:Return,900:Return";
+        // shop entry → tally skip, farmer buy, farmer done, fly buy, fly done, traps done, bourse
+        const SHOP: [(u64, &str); 10] = [
+            (160, "Return"),
+            (260, "Tab"),
+            (360, "F"),
+            (420, "Tab"),
+            (560, "Return"),
+            (660, "Left"),
+            (720, "Return"),
+            (860, "F"),
+            (920, "Tab"),
+            (1060, "Return"),
+        ];
+        const SHOPS_AT: [u64; 5] = [9140, 18440, 30740, 40040, 49340];
+        const AFTER: &str = "30740:Return,61640:Return,62100:Return,62400:Return";
+        let shops = SHOPS_AT
+            .iter()
+            .flat_map(|p| SHOP.iter().map(move |(dt, k)| format!("{}:{k}", p + dt)));
+        let mut keys: Vec<String> = vec![MENU.into()];
+        keys.extend(shops);
+        keys.push(AFTER.into());
+        keys.join(",")
+    }
+
+    fn screen_kind(s: &thefly_sim::sim::State) -> &'static str {
+        use thefly_sim::screen::{GamePhase, MatchScreen, Screen};
+        let Screen::Match(m) = &s.screen else {
+            return if matches!(s.screen, Screen::Menu(_)) {
+                "Menu"
+            } else {
+                "Front"
+            };
+        };
+        match &m.screen {
+            MatchScreen::Gameplay(g) => match g.phase {
+                GamePhase::Loading { .. } => "Loading",
+                GamePhase::Banner { .. } => "Banner",
+                GamePhase::Playing => "Playing",
+            },
+            MatchScreen::GoodiesShop(_) => "GoodiesShop",
+            MatchScreen::TrapsShop(_) => "TrapsShop",
+            MatchScreen::Bourse(_) => "Bourse",
+            MatchScreen::Bonus(_) => "Bonus",
+            MatchScreen::Winner(_) => "Winner",
+            MatchScreen::Stats(_) => "Stats",
+            MatchScreen::KeysPage(_) | MatchScreen::TutorialPage => "Pages",
+        }
+    }
+
+    /// Acceptance W4.2 in the sim: the headless run's script plays a 2P, 2-day match from boot
+    /// through the banner, six periods, the shops, bourses and bonus rounds, to the winner, the
+    /// stats and back to the menu, with sounds under the banner.
     #[test]
-    #[ignore = "needs W3"]
-    fn a_scripted_two_player_run_reaches_the_banner() {
+    fn a_scripted_two_player_match_runs_to_the_stats() {
         use thefly_sim::data::GameData;
+        use thefly_sim::event::Event;
         use thefly_sim::input::KeyState;
         use thefly_sim::saves::Persisted;
-        use thefly_sim::screen::{GamePhase, MatchScreen, Screen};
         use thefly_sim::sim::Sim;
-        const MAX_TICKS: u64 = 65 * 60;
-        let keys = "200:Return,400:Return,460:Down,480:Return,540:Return,600:Return,700:Return";
+        const TICKS: u64 = 62_500;
         let script = Script {
-            holds: parse_keys(keys).unwrap(),
+            holds: parse_keys(&two_player_match_keys()).unwrap(),
             ..Script::default()
         };
+        let mut codes: Vec<Scancode> = script.holds.iter().map(|h| h.key).collect();
+        codes.sort_by_key(|k| k.0);
+        codes.dedup();
         let mut sim = Sim::new(1, GameData::synthetic(), Persisted::default());
-        let codes = [Scancode::RETURN, Scancode::DOWN];
-        let banner = (0..MAX_TICKS).any(|t| {
-            let held = codes.iter().copied().filter(|&k| script.at(t, k).0);
-            let pressed = codes.iter().copied().filter(|&k| script.at(t, k).1);
-            let released = codes.iter().copied().filter(|&k| script.at(t, k).2);
-            sim.tick(&KeyState::from_parts(held, pressed, released));
-            matches!(&sim.state().screen, Screen::Match(m)
-                if matches!(&m.screen, MatchScreen::Gameplay(g) if matches!(g.phase, GamePhase::Banner { .. })))
-        });
-        assert!(banner, "no banner within {MAX_TICKS} ticks");
+        let mut seen: Vec<&str> = Vec::new();
+        let mut banner_sounds = 0;
+        for t in 0..TICKS {
+            let at: Vec<_> = codes.iter().map(|&k| (k, script.at(t, k))).collect();
+            let keys = |pick: fn((bool, bool, bool)) -> bool| {
+                at.iter().filter(move |(_, s)| pick(*s)).map(|(k, _)| *k)
+            };
+            let events = sim.tick(&KeyState::from_parts(
+                keys(|s| s.0),
+                keys(|s| s.1),
+                keys(|s| s.2),
+            ));
+            let kind = screen_kind(sim.state());
+            if kind == "Banner" {
+                banner_sounds += events
+                    .iter()
+                    .filter(|e| matches!(e, Event::Sound { .. }))
+                    .count();
+            }
+            if seen.last() != Some(&kind) {
+                seen.push(kind);
+            }
+        }
+        let period = ["Loading", "Banner", "Playing"];
+        let shop = ["GoodiesShop", "Bourse"];
+        let day: Vec<&str> = [&period[..], &shop, &period, &shop, &period, &["Bonus"]].concat();
+        let expected: Vec<&str> = [
+            &["Front", "Menu"][..],
+            &day,
+            &shop,
+            &day,
+            &["Winner", "Stats", "Menu"],
+        ]
+        .concat();
+        assert_eq!(seen, expected);
+        assert!(banner_sounds > 0, "no sound under the banner");
     }
 
     #[test]

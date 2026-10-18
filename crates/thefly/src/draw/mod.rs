@@ -24,8 +24,6 @@ pub struct View<'a> {
     /// Sim time in ms at the current tick, for wall-clock sprite animations (SR §1.2).
     pub now: u64,
     pub fx: &'a Fx,
-    /// `LOADING2` instead of `LOADING` for this period (SR §4.1, a 50/50 frontend pick).
-    pub loading2: bool,
     /// Sim time the winner trophy landed, which starts the `you_win` tween (SR §5.1 state 2).
     pub trophy_landed_ms: Option<u64>,
 }
