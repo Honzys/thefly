@@ -132,15 +132,23 @@ impl World {
     }
 
     /// Step 4 (`FUN_004043c1`), human farmer: the goodie key's press cycles the selector, and Tab
-    /// held with a selection uses it. The AI's request is spent in step 6 instead
-    /// ([`World::spend_farmer_request`]).
-    pub fn farmer_goodie(&mut self, pad: &FarmerPad, m: &mut MatchState, cx: &mut Ctx) {
+    /// held with a selection uses it. Returns the swing edge, cancelled on any use attempt. The
+    /// AI's request is spent in step 6 instead ([`World::spend_farmer_request`]).
+    pub fn farmer_goodie(
+        &mut self,
+        pad: &FarmerPad,
+        swing_edge: bool,
+        m: &mut MatchState,
+        cx: &mut Ctx,
+    ) -> bool {
         if self.ai.is_some() {
-            return;
+            return swing_edge;
         }
-        if let Some(goodie) = self.human_farmer_goodie(pad) {
-            self.use_farmer_goodie(goodie, m, cx);
-        }
+        let Some(goodie) = self.human_farmer_goodie(pad) else {
+            return swing_edge;
+        };
+        self.use_farmer_goodie(goodie, m, cx);
+        false
     }
 
     /// The AI path of `FUN_004043c1` (answers.md "Farmer goodie use"): after fly physics and
@@ -151,9 +159,8 @@ impl World {
         }
     }
 
-    /// A use attempt: the selector closes and the swing memory blocks, in stock or not; that
-    /// memory also tells step 6 to drop this tick's swing edge. Triple and Nuclear only while
-    /// Nuclear is off; slot 37.
+    /// A use attempt: the selector closes and the swing memory blocks, in stock or not. Triple
+    /// and Nuclear only while Nuclear is off; slot 37.
     fn use_farmer_goodie(&mut self, goodie: FarmerGoodie, m: &mut MatchState, cx: &mut Ctx) {
         self.goodies.farmer_selector = 0;
         self.farmer_swing_memory = USE_BLOCK;
@@ -300,13 +307,13 @@ mod tests {
             swing: true,
             ..FarmerPad::default()
         };
-        w.farmer_goodie(&press, &mut m, &mut rig.cx(0));
+        w.farmer_goodie(&press, false, &mut m, &mut rig.cx(0));
         w.farmer.nuclear.on = true;
-        w.farmer_goodie(&tab, &mut m, &mut rig.cx(0));
+        assert!(!w.farmer_goodie(&tab, true, &mut m, &mut rig.cx(0)));
         assert_eq!(m.economy.farmer.triple, 1);
         w.farmer.nuclear.on = false;
         w.goodies.farmer_selector = 1;
-        w.farmer_goodie(&tab, &mut m, &mut rig.cx(0));
+        assert!(!w.farmer_goodie(&tab, true, &mut m, &mut rig.cx(0)));
         assert_eq!(m.economy.farmer.triple, 0);
         assert_eq!(
             (w.goodies.farmer_selector, w.farmer_swing_memory),
@@ -318,7 +325,7 @@ mod tests {
     /// Steps 2, 4 and 6 for one tick of the human farmer.
     fn farmer_tick(w: &mut World, pad: &FarmerPad, m: &mut MatchState, rig: &mut Rig) {
         let edge = w.farmer_swing_edge(pad);
-        w.farmer_goodie(pad, m, &mut rig.cx(0));
+        let edge = w.farmer_goodie(pad, edge, m, &mut rig.cx(0));
         w.farmer_step(pad, edge, m, &mut rig.cx(0));
     }
 
@@ -356,7 +363,7 @@ mod tests {
             swing: true,
             ..FarmerPad::default()
         };
-        w.farmer_goodie(&tab, &mut m, &mut rig.cx(0));
+        w.farmer_goodie(&tab, true, &mut m, &mut rig.cx(0));
         let stardust = Event::Effect(Effect::Stardust { x: 190, y: 489 });
         assert!(rig.events.contains(&stardust), "{:?}", rig.events);
     }
@@ -373,7 +380,7 @@ mod tests {
         m.economy.farmer.boot = 1;
         w.goodies.farmer_request = Some(FarmerGoodie::Boot);
         let pad = FarmerPad::default();
-        w.farmer_goodie(&pad, &mut m, &mut rig.cx(0));
+        assert!(w.farmer_goodie(&pad, true, &mut m, &mut rig.cx(0)));
         assert!(!w.boot.active && m.economy.farmer.boot == 1);
         w.farmer_step(&pad, false, &mut m, &mut rig.cx(0));
         assert!(w.boot.active && m.economy.farmer.boot == 0);

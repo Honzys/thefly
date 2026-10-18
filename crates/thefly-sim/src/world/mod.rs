@@ -171,8 +171,8 @@ impl World {
         let swing_edge = self.farmer_swing_edge(&farmer_pad);
         // 3. Fly goodie selector and use; a use cancels this tick's action.
         let action = self.fly_goodie(&fly_pad, action, m, cx);
-        // 4. Farmer goodie selector and use (human pad, or the AI's request).
-        self.farmer_goodie(&farmer_pad, m, cx);
+        // 4. Farmer goodie selector and use (human pad); a use cancels this tick's swing edge.
+        let swing_edge = self.farmer_goodie(&farmer_pad, swing_edge, m, cx);
         // 5. Fly physics, with the keys swapped while inverted controls are active.
         self.fly_physics(&fly_pad, cx);
         // 6. Farmer: human move and hit test, or the AI. Yields this tick's damage.
@@ -281,7 +281,6 @@ mod tests {
         assert!(world.fly.appearing && world.ai.is_none());
     }
 
-    /// The tick itself needs W2's farmer and traps.
     #[test]
     fn a_built_world_ticks_with_no_input() {
         let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
