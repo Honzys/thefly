@@ -506,13 +506,12 @@ impl InMatch {
 
     /// The quit dialog opened (true) or was answered No (false) over this match.
     pub fn pause(&mut self, paused: bool, now: u64) {
-        let MatchScreen::Gameplay(g) = &mut self.screen else {
-            return;
-        };
-        if paused {
-            g.pause(now);
-        } else {
-            g.resume(now);
+        match &mut self.screen {
+            MatchScreen::Gameplay(g) if paused => g.pause(now),
+            MatchScreen::Gameplay(g) => g.resume(now),
+            MatchScreen::Bonus(b) if paused => b.pause(now),
+            MatchScreen::Bonus(b) => b.resume(now),
+            _ => {}
         }
     }
 }

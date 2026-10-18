@@ -12,7 +12,7 @@ use crate::event::{Event, Music, PlayParams, SoundOp, SoundSlot};
 use crate::input::{FarmerPad, FlyPad, KeyState, Scancode};
 use crate::match_state::{MatchState, Players};
 use crate::mover::{FpsRun, Wander};
-use crate::screen::{MatchFlow, MatchScreen};
+use crate::screen::{Flow, MatchFlow, MatchScreen};
 use crate::shop::GoodiesShop;
 use crate::winner::Winner;
 use crate::world::ai::{AiLevel, Aligner, Controller, Target};
@@ -454,6 +454,8 @@ pub struct BonusRound {
     pub move_ticks: i32,
     pub bar: Bar,
     pub ai: Option<BonusAi>,
+    /// The round time left while the quit dialog freezes the round clock.
+    round_left: Option<u64>,
     /// Coin wave amplitude A = trunc((bgH − 2.5 × coinH) / 2) (gaps §7.3).
     pub amplitude: i32,
     pub target_spawns: usize,
@@ -558,6 +560,7 @@ impl BonusRound {
                 ..Bar::default()
             },
             ai,
+            round_left: None,
             amplitude: ((f64::from(bg_h) - 2.5 * f64::from(COIN_H)) / 2.0) as i32,
             target_spawns: 0,
             swing_held: false,
@@ -578,6 +581,7 @@ impl BonusRound {
             self.bar.brake();
         }
         if let BonusPhase::Play { round } = self.phase
+            && self.round_left.is_none()
             && round.expired(cx.now)
         {
             self.end(m, cx);
@@ -620,7 +624,39 @@ impl BonusRound {
                 }
             }
         }
+        // shortcut: answers.md "Quit dialog ... (round 5)" runs the dialog over the bonus round
+        // (0x24) but does not name its Esc handling here; assumed as in play, countdown and play only.
+        let live = matches!(
+            self.phase,
+            BonusPhase::Countdown { .. } | BonusPhase::Play { .. }
+        );
+        if live && keys.pressed(Scancode::ESCAPE) {
+            return MatchFlow::Leave(Flow::Quit);
+        }
         MatchFlow::Stay
+    }
+
+    /// The quit dialog opened: the world keeps ticking (keys released, AI paused) but the round
+    /// clock freezes, as the period clock does in play.
+    pub fn pause(&mut self, now: u64) {
+        if let Some(ai) = &mut self.ai {
+            ai.paused = true;
+        }
+        if let BonusPhase::Play { round } = self.phase {
+            self.round_left = Some(round.remaining_ms(now));
+        }
+    }
+
+    /// Dialog answered No: the round continues with the time it had left.
+    pub fn resume(&mut self, now: u64) {
+        if let Some(ai) = &mut self.ai {
+            ai.paused = false;
+        }
+        if let Some(left) = self.round_left.take() {
+            self.phase = BonusPhase::Play {
+                round: Timer::armed(now, left),
+            };
+        }
     }
 
     fn countdown(&mut self, count: i32, next: Timer, cx: &mut Ctx) {
@@ -1489,5 +1525,37 @@ mod tests {
             })
             .collect();
         assert_eq!(starts, [0, 29]);
+    }
+
+    /// answers.md "Quit dialog: the paused match keeps updating (round 5)": Esc in the round opens
+    /// the dialog; under it the round keeps ticking with the keys released (rand keeps drawing,
+    /// spawns run) while the round clock is frozen, and No resumes with the time left.
+    #[test]
+    fn the_quit_dialog_keeps_the_bonus_round_updating_with_a_frozen_clock() {
+        let mut rig = Rig::new(1);
+        let (mut m, mut b) = playing(&mut rig);
+        let flow = rig.step(&[Scancode::ESCAPE], |k, cx| b.tick(k, &mut m, cx));
+        assert!(matches!(flow, MatchFlow::Leave(Flow::Quit)));
+        b.pause(rig.now());
+        let left = round_left(&b, rig.now());
+        b.coin_timer = Timer::armed(rig.now(), 0);
+        let before = rig.rng.clone();
+        for _ in 0..200 {
+            rig.step(&[Scancode::RIGHT, Scancode::UP], |k, cx| {
+                b.tick(k, &mut m, cx)
+            });
+        }
+        assert_ne!(rig.rng, before);
+        assert!(b.coin_spawns > 0 && b.ai.as_ref().is_none_or(|a| a.paused));
+        assert!(matches!(b.phase, BonusPhase::Play { .. }));
+        b.resume(rig.now());
+        assert_eq!(round_left(&b, rig.now()), left);
+    }
+
+    fn round_left(b: &BonusRound, now: u64) -> u64 {
+        match b.phase {
+            BonusPhase::Play { round } => round.remaining_ms(now),
+            _ => 0,
+        }
     }
 }
