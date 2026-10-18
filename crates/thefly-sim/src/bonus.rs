@@ -10,6 +10,7 @@ use crate::ctx::Ctx;
 use crate::event::{Event, Music, PlayParams, SoundOp, SoundSlot};
 use crate::input::{FarmerPad, FlyPad, KeyState, Scancode};
 use crate::match_state::{MatchState, Players};
+use crate::mover::Wander;
 use crate::screen::{MatchFlow, MatchScreen};
 use crate::shop::GoodiesShop;
 use crate::winner::Winner;
@@ -112,6 +113,8 @@ pub struct Piece {
     pub until: Timer,
     pub frame: i32,
     pub anim_ms: i32,
+    /// Targets only; the coins' wander is off.
+    pub mover: Wander,
 }
 
 /// A bonus-round actor's position and velocity. Open item O3: its motion rule.
@@ -140,6 +143,14 @@ const FLY_SIZE: (i32, i32) = (120, 94);
 pub const SPAWN_X: f64 = 810.0;
 /// A target enters at x 810 + R(150).
 const TARGET_SPAWN_RAND: i32 = 150;
+/// Target wander (answers.md "Bonus round movers"): reroll 500 ms, x speed range 1, y range
+/// trunc(500 × h_farmer + 1), runs 6 and 3, accel 5; y stays 15 px inside the field.
+const TARGET_REROLL_MS: i32 = 500;
+const TARGET_X_SPEED: i32 = 1;
+const TARGET_Y_SPEED_SPAN: f64 = 500.0;
+const TARGET_RUNS: (i32, i32) = (6, 3);
+const TARGET_ACCEL: (i32, i32) = (5, 5);
+const TARGET_BAND: f64 = 15.0;
 pub const LIFETIME_MS: u64 = 25_000;
 /// Port decision: the `piece` sheet's frame count is passed in code; the port uses 16.
 pub const COIN_FRAMES: i32 = 16;
@@ -436,6 +447,7 @@ impl BonusRound {
         if self.target_timer.expired_rearm(cx.now) {
             self.spawn_target(cx);
         }
+        self.drift_targets(cx);
         self.scroll(cx.now);
         self.collect(cx);
         if swing {
@@ -469,11 +481,8 @@ impl BonusRound {
         };
     }
 
-    /// Draws y = R(bg h), then x = 810 + R(150) (the field's y is 0); lifetime 25000 ms.
-    /// shortcut: targets drift and bob under the shared Wander rule (reroll 500, x speed range 1,
-    /// y range trunc(500 × h_farmer + 1), runs 6 and 3, accel 5; answers.md "Bonus round movers,
-    /// boxes and target spawns"); not modelled until the wander mover lands, so they only scroll
-    /// and those draws are missing.
+    /// Draws y = R(bg h), then x = 810 + R(150) (the field's y is 0); lifetime 25000 ms, and the
+    /// target wander.
     fn spawn_target(&mut self, cx: &mut Ctx) {
         let Some(slot) = self.targets.iter().position(|t| !t.active) else {
             return;
@@ -486,8 +495,22 @@ impl BonusRound {
             x,
             y: f64::from(y),
             until: Timer::armed(cx.now, LIFETIME_MS),
+            mover: target_mover(self.h_farmer),
             ..Piece::default()
         };
+    }
+
+    /// Each active target's wander step, y clamped to the field less 15 px each side.
+    // shortcut: the right bound (wrap + 100) is not applied, as the wrap of the bonus 1.0 layer is
+    // not documented; and the drift runs after the spawns and before the scroll, an order
+    // answers.md "Bonus round movers" does not give [I]. Revisit with that layer's setup.
+    fn drift_targets(&mut self, cx: &mut Ctx) {
+        let bottom = f64::from(self.bg_h) - TARGET_BAND - TARGET_H;
+        for t in self.targets.iter_mut().filter(|t| t.active) {
+            let (dx, dy) = t.mover.step(cx);
+            t.x += f64::from(dx);
+            t.y = (t.y + f64::from(dy)).clamp(TARGET_BAND, bottom);
+        }
     }
 
     /// A coin leaves once x + w < 0, a target once its wings (x − 24 + wing w) do, or either at
@@ -569,6 +592,16 @@ impl BonusRound {
             sound: Timer::armed(cx.now, RESULT_SOUND_DELAY_MS),
         };
     }
+}
+
+fn target_mover(h_farmer: f64) -> Wander {
+    let y_speed = (TARGET_Y_SPEED_SPAN * h_farmer + 1.0) as i32;
+    Wander::new(
+        TARGET_REROLL_MS,
+        (TARGET_X_SPEED, y_speed),
+        TARGET_RUNS,
+        TARGET_ACCEL,
+    )
 }
 
 fn play_at(freq: u32) -> SoundOp {
@@ -755,6 +788,43 @@ mod tests {
         let t = b.targets[0];
         assert_eq!((t.active, t.x, t.y), (true, 827.0, 41.0));
         assert_eq!(t.until.remaining_ms(now), LIFETIME_MS);
+    }
+
+    /// answers.md "Bonus round movers": after the spawn above (seed 1), the first drift draws x:
+    /// timer 6334, d 26500 % 10 = 0 (v not < 0: −1), 19169 % 1 → −65 − 5 = −70; y: timer 15724,
+    /// d 8 (+1), 29358 % trunc(500 × 0.5 + 1) = 242 → 307 + 5 = 312. The FPS step is (−1, 4).
+    #[test]
+    fn a_target_drifts_under_the_wander_rule() {
+        let mut rig = Rig::new(1);
+        let (_, mut b) = two_player_round(&mut rig);
+        rig.rng = MsvcRand::new(1);
+        rig.cx(|cx| b.spawn_target(cx));
+        rig.cx(|cx| b.drift_targets(cx));
+        let t = b.targets[0];
+        assert_eq!((t.mover.v, t.x, t.y), ([-70, 312], 826.0, 45.0));
+        assert_eq!(rig.rng.rand(), 26962);
+    }
+
+    /// Bounds top 15 and bottom 440 − 15 − 44 = 381. Seed 1, both at rest: target 0 x d 7 → 70,
+    /// y d 9, 15724 % 251 = 162 → 232 (3 px, 13 → 15); target 1 x d 8 → 70, y d 5,
+    /// 28145 % 251 = 33 → 103 (1 px, 401 → 381).
+    #[test]
+    fn targets_are_clamped_to_the_field_bands() {
+        let mut rig = Rig::new(1);
+        let (_, mut b) = two_player_round(&mut rig);
+        rig.rng = MsvcRand::new(1);
+        for (i, y) in [(0, 10.0), (1, 400.0)] {
+            b.targets[i] = Piece {
+                active: true,
+                x: 500.0,
+                y,
+                mover: target_mover(b.h_farmer),
+                ..Piece::default()
+            };
+        }
+        rig.cx(|cx| b.drift_targets(cx));
+        let got: Vec<_> = b.targets[..2].iter().map(|t| (t.x, t.y)).collect();
+        assert_eq!(got, [(501.0, 15.0), (501.0, 381.0)]);
     }
 
     /// The swatter at (400, 200) hits through (430, 200, 20, 154) grown by the 48 × 44 target.
