@@ -21,8 +21,9 @@ pub const MAX_OBJECTS: usize = MAX_PLACED + 5;
 pub const PLACEMENT_FAILURES: u32 = 2000;
 /// Type draws per object until an eligible type with stock comes up.
 pub const PLACEMENT_TYPE_TRIES: u32 = 5001;
-/// x draws per object.
-pub const PLACEMENT_X_TRIES: u32 = 1000;
+/// x draws per budget (answers.md "Extreme placement"): per object in the normal placement,
+/// shared by successes in the extreme one.
+pub const PLACEMENT_X_TRIES: u32 = 1001;
 /// Fly–object separation steps (§4.4 step 5).
 pub const SEPARATE_TRIES: u32 = 1000;
 /// Grab lock distance from the fly's bottom-centre to the grip point (§5.5 step 5).
@@ -205,9 +206,6 @@ impl Objects {
 
     /// Period start (§5.2): resets the per-type counts in `m`, places up to [`MAX_PLACED`]
     /// objects avoiding each other and the traps, then adds the fan stands.
-    ///
-    /// shortcut: extreme placement (`FUN_0042bdf8`) is undocumented beyond its type table; it
-    /// runs the §5.2 loop over the three extreme types with R(3). Revisit when it is read.
     pub fn place(m: &mut MatchState, meal: Meal, traps: &Traps, cx: &mut Ctx) -> Self {
         let types: &[ObjectType] = if m.config.extreme() {
             &EXTREME_TYPES
@@ -220,7 +218,11 @@ impl Objects {
             traps.flypapers.is_empty() && traps.fans.is_empty() && traps.zappers.is_empty();
         let free = |x: i32, w: i32| no_traps || traps.span_free(x, w);
         let mut objects = Self::empty();
-        objects.list = place_on_table(types, &eligible, free, cx);
+        objects.list = if m.config.extreme() {
+            place_extreme(free, cx)
+        } else {
+            place_on_table(types, &eligible, free, cx)
+        };
         m.stats.available += objects.list.len() as i32;
         objects.add_fan_stands(traps, cx);
         objects
@@ -962,16 +964,15 @@ fn toward_zero(v: i32, d: i32) -> i32 {
     }
 }
 
-/// §5.2 step 3 without the economy: up to [`MAX_PLACED`] objects, each a type draw then up to
-/// [`PLACEMENT_X_TRIES`] x draws in 0..5000, with landing sound 6 per placed object.
-/// `span_free` gets that screen-unit x (§5.2 step 3.3), not a layer x (answers.md O22).
+/// §5.2 step 3 without the economy (`FUN_0042ac27`): up to [`MAX_PLACED`] objects, each a type
+/// draw then its own [`PLACEMENT_X_TRIES`] x draws in 0..5000, with landing sound 6 per placed
+/// object. `span_free` gets that screen-unit x (§5.2 step 3.3), not a layer x (answers.md O22).
 pub fn place_on_table(
     types: &[ObjectType],
     eligible: &[bool],
     span_free: impl Fn(i32, i32) -> bool,
     cx: &mut Ctx,
 ) -> Vec<Object> {
-    let wrap = (f64::from(W) * OBJECT_PARALLAX) as i32;
     let mut stock: Vec<i32> = types.iter().map(|t| t.stock).collect();
     let mut placed: Vec<Object> = Vec::new();
     let mut failures = 0;
@@ -980,33 +981,79 @@ pub fn place_on_table(
             failures += 1;
             continue;
         };
-        let t = &types[kind];
-        let size = cx.data.size(t.name);
-        let fits = |x: i32| {
-            let clear = placed
-                .iter()
-                .all(|p| x + size.w < p.screen_x || p.screen_x + p.w < x - size.w);
-            clear && x + size.w < wrap && span_free(x, size.w)
-        };
-        let x = (0..PLACEMENT_X_TRIES).find_map(|_| Some(cx.rng.r(wrap)).filter(|&x| fits(x)));
-        let Some(x) = x else {
+        let size = cx.data.size(types[kind].name);
+        let mut tries = 0;
+        let Some(x) = draw_x(&mut tries, |x| fits(&placed, size, &span_free, x), cx) else {
             failures += 1;
             continue;
         };
-        let mut o = Object::of_type(kind, t, size);
-        o.set_screen_x(x);
-        placed.push(o);
+        placed.push(put(kind, &types[kind], size, x, cx));
         stock[kind] -= 1;
-        cx.emit(Event::play(SoundSlot::BOOM));
     }
     placed
+}
+
+/// Extreme placement (`FUN_0042bdf8`, answers.md "Extreme placement"): the types in order, 0 ×3,
+/// 1 ×5, 2 ×7, with no type draw, at y = 580 − h and with the §5.2 x checks. Successes share one
+/// x budget; only a failure resets it.
+pub fn place_extreme(span_free: impl Fn(i32, i32) -> bool, cx: &mut Ctx) -> Vec<Object> {
+    let mut stock = EXTREME_TYPES.map(|t| t.stock);
+    let mut placed: Vec<Object> = Vec::new();
+    let (mut failures, mut tries) = (0, 0);
+    while placed.len() < MAX_PLACED && failures < PLACEMENT_FAILURES {
+        let Some(kind) = (0..stock.len()).find(|&k| stock[k] >= 1) else {
+            break;
+        };
+        let t = &EXTREME_TYPES[kind];
+        let size = cx.data.size(t.name);
+        let Some(x) = draw_x(&mut tries, |x| fits(&placed, size, &span_free, x), cx) else {
+            (failures, tries) = (failures + 1, 0);
+            continue;
+        };
+        placed.push(put(kind, t, size, x, cx));
+        stock[kind] -= 1;
+    }
+    placed
+}
+
+/// The placement wrap: trunc(W × 1.25).
+fn placement_wrap() -> i32 {
+    (f64::from(W) * OBJECT_PARALLAX) as i32
+}
+
+/// §5.2 step 3.3: clear of every placed object, inside the wrap and on a free trap span.
+fn fits(placed: &[Object], size: Size, span_free: impl Fn(i32, i32) -> bool, x: i32) -> bool {
+    let clear = placed
+        .iter()
+        .all(|p| x + size.w < p.screen_x || p.screen_x + p.w < x - size.w);
+    clear && x + size.w < placement_wrap() && span_free(x, size.w)
+}
+
+/// R(wrap) until `fits`, while the counter `tries` is below [`PLACEMENT_X_TRIES`].
+fn draw_x(tries: &mut u32, fits: impl Fn(i32) -> bool, cx: &mut Ctx) -> Option<i32> {
+    while *tries < PLACEMENT_X_TRIES {
+        *tries += 1;
+        let x = cx.rng.r(placement_wrap());
+        if fits(x) {
+            return Some(x);
+        }
+    }
+    None
+}
+
+/// A placed object at screen x `x`, with landing sound 6.
+fn put(kind: usize, t: &ObjectType, size: Size, x: i32, cx: &mut Ctx) -> Object {
+    let mut o = Object::of_type(kind, t, size);
+    o.set_screen_x(x);
+    cx.emit(Event::play(SoundSlot::BOOM));
+    o
 }
 
 /// §5.2 step 3.1: R(types) until an eligible type with stock comes up.
 ///
 /// UB guard: after [`PLACEMENT_TYPE_TRIES`] draws the original would carry on with the last,
-/// unsuitable type; the port counts a placement failure instead. No meal reaches it (every
-/// meal has more than 15 copies; extreme stops at exactly 15).
+/// unsuitable type; the port counts a placement failure instead. No meal reaches it: every
+/// meal has more than 15 copies.
 fn pick_type(eligible: &[bool], stock: &[i32], cx: &mut Ctx) -> Option<usize> {
     let n = i32::try_from(eligible.len()).unwrap_or(i32::MAX);
     (0..PLACEMENT_TYPE_TRIES).find_map(|_| {
@@ -1127,8 +1174,7 @@ mod tests {
         assert!(placed.iter().all(|o| free(o.screen_x, o.w)));
         // Extreme: 3 + 5 + 7 = 15 copies in all, so stock is the limit as well.
         let mut b = Bench::new(5);
-        let all = [true; 3];
-        let placed = b.with(|cx| place_on_table(&EXTREME_TYPES, &all, |_, _| true, cx));
+        let placed = b.with(|cx| place_extreme(|_, _| true, cx));
         for (k, t) in EXTREME_TYPES.iter().enumerate() {
             assert!(placed.iter().filter(|o| o.kind == Some(k)).count() as i32 <= t.stock);
         }
@@ -1602,5 +1648,92 @@ mod tests {
         assert_eq!((o.y, o.vx, o.vy, o.state), (300, 0, 0, ObjState::Falling));
         assert!(objs.list[1].resting_on_top.is_empty());
         assert_eq!(b.rng.rand(), 41);
+    }
+
+    /// answers.md "Extreme placement": the types run in order, 0 ×3, 1 ×5, 2 ×7, with no type
+    /// draw. Seed 1, x = R(5000) with the synthetic widths 274 and 214: 41, 3467, 1334 (type 0),
+    /// then 1500 clashes with 1334..1608, so type 1 takes 4169 and then 724.
+    #[test]
+    fn extreme_placement_takes_the_types_in_order_with_no_type_draw() {
+        let mut b = Bench::new(1);
+        let placed = b.with(|cx| place_extreme(|_, _| true, cx));
+        let first: Vec<_> = placed
+            .iter()
+            .take(5)
+            .map(|o| (o.kind, o.screen_x))
+            .collect();
+        let want = [
+            (Some(0), 41),
+            (Some(0), 3467),
+            (Some(0), 1334),
+            (Some(1), 4169),
+            (Some(1), 724),
+        ];
+        assert_eq!(first, want);
+        let kinds: Vec<_> = placed.iter().filter_map(|o| o.kind).collect();
+        let mut sorted = kinds.clone();
+        sorted.sort_unstable();
+        assert_eq!(kinds, sorted);
+        assert!(placed.iter().all(|o| o.y == TABLE_Y - o.h));
+    }
+
+    /// The x search: 1001 draws per budget. A success leaves the budget used, so the next
+    /// search with the same counter stops after the 401 draws left; a fresh one gets 1001.
+    #[test]
+    fn the_x_search_draws_from_a_1001_budget_that_a_success_does_not_reset() {
+        let mut b = Bench::new(1);
+        let calls = std::cell::Cell::new(0);
+        let on_600th = |_| {
+            calls.set(calls.get() + 1);
+            calls.get() == 600
+        };
+        let mut tries = 0;
+        assert!(b.with(|cx| draw_x(&mut tries, on_600th, cx)).is_some());
+        assert_eq!(tries, 600);
+        assert_eq!(b.with(|cx| draw_x(&mut tries, |_| false, cx)), None);
+        let mut probe = MsvcRand::new(1);
+        skip(&mut probe, 1001);
+        assert_eq!(b.rng, probe);
+        let mut tries = 0;
+        assert_eq!(b.with(|cx| draw_x(&mut tries, |_| false, cx)), None);
+        skip(&mut probe, 1001);
+        assert_eq!(b.rng, probe);
+    }
+
+    /// The shared budget in extreme placement: the first object takes draw 1, so the second
+    /// fails after 1000 draws, then 1999 failures of 1001: 2 002 000 draws in all, one fewer than
+    /// with a budget per object.
+    #[test]
+    fn extreme_placement_shares_the_x_budget_until_a_failure() {
+        let mut b = Bench::new(1);
+        let calls = std::cell::Cell::new(0);
+        let first_only = |_, _| {
+            calls.set(calls.get() + 1);
+            calls.get() == 1
+        };
+        let placed = b.with(|cx| place_extreme(first_only, cx));
+        assert_eq!(placed.len(), 1);
+        let mut probe = MsvcRand::new(1);
+        skip(&mut probe, 1 + 1000 + 1999 * 1001);
+        assert_eq!(b.rng, probe);
+    }
+
+    /// answers.md "Extreme placement": the normal placement resets its counter per object and
+    /// draws 1001 x per failed object. One eligible type: R(1), then 1001 refused draws, 2000
+    /// times.
+    #[test]
+    fn a_normal_placement_that_never_fits_draws_1001_x_per_failure() {
+        let mut b = Bench::new(1);
+        let placed = b.with(|cx| place_on_table(&NORMAL_TYPES[..1], &[true], |_, _| false, cx));
+        assert!(placed.is_empty());
+        let mut probe = MsvcRand::new(1);
+        skip(&mut probe, 2000 * (1 + 1001));
+        assert_eq!(b.rng, probe);
+    }
+
+    fn skip(rng: &mut MsvcRand, n: u32) {
+        for _ in 0..n {
+            rng.rand();
+        }
     }
 }
