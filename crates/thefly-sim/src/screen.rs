@@ -21,10 +21,11 @@ pub const FADE_MS: u64 = 500;
 pub const FADE_END_MS: u64 = 600;
 pub const LOGO_KEY_MS: u64 = 3000;
 pub const LOGO_AUTO_MS: u64 = 10_000;
-/// Loading: 9 progress steps of 200 ms busy-wait, then 500 ms (screens-and-rendering §4.1).
-/// Open item O16: the step count of 9 is inferred.
+/// Loading: 9 progress steps, then 500 ms. docs/re/observed.md measured 2.69–2.79 s under Wine,
+/// i.e. 250 ms steps; observed wins over the 200 ms of screens-and-rendering §4.1. Open item
+/// O16: the step count of 9 is inferred.
 pub const LOADING_STEPS: u32 = 9;
-pub const LOADING_STEP_MS: u64 = 200;
+pub const LOADING_STEP_MS: u64 = 250;
 pub const LOADING_TAIL_MS: u64 = 500;
 /// "3, 2, 1, Go!" banner step.
 pub const BANNER_STEP_MS: u64 = 1000;
@@ -174,6 +175,9 @@ pub struct Gameplay {
     pub world: World,
     /// The loading backdrop: `LOADING2` when true (picked 50/50).
     pub loading_alt: bool,
+    /// Loading start; the steps are due at fixed offsets from it, like the original's
+    /// busy-waits, so tick rounding does not add up.
+    pub loading_from: u64,
 }
 
 impl Gameplay {
@@ -202,6 +206,7 @@ impl Gameplay {
             },
             world,
             loading_alt,
+            loading_from: now,
         }
     }
 
@@ -219,7 +224,7 @@ impl Gameplay {
         MatchFlow::Stay
     }
 
-    /// screens-and-rendering §4.1: nine clicks 200 ms apart, then 500 ms more.
+    /// screens-and-rendering §4.1: nine clicks `LOADING_STEP_MS` apart, then 500 ms more.
     fn load_step(&mut self, step: u32, next: Timer, cx: &mut Ctx) {
         if !next.expired(cx.now) {
             return;
@@ -236,14 +241,15 @@ impl Gameplay {
             volume_cb: -1000,
             freq_hz: Some(33_000),
         });
-        let wait = if step + 1 == LOADING_STEPS {
-            LOADING_STEP_MS + LOADING_TAIL_MS
+        let tail = if step + 1 == LOADING_STEPS {
+            LOADING_TAIL_MS
         } else {
-            LOADING_STEP_MS
+            0
         };
+        let due = LOADING_STEP_MS * u64::from(step + 1) + tail;
         self.phase = GamePhase::Loading {
             step: step + 1,
-            next: Timer::armed(cx.now, wait),
+            next: Timer::armed(self.loading_from, due),
         };
     }
 
