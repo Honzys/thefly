@@ -2,7 +2,7 @@
 //! (game-spec §4.7, ai-and-rules §5, fly-and-world §2 steps 3, 4 and 15).
 
 use super::World;
-use super::farmer::HITBOX_W;
+use super::farmer::{SPRITE_H, SPRITE_W};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::event::{Effect, Event, SoundSlot};
@@ -131,21 +131,30 @@ impl World {
         false
     }
 
-    /// Step 4 (`FUN_004043c1`): the farmer's selector, or the AI's request. Triple and Nuclear
-    /// only while Nuclear is off; slot 37.
-    // shortcut: GS §4.8 and gaps §1.2 give the 0x10 key "select and use" but no use trigger; the
-    // port cycles on its press and uses on Tab held, since a use writes 10 into Tab's edge memory
-    // (gaps §1.2), which only matters if Tab triggered it. The same Tab press also makes this
-    // tick's swing edge (step 2). Revisit with FUN_004043c1's key arguments.
+    /// Step 4 (`FUN_004043c1`), human farmer: the goodie key's press cycles the selector, and Tab
+    /// held with a selection uses it. The AI's request is spent in step 6 instead
+    /// ([`World::spend_farmer_request`]).
     pub fn farmer_goodie(&mut self, pad: &FarmerPad, m: &mut MatchState, cx: &mut Ctx) {
-        let goodie = if self.ai.is_some() {
-            self.goodies.farmer_request.take()
-        } else {
-            self.human_farmer_goodie(pad)
-        };
-        let Some(goodie) = goodie else {
+        if self.ai.is_some() {
             return;
-        };
+        }
+        if let Some(goodie) = self.human_farmer_goodie(pad) {
+            self.use_farmer_goodie(goodie, m, cx);
+        }
+    }
+
+    /// The AI path of `FUN_004043c1` (answers.md "Farmer goodie use"): after fly physics and
+    /// before the AI update, so its draws (the boot spawn) follow the fly's.
+    pub(super) fn spend_farmer_request(&mut self, m: &mut MatchState, cx: &mut Ctx) {
+        if let Some(goodie) = self.goodies.farmer_request.take() {
+            self.use_farmer_goodie(goodie, m, cx);
+        }
+    }
+
+    /// A use attempt: the selector closes and the swing memory blocks, in stock or not; that
+    /// memory also tells step 6 to drop this tick's swing edge. Triple and Nuclear only while
+    /// Nuclear is off; slot 37.
+    fn use_farmer_goodie(&mut self, goodie: FarmerGoodie, m: &mut MatchState, cx: &mut Ctx) {
         self.goodies.farmer_selector = 0;
         self.farmer_swing_memory = USE_BLOCK;
         let inv = &mut m.economy.farmer;
@@ -165,7 +174,7 @@ impl World {
             FarmerGoodie::Nuclear => self.farmer.start_nuclear(None, cx),
             FarmerGoodie::Boot => self.boot.spawn(cx),
         }
-        let (x, y) = (self.farmer.x + HITBOX_W / 2, self.farmer.swatter_y());
+        let (x, y) = (self.farmer.x + SPRITE_W / 2, self.farmer.y + SPRITE_H / 2);
         cx.emit(Event::Effect(Effect::Stardust { x, y }));
         cx.emit(Event::play(SoundSlot::GOODIE_FARMER));
     }
@@ -306,6 +315,70 @@ mod tests {
             (0, USE_BLOCK)
         );
         assert!(rig.events.contains(&Event::play(SoundSlot::GOODIE_FARMER)));
+    }
+
+    /// Steps 2, 4 and 6 for one tick of the human farmer.
+    fn farmer_tick(w: &mut World, pad: &FarmerPad, m: &mut MatchState, rig: &mut Rig) {
+        let edge = w.farmer_swing_edge(pad);
+        w.farmer_goodie(pad, m, &mut rig.cx(0));
+        w.farmer_step(pad, edge, m, &mut rig.cx(0));
+    }
+
+    /// answers.md "Farmer goodie use cancels the same tick's swing": the Tab press that uses a
+    /// goodie starts no swat, and an attempt with nothing in stock cancels it too.
+    #[test]
+    fn a_farmer_goodie_attempt_cancels_that_ticks_swing() {
+        let mut rig = Rig::new(1);
+        let (mut w, mut m) = setup(&mut rig);
+        let tab = FarmerPad {
+            swing: true,
+            ..FarmerPad::default()
+        };
+        for triples in [1, 0] {
+            m.economy.farmer.triple = triples;
+            w.goodies.farmer_selector = 1;
+            farmer_tick(&mut w, &tab, &mut m, &mut rig);
+            assert_eq!((w.farmer.swing.frame, m.stats.swings), (0, 0));
+            assert_eq!(w.goodies.farmer_selector, 0);
+            farmer_tick(&mut w, &FarmerPad::default(), &mut m, &mut rig);
+        }
+        assert_eq!(m.economy.farmer.triple, 0);
+        farmer_tick(&mut w, &tab, &mut m, &mut rig);
+        assert_eq!((w.farmer.swing.frame, m.stats.swings), (1, 1));
+    }
+
+    /// The stardust sits at (farmer x + 181/2, farmer y + 178/2).
+    #[test]
+    fn the_farmer_goodie_effect_is_centred_on_the_sprite() {
+        let mut rig = Rig::new(1);
+        let (mut w, mut m) = setup(&mut rig);
+        m.economy.farmer.nuclear = 1;
+        (w.farmer.x, w.farmer.y, w.goodies.farmer_selector) = (100, 400, 2);
+        let tab = FarmerPad {
+            swing: true,
+            ..FarmerPad::default()
+        };
+        w.farmer_goodie(&tab, &mut m, &mut rig.cx(0));
+        let stardust = Event::Effect(Effect::Stardust { x: 190, y: 489 });
+        assert!(rig.events.contains(&stardust), "{:?}", rig.events);
+    }
+
+    /// AI path: the request is spent after fly physics, in step 6 before the AI update, not in
+    /// step 4.
+    #[test]
+    fn the_ai_request_is_spent_in_the_farmer_step() {
+        let mut rig = Rig::new(1);
+        let mut m = MatchState::new(MatchConfig::default(), false, &mut rig.cx(0));
+        m.advance(&mut rig.cx(0));
+        let mut w = World::new(&mut m, &mut rig.cx(0));
+        assert!(w.ai.is_some());
+        m.economy.farmer.boot = 1;
+        w.goodies.farmer_request = Some(FarmerGoodie::Boot);
+        let pad = FarmerPad::default();
+        w.farmer_goodie(&pad, &mut m, &mut rig.cx(0));
+        assert!(!w.boot.active && m.economy.farmer.boot == 1);
+        w.farmer_step(&pad, false, &mut m, &mut rig.cx(0));
+        assert!(w.boot.active && m.economy.farmer.boot == 0);
     }
 
     /// A mystery lasts 15000 ms (tick 975): the "cannot hit" flag clears then.

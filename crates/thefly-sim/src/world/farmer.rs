@@ -3,6 +3,7 @@
 
 use super::collision::Rect;
 use super::fly::KickDir;
+use super::goodies::USE_BLOCK;
 use super::{SCREEN_W, SwatHit, World};
 use crate::clock::{DT, Timer};
 use crate::ctx::Ctx;
@@ -275,9 +276,8 @@ impl Farmer {
         }
     }
 
-    /// Frame 1: slot 27 at 35000 + R(15000) Hz (40000 with Triple), and voice 34 one time in five.
-    // shortcut: AR §1.3 does not say whether the frequency draw happens with Triple; the port
-    // skips it. Revisit with a trace of FUN_0043d510.
+    /// Frame 1: slot 27 at 35000 + R(15000) Hz, or 40000 with Triple and no draw (answers.md
+    /// "Triple swing skips the frequency draw"), and voice 34 one time in five.
     fn swing_sounds(&mut self, cx: &mut Ctx) {
         let freq = if self.triple.on {
             TRIPLE_SWING_HZ
@@ -429,8 +429,8 @@ impl Farmer {
     }
 
     /// `FUN_0043cd23`: the midges slowdown pulse (AR §6.3 steps 1–3).
-    // shortcut: the pulse timer is never armed before the first pulse, and AR §6.3 does not say
-    // how an unarmed timer reads; the port treats it as expired so the first pulse fires at once.
+    // shortcut: answers.md "Farmer pulse timer" [I], an unarmed timer reads as expired, so the
+    // first pulse fires at once; the farmer's own timer init was not checked. Revisit with it.
     pub fn midges_pulse(&mut self, stuck: i32, total: i32, cx: &mut Ctx) {
         let r = if total == 0 {
             0.0
@@ -549,7 +549,8 @@ impl World {
         edge
     }
 
-    /// Step 6: human move then hit test, or the AI (which moves and swings itself).
+    /// Step 6: human move then hit test, or the AI (which moves and swings itself). A goodie
+    /// use attempt in step 4 left [`USE_BLOCK`] in the swing memory and cancels this tick's edge.
     pub fn farmer_step(
         &mut self,
         pad: &FarmerPad,
@@ -559,8 +560,9 @@ impl World {
     ) -> SwatHit {
         let fly_box = Rect::new(self.fly.x, self.fly.y, self.fly.size.w, self.fly.size.h);
         let (pad, swing) = match self.ai.is_some() {
-            false => (*pad, swing_edge),
+            false => (*pad, swing_edge && self.farmer_swing_memory != USE_BLOCK),
             true => {
+                self.spend_farmer_request(m, cx);
                 let view = self.ai_view(m);
                 let Some(ai) = self.ai.as_mut() else {
                     return SwatHit::default();
