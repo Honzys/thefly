@@ -156,8 +156,8 @@ pub enum GamePhase {
         step: u32,
         next: Timer,
     },
-    /// "3, 2, 1, Go!": 3 down to 0, one per 1000 ms; slot 52 at the start. Open item O16: only the
-    /// render-driven step 18b runs under the banner; whether the rest of the world ticks is open.
+    /// "3, 2, 1, Go!": 3 down to 0, one per 1000 ms; slot 52 at the start. The world ticks
+    /// paused, with every key released (answers.md "Banner").
     Banner {
         count: i32,
         next: Timer,
@@ -211,11 +211,9 @@ impl Gameplay {
         match self.phase {
             GamePhase::Loading { step, next } => self.load_step(step, next, cx),
             GamePhase::Banner { count, mut next } => {
-                // gaps §2.3: the appear tween runs per drawn frame; a Wine capture shows the fly fully
-                // drawn at "2", so the scene is drawn under the banner.
-                // shortcut: O16, only step 18b runs here, so slot 38 and the survival timer start
-                // during the countdown; revisit when FUN_00405538 is read.
-                self.world.fly_render_driven(m, cx);
+                // answers.md "Banner": the whole update runs, paused (`World::paused`) and with
+                // every key released, so the fly appears (slot 38, survival timer) by "2".
+                self.world.tick(&KeyState::NONE, m, cx);
                 if next.expired_rearm(cx.now) {
                     self.banner_step(count - 1, next, m, cx);
                 }
@@ -231,6 +229,7 @@ impl Gameplay {
             return;
         }
         if step == LOADING_STEPS {
+            self.world.paused = true;
             cx.emit(Event::play(SoundSlot::COUNTDOWN));
             self.phase = GamePhase::Banner {
                 count: 3,
@@ -263,6 +262,7 @@ impl Gameplay {
         // `FUN_004015c8`: the clock is paused through the load and the banner, so starting it here
         // matches within one tick. Then, with music on, one parity picks the track (odd → 2).
         self.world.clock = PeriodClock::new(cx.now, m.period_minutes());
+        self.world.paused = false;
         if m.music_on {
             let alt = cx.rng.odd();
             cx.emit(Event::Music(Music::Game(alt)));
@@ -640,6 +640,67 @@ mod tests {
         assert!(at_two(&g));
         assert!(!g.world.fly.appearing);
         assert!(rig.events.contains(&Event::play(SoundSlot::GOODIE_FLY)));
+    }
+
+    /// Ticks with no keys until the banner is up.
+    fn to_banner(rig: &mut Rig, g: &mut Gameplay, m: &mut MatchState) {
+        for _ in 0..TICK_CAP {
+            if matches!(g.phase, GamePhase::Banner { .. }) {
+                return;
+            }
+            rig.step(&[], |k, cx| g.tick(k, m, cx));
+        }
+        panic!("no banner in {TICK_CAP} ticks");
+    }
+
+    /// answers.md "Banner": the whole world update runs under the banner, paused and with every
+    /// key released. Held keys do not steer the fly, and every tick draws rand (the animal
+    /// sounds' R(150) at least).
+    #[test]
+    fn the_banner_runs_the_world_paused_with_the_keys_released() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig);
+        let world = rig.cx(|cx| World::new(&mut m, cx));
+        let mut g = Gameplay::loading(world, false, rig.now());
+        to_banner(&mut rig, &mut g, &mut m);
+        assert!(g.world.paused);
+        for _ in 0..TICK_CAP {
+            if g.phase == GamePhase::Playing {
+                break;
+            }
+            let before = rig.rng.clone();
+            rig.step(&[Scancode::RIGHT, Scancode::UP], |k, cx| {
+                g.tick(k, &mut m, cx)
+            });
+            assert_ne!(rig.rng, before);
+            assert_eq!((g.world.fly.vx, g.world.fly.vy), (0, 0));
+        }
+        assert_eq!(g.phase, GamePhase::Playing);
+        assert!(!g.world.paused && !g.world.fly.appearing);
+    }
+
+    /// The pause gates the AI tick: one player's AI is unchanged across the banner.
+    #[test]
+    fn the_ai_holds_still_under_the_banner() {
+        let mut rig = Rig::new(1);
+        let mut m = rig.cx(|cx| {
+            let mut m = MatchState::new(MatchConfig::default(), true, cx);
+            m.advance(cx);
+            m
+        });
+        let world = rig.cx(|cx| World::new(&mut m, cx));
+        let mut g = Gameplay::loading(world, false, rig.now());
+        to_banner(&mut rig, &mut g, &mut m);
+        let mut ai = g.world.ai.clone();
+        // The farmer step copies the pause into the AI on the first banner tick.
+        ai.as_mut().expect("one player has an AI").paused = true;
+        for _ in 0..TICK_CAP {
+            if g.phase == GamePhase::Playing {
+                break;
+            }
+            rig.step(&[], |k, cx| g.tick(k, &mut m, cx));
+        }
+        assert_eq!(g.world.ai, ai);
     }
 
     /// observed.md: nine clicks 250 ms apart, slot 52 at 2750 ms, then 3, 2, 1, Go at 1000 ms.

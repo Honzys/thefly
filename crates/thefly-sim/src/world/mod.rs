@@ -59,7 +59,9 @@ pub struct World {
     pub farmer_swing_memory: i32,
     /// game+0x408ac: every key reads as released.
     pub keys_blocked: bool,
-    /// The quit dialog is open. Open item O13: which steps freeze besides the boot and the AI.
+    /// game+0x407bc: the banner is up or the quit dialog is open. It gates only the AI, the boot
+    /// (update and collision) and the trap actions; the clock freezes outside the tick
+    /// (answers.md "Banner").
     pub paused: bool,
     /// game+0x407b8: set by step 12 when the table is cleared or the clock runs out.
     pub period_over: bool,
