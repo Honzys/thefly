@@ -320,7 +320,7 @@ Both files are opened relative to the working directory: read with "rb" (`FUN_00
 
 ### 8.1 Engine [C, `FUN_0040c270`]
 
-- **Sound effects:** 59 DirectSound WAV slots, indexed 0–58. Wrappers: play / loop `FUN_0040ce7b`, volume `FUN_0040cea9`, frequency `FUN_0040ced5`, pan `FUN_0040cf01`, stop `FUN_0040cf2d`, is-playing `FUN_0040cf55`, positional `FUN_0040d1b2`.
+- **Sound effects:** 59 DirectSound WAV slots, indexed 0–58. Wrappers: play / loop `FUN_0040ce7b`, volume `FUN_0040cea9`, frequency `FUN_0040ced5`, pan `FUN_0040cf01`, stop `FUN_0040cf2d`, idle test `FUN_0040cf55` (returns 1 when the slot is not playing), positional `FUN_0040d1b2`.
 - **Preloading:** each screen preloads its group by name prefix:
   - menu `FUN_0040c833`
   - goodies shop `FUN_0040c99c`
