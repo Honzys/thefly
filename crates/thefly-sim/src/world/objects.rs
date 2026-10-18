@@ -1013,7 +1013,7 @@ pub fn place_on_table(
         placed.push(put(kind, &types[kind], size, x, cx));
         stock[kind] -= 1;
     }
-    placed
+    leave_out_last_on_failure_cap(placed, failures)
 }
 
 /// Extreme placement (`FUN_0042bdf8`, answers.md "Extreme placement"): the types in order, 0 ×3,
@@ -1036,6 +1036,16 @@ pub fn place_extreme(span_free: impl Fn(i32, i32) -> bool, cx: &mut Ctx) -> Vec<
         placed.push(put(kind, t, size, x, cx));
         stock[kind] -= 1;
     }
+    leave_out_last_on_failure_cap(placed, failures)
+}
+
+/// answers.md "Extreme placement" step 4: the 2000th failure decrements the placed index before
+/// the loop exits, so the count leaves out the last placed object. With none placed the
+/// original count would be −1; the port returns none.
+fn leave_out_last_on_failure_cap(mut placed: Vec<Object>, failures: u32) -> Vec<Object> {
+    if failures >= PLACEMENT_FAILURES {
+        placed.pop();
+    }
     placed
 }
 
@@ -1044,11 +1054,12 @@ fn placement_wrap() -> i32 {
     (f64::from(W) * OBJECT_PARALLAX) as i32
 }
 
-/// §5.2 step 3.3: clear of every placed object, inside the wrap and on a free trap span.
+/// §5.2 step 3.3: clear of every placed object (answers.md "Placement overlap test": refused when
+/// xj − wNew ≤ x ≤ xj + wj), inside the wrap and on a free trap span.
 fn fits(placed: &[Object], size: Size, span_free: impl Fn(i32, i32) -> bool, x: i32) -> bool {
     let clear = placed
         .iter()
-        .all(|p| x + size.w < p.screen_x || p.screen_x + p.w < x - size.w);
+        .all(|p| x + size.w < p.screen_x || p.screen_x + p.w < x);
     clear && x + size.w < placement_wrap() && span_free(x, size.w)
 }
 
@@ -1180,7 +1191,7 @@ mod tests {
             assert_eq!(o.y, TABLE_Y - o.h);
             assert!(o.screen_x + o.w < 5000);
             for p in &placed[..i] {
-                let clash = o.screen_x - o.w <= p.screen_x + p.w && p.screen_x <= o.screen_x + o.w;
+                let clash = p.screen_x - o.w <= o.screen_x && o.screen_x <= p.screen_x + p.w;
                 assert!(!clash, "{i} overlaps an earlier object");
             }
             let copies = placed.iter().filter(|p| p.kind == o.kind).count();
@@ -1725,7 +1736,7 @@ mod tests {
 
     /// The shared budget in extreme placement: the first object takes draw 1, so the second
     /// fails after 1000 draws, then 1999 failures of 1001: 2 002 000 draws in all, one fewer than
-    /// with a budget per object.
+    /// with a budget per object. The 2000th failure leaves the one placed object out.
     #[test]
     fn extreme_placement_shares_the_x_budget_until_a_failure() {
         let mut b = Bench::new(1);
@@ -1735,7 +1746,7 @@ mod tests {
             calls.get() == 1
         };
         let placed = b.with(|cx| place_extreme(first_only, cx));
-        assert_eq!(placed.len(), 1);
+        assert!(placed.is_empty());
         let mut probe = MsvcRand::new(1);
         skip(&mut probe, 1 + 1000 + 1999 * 1001);
         assert_eq!(b.rng, probe);
@@ -1754,6 +1765,34 @@ mod tests {
         assert_eq!(b.rng, probe);
     }
 
+    /// answers.md "Placement overlap test": x is refused when xj − wNew ≤ x ≤ xj + wj. chips1
+    /// at 1000 is 150 wide, the new object 100: 900..=1150 is refused, 1151 is not.
+    #[test]
+    fn placement_refuses_x_from_the_new_width_left_of_an_object_to_its_right_edge() {
+        let b = Bench::new(1);
+        let placed = [b.object(3, 1000)];
+        let size = Size { w: 100, h: 100 };
+        let ok = |x| fits(&placed, size, |_, _| true, x);
+        assert_eq!([899, 900, 1150, 1151].map(ok), [true, false, false, true]);
+    }
+
+    /// answers.md "Extreme placement" step 4: the 2000th failure decrements the placed index, so
+    /// the count leaves out the last placed object. One type: R(1) and x on the first draw, then
+    /// 2000 failures of R(1) and 1001 refused x.
+    #[test]
+    fn a_placement_ending_on_its_2000th_failure_leaves_out_the_last_object() {
+        let mut b = Bench::new(1);
+        let calls = std::cell::Cell::new(0);
+        let first_only = |_, _| {
+            calls.set(calls.get() + 1);
+            calls.get() == 1
+        };
+        let placed = b.with(|cx| place_on_table(&NORMAL_TYPES[..1], &[true], first_only, cx));
+        assert!(placed.is_empty());
+        let mut probe = MsvcRand::new(1);
+        skip(&mut probe, 2 + 2000 * (1 + 1001));
+        assert_eq!(b.rng, probe);
+    }
     fn skip(rng: &mut MsvcRand, n: u32) {
         for _ in 0..n {
             rng.rand();
