@@ -4,6 +4,7 @@
 mod audio;
 pub mod data_dir;
 mod error;
+mod fonts;
 mod input;
 pub mod letterbox;
 mod render;

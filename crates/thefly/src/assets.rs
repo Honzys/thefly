@@ -167,9 +167,10 @@ pub fn sheet(name: &str) -> Option<Sheet> {
 
 /// Joint, the shipped display face (SR "Joint").
 pub const JOINT: &str = "JOINPD__.TTF";
-/// shortcut: Arial Black is a Windows system face and is not shipped; the shipped `casual.ttf`
+/// shortcut: Arial Black is a Windows system face and is not shipped: a user-supplied copy in `rsc/`,
+/// then the OS fonts, then the shipped `casual.ttf` (wider, so wide text goes through `Gfx::text_fit`)
 /// stands in until a metric-compatible free face is chosen (SR §2.3, §3.3, §5.2, §5.3).
-pub const ARIAL_BLACK: &str = "casual.ttf";
+pub const ARIAL_BLACK: &str = "ariblk.ttf|Arial Black.ttf|casual.ttf";
 
 /// Case-insensitive lookup of `stem.wav` among the files of `dir`.
 fn find_case_insensitive(files: &[PathBuf], stem: &str, ext: &str) -> Option<String> {

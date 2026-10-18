@@ -77,12 +77,23 @@ const PANEL: Color = Color::RGB(124, 150, 228);
 const TITLE_RED: Color = Color::RGB(222, 19, 0);
 const RESULT_FILL: Color = Color::RGB(89, 110, 171);
 const ROW_DY: f32 = 23.0;
+/// Stats columns: labels run 280 to the value column at 530, values to the right edge.
+const LABEL_W: f32 = 245.0;
+const VALUE_W: f32 = 260.0;
 
+/// One size for the whole block, so the rows stay level: the largest at which every label and
+/// value fits its column.
 fn rows(g: &mut Gfx, y0: f32, rows: &[(&str, String)]) -> Result<(), Error> {
-    for (i, (label, value)) in rows.iter().enumerate() {
+    let values: Vec<String> = rows.iter().map(|(_, v)| format!(": {v}")).collect();
+    let mut size = 22;
+    for ((label, _), value) in rows.iter().zip(&values) {
+        size = g.fit_size(ARIAL_BLACK, size, label, LABEL_W)?;
+        size = g.fit_size(ARIAL_BLACK, size, value, VALUE_W)?;
+    }
+    for (i, ((label, _), value)) in rows.iter().zip(&values).enumerate() {
         let y = y0 + ROW_DY * i as f32;
-        g.text(ARIAL_BLACK, 22, label, 280.0, y, WHITE)?;
-        g.text(ARIAL_BLACK, 22, &format!(": {value}"), 530.0, y, WHITE)?;
+        g.text(ARIAL_BLACK, size, label, 280.0, y, WHITE)?;
+        g.text(ARIAL_BLACK, size, value, 530.0, y, WHITE)?;
     }
     Ok(())
 }
