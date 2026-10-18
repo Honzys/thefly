@@ -234,6 +234,9 @@ Original (`FUN_00442f95`) [C], every tick for every midge that is neither stunne
 
 Verdict: guess wrong where the port applies an x tolerance or a different order.
 
+Amended in round 4: "Midge homing: ring bands (round 4)" gives the steer direction per band and
+shows that v is written only on ticks that rolled new speeds.
+
 ### Goodie-midge removal
 `crates/thefly-sim/src/world/midges.rs:258`
 
@@ -1012,12 +1015,17 @@ and probes below only when vy ≠ 0.
      - Only right is set: vx = 10w − vx, and stop if the result is ≥ 0.
      - Only left is set: vx = −10w − vx, and stop if the result is < 1.
      - Neither is set: nothing changes.
+     - Both are set: vx = 0 and the object stops (round 4).
 
 **Falling (state 2).**
 - Nothing touches and y ≥ floor y (+0x1c): y = floor y and the object lands (state 1, landed).
+  Amended in round 4: only vy = 0 and drop vx = 0; vx is kept, and a second motion call moves x
+  again on that tick.
 - Otherwise:
-  1. Pick k and probe it in mode 1 with d = 1, then restore the previous position.
-  2. If no flag is set, retry with d = 2, 3, … up to 10 more times. If still none, force "left
+  1. Resolve first (`FUN_0042ffc6`: restore, and the step back on a hit), then probe the k it
+     returns in mode 1 with d = 1 at the resolved position. Amended in round 4: round 2 put the
+     probe before the restore.
+  2. If no flag is set, retry with d = 2, 3, … up to 10 more times (d ≤ 11). If still none, force "left
      only".
   3. Below only (no side flag): the object lands on k. It goes into k's list and k into its own,
      state 1, vy = 0.
@@ -1300,6 +1308,10 @@ box test `FUN_0042825c`) [C]:
 Verdict: guess wrong (missing behaviour). Zappers and flypapers are solid outside the zapper's
 column, and the flypaper's catch box is the inset box above, inclusive.
 
+Amended in round 4: the trap's restore in step 1 is a no-op ("Trap restore in the push-out is a
+no-op"), and the flypaper's outline is built from its sprite mask ("Flypaper push-out: mask
+outline").
+
 ### Lift: `moved` is cleared every tick (round 3)
 `crates/thefly-sim/src/world/lift.rs:293`
 
@@ -1330,6 +1342,10 @@ Original (`FUN_00438643`, `FUN_004387d5`, sparkles `FUN_00439450`, SuperFly `FUN
   2. plays sound 38
   3. starts the survival stat (`FUN_0040db31`)
   4. forces a 45-sparkle burst, `FUN_00439450(0, 45)`
+
+  Amended in round 4: the real order is clear the flags, +0x18e8 = 1 and +0x18ec = 0, the 45
+  sparkles, sound 38, then the survival start. The appear end runs `FUN_004387d5` too (see
+  "SuperFly sparkles: call site, lifetime and pool").
 - **Each sparkle** takes a free slot of 90 and makes 7 draws: delay R(60) + 20; R(10) sign;
   x = R(w − 20) + fly x; y = R(h − 20) + fly y; vx = R(160) × sign; R(10) sign;
   vy = R(160) × sign.
@@ -1483,7 +1499,9 @@ Guess: a linear pan from the screen centre reaching 2000 cb at the edges; off-sc
 3 cb per px, down to −3000.
 
 Original (`FUN_0040d1b2(slot, loop, vol, wrap, x, w)`, used for slots 39, 40, 42, 44, the winch
-47 and the farmer voices; x is the source's screen x in [0, wrap)) [C]:
+47 and the farmer voices; x is the source's screen x in [0, wrap)) [C]. Amended in round 4: the
+wrap is the caller's, 4000 for the farmer voices and the flying goodie (see "Positional sound:
+the wrap is per source"):
 
 1. half = (wrap + 800) / 2.0. Then d (0..100) and a side:
    - 800 < x ≤ half: d = trunc((x − 800) / (half − 800) × 100), side −1.
@@ -1522,10 +1540,12 @@ marked]:
   - v ≠ 0 and the stuck counter (+0x80, bumped per call while +0x74 is 0) is below 31: the
     restored position is retested against the touching list. If it still touches some k, the
     object steps 1 px against sign(vx) and 1 px against sign(vy), prev is set to it, and k is
-    the result. Otherwise k is the first touching object. The loop allows 100 retests, but the
+    the result. Amended in round 4: the step is followed by the motion with dt = 0 (prev saved
+    again, x += trunc(−delta)). Otherwise k is the first touching object. The loop allows 100 retests, but the
     position only changes on a hit, so it does at most one step.
   - The counter at 31 (reset to 0), or v = 0: `FUN_004303e5` runs with v forced to (0, 15) or
-    vy to 5. Not read (open).
+    vy to 5. Read in round 4: a 1 px push up out of the overlap, up to 500 steps (see
+    "`FUN_004303e5` push-up, the stuck counter and the held flag").
 - **Then:** k is pushed (mode 3, the object's v and weight) if collectible. Fly x =
   trunc(object screen x (minus wrap when it straddles) + grip x − fly w / 2.0); fly y = object y
   − fly h + off; vx = trunc(−vx / 1.4); vy = trunc(−vy / 1.4 − (weight + 20)).
@@ -1533,6 +1553,319 @@ marked]:
 Verdict: guess correct on the restore and on the fly placement and speeds. It misses the one-px
 step back when the restored position still touches, and the stuck-counter path. The port also
 clamps the object's y on the table, which the original does not.
+
+### Object previous position: every write, in step order (round 4)
+`crates/thefly-sim/src/world/objects.rs:893`, `:898`, `:935`, `:965`, `:881`, test `:1829`;
+amends "Object side test" (round 2) and "Carried object collision" (round 3)
+
+Guess: prev is saved only at rest (FW §5.4 step 4) and by the carry. So a dropped object keeps the
+carry's prev, its restore jumps back to the drop point, and the test pins it resting 180 px above
+chips2.
+
+Original (object step `FUN_0042c888(fly, dt, delta)`, motion `FUN_0042ea74`, generic mover
+`FUN_00417db6`, state step `FUN_0042ec96`, resolve `FUN_0042ffc6`, carry `FUN_0042f3b1`) [C]:
+
+**The writes.** Only these seven write an object's prev x/y (+0x10, +0x14):
+- W1, motion, every state. v is zeroed first when the object is not collectible. Then the mover
+  sets prev = (x, y) **before** it moves: x += trunc(vx·dt − delta), y += trunc(vy·dt), then the
+  wrap and the screen x. After it, vx is clamped to ±500.
+- W2, motion, state 0 only: after the mover, prev = (x, y) again, the post-move position.
+- W3, resolve path A, on a hit: prev = the stepped-back position (below).
+- W4/W5, the motion call that follows W3 with dt = 0: W4 is W1 again (prev = the stepped
+  position), then x += trunc(−delta); W5 is W2 when the state is 0.
+- W6, a falling object landing on the floor: a second motion call with (dt, delta), made after
+  state = 1, so prev = (x, floor y).
+- W7, the carry: prev = the pre-placement position, when the object is collectible.
+
+Not writers: the touching list reads prev (below); the screen-x setter `FUN_00417fab` leaves prev
+alone; the trap mover (`FUN_00427270`) writes each trap's own prev; the lift mover moves its own
+sprites.
+
+**The order within one object step.**
+1. Pass 1, for each object in index order:
+   1. If the landed flag (+0x70) is set: the dust `FUN_0042d900`. It spawns weight × 20 / 130
+      puffs (`FUN_00412fef`); each puff draws R(h), R(w), then 5 more in `FUN_00412992`, so
+      7 draws per puff.
+   2. The object goes into the per-tick lists.
+   3. If it is not held (+0x74 == 0): `FUN_0042eb13(dt, delta)`, then the motion (W1, and W2 at
+      rest).
+2. Pass 2, over the interaction list (collectible, state ≠ 0, descending index):
+   `FUN_0042ec96(base, list, dt, delta)`, then the fan push `FUN_0042754d` mode 0, which changes
+   only v.
+3. Sliding (state 1):
+   1. The touching list `FUN_0042fe10`: for each candidate that is in the object's support list,
+      y += 1 for the test, then y = prev y. While sliding vy = 0, so prev y = y and this is a
+      no-op in practice.
+   2. On a touch: the resolve, the impact sound, push k (mode 1), then the bounce (round 2).
+   3. Then the support logic (round 2). New: when both side probes are set, vx = 0 and the
+      object stops.
+4. Falling (state 2):
+   - No touch and y ≥ floor y (+0x1c): y = floor y, the support list is cleared, drop vx (+0x7c)
+     = 0, state = 1, vy = 0. **vx is kept.** Then the W6 motion, so on that tick x moves and
+     scrolls a second time. Then the impact sound, and landed = 1.
+   - A touch:
+     1. The resolve runs **first**.
+     2. Then the probe `FUN_0042fb1c(k, 1, mode 1)` at the resolved position, where k is the
+        resolve's return value.
+     3. If no flag is set, it retries with d = 2..11. If still none, it forces "left only".
+        (The all-three-flags loop cannot run in mode 1.)
+     4. The impact sound.
+     5. Below only: the object lands on k. Both go into each other's lists, state = 1, vy = 0.
+        A side flag: k is pushed (mode 2), then drop vx and vx are negated, and vy = 0.
+5. At the end of `FUN_0042ec96`: +0x80 = 0 if the state changed (slide: state ≠ 1; fall:
+   state ≠ 2).
+
+**The resolve `FUN_0042ffc6`.**
+1. x, y = prev, and the screen x is recomputed (`FUN_00417edf`). If the object is not held,
+   +0x80 += 1.
+2. Path A, v ≠ 0 and +0x80 < 31: the restored position is tested against the touching list.
+   - On the first hit: x −= sign(vx) and y −= sign(vy), W3, then the dt = 0 motion
+     (W4, W5). The hit k is returned.
+   - No hit: the 100 retests change nothing, the object stays at prev, and the list head is
+     returned. The list is built by prepending, so its head is the last touching candidate in
+     the order of the list passed in. This settles `objects.rs:253`.
+3. Path B, +0x80 ≥ 31: +0x80 = 0, v is saved and set to (0, 15), `FUN_004303e5` runs, then v is
+   restored.
+4. Path C, v = 0: vy = 5, `FUN_004303e5` runs, then vy = 0. See the next section.
+
+**Impact sound `FUN_0042dc21`**, on every slide touch, floor landing and fall touch:
+frequency = trunc((1 − weight / 100) × 20000) + R(6000) + 15000, volume −150, pan 0, on the
+object's slot (6). One rand draw.
+
+**The test case.** W1 runs on every tick, so prev is always the position one tick earlier, and the
+resolve goes back only one tick of fall. The probe then decides. Within 11 px of k "below" is set
+and the object lands on k. Farther away the forced side hit sets vy = 0 (vx = −0 = 0), and the
+object falls again on the next tick. Once it is sliding, the support test moves it down 1 px; if
+it does not then touch k, it starts falling again. So chips1 settles on top of chips2, in outline
+contact or within 1 px of it, not at y 200 [I: the outcome follows from the [C] rules above].
+The drop itself does not save prev; the carry's W7 on the last carried tick and W1 on the first
+free tick do.
+
+Verdict: guess wrong.
+- W1 saves prev in every state, before the move. The port's `motion` saves it only at rest.
+- The port is missing:
+  - the dt = 0 motion after the step back (objects.rs:898)
+  - the stuck path
+  - the impact sound and its R(6000)
+  - the 7 draws per dust puff
+  - vx kept, plus the second motion, on a floor landing (`land_on_table` sets v = (0, 0))
+- The port probes before the restore. The original resolves first and probes at the resolved
+  position, retrying d = 1..11.
+- `set_screen_x` saving prev_x is port-only.
+- The test `a_dropped_object_comes_to_rest_where_it_was_dropped` asserts the port's bug. It
+  should expect chips1 at rest on chips2.
+- FW §5.4's "v = 0" on a floor landing is wrong: only vy = 0.
+
+### `FUN_004303e5` push-up, the stuck counter and the held flag (round 4)
+`crates/thefly-sim/src/world/objects.rs:717`; closes the round-3 open items
+
+Guess: the stuck counter and the v = 0 path are left out, and v = 0 is treated as "no step".
+
+Original [C]:
+- **+0x74 is the held flag.**
+  - Set to 1 by the attach `FUN_0042e704`.
+  - Cleared:
+    - on the drop (in `FUN_0042c888`)
+    - by the object init `FUN_0042da7e`
+    - by `FUN_0042db36(0)`, which makes the object not collectible
+  - While it is set, the object skips the motion, the support match in the touching list and the
+    +0x80 bump.
+- **+0x80 resets:**
+  - the init `FUN_0042da7e`
+  - `FUN_0042db36(0)`
+  - the end of a slide whose state is no longer 1
+  - the end of a fall whose state is no longer 2
+  - path B itself
+
+  It counts resolve calls within one uninterrupted state, not consecutive ticks. A carried object
+  never bumps it, so the carry only ever takes path C (v = 0) or path A.
+- **`FUN_004303e5`**, as called (vx = 0 and vy > 0: both ratio counters are 0, dx = 0, dy = −1):
+  1. Each step moves the object up 1 px (y −= 1), recomputes the screen x and retests the whole
+     touching list. This repeats until nothing touches, at most 500 steps.
+  2. Success returns the last list element tested, which is the list's tail. It does not write
+     prev.
+  3. Failure after 500 steps (a clear test on the 500th step also counts as a failure) puts the
+     object back at prev and returns the list head.
+  4. An empty list sets +0x870 = 1 and returns 0.
+
+Verdict: guess wrong. For a carried object with v = 0, the port's `carry_blocked` must push the
+object up out of the overlap (up to 500 px, 1 px per retest) and use the returned k. For a free
+object, the 31st resolve within one state takes that path with v = (0, 15).
+
+### Midge homing: ring bands (round 4)
+`crates/thefly-sim/src/world/midges.rs:238`; amends "Midge homing" and the round-3 midge section
+
+Guess: x always steers toward the target by sign(dx) × speed, every tick.
+
+Original (`FUN_00442f95`) [C]. It runs only when homing is on (+0x174) and the midge is neither
+stunned (+0x200) nor falling (+0x204).
+1. If R(100) > 50: the local speeds sx = R(200) + |v0| and sy = R(60) + |v0 − 180|, with v0 =
+   +0x18c. Otherwise sx = sy = 0 for this tick.
+2. q = float(midge screen x (+0xc) − (farmer x (farmer +0x90, `FUN_00405fe0`) + home x (+0x178))
+   + W) / (W / 2.0), where W is the midge's +0x2c. The double at 0x45e718 is 2.0, and the band
+   edges are the floats 0, 1, 2, 3, 4.
+3. x:
+   - q ∈ [1, 2) or [3, 4): if sx ≠ 0, vx = +sx (`FUN_004170fa`, which also sets +0xb0). The x
+     accel flag (+0xa8) = 1.
+   - q ∈ [0, 1) or [2, 3): the same with vx = −sx.
+   - Otherwise the x flag = 0, so the wander mover re-rolls x.
+   - In a band, the frame follows the sign of vx: vx < 0 uses +0x186, otherwise +0x184.
+4. y, against target = farmer y (`FUN_00406190`) + home y (+0x17c) and tolerance +0x182:
+   - y < target − tol: vy = +sy (if rolled), and the y flag = 1.
+   - y > target + tol: vy = −sy (if rolled), and the y flag = 1.
+   - Otherwise the y flag = 0.
+5. +0xa4 = 1.
+
+With d = midge x − target x, q = 2 + 2d / W. So the bands steer the shortest way round the ring:
+right when the target is up to half a ring to the right, or more than half a ring to the left.
+Velocity is rewritten only on ticks where the speeds were rolled (about half the ticks). On the
+other ticks the flags hold the last velocity.
+
+Verdict: guess wrong. The port has no ring bands, rewrites v every tick and ignores the accel
+flags. Round 1 item 3 ("x is always steered when q ∈ [0, 4)") is right about the gate; round 4
+adds the direction per band and the rolled-only write.
+
+### SuperFly sparkles: call site, lifetime and pool (round 4)
+`crates/thefly-sim/src/world/fly.rs:634`, `:375`, `:1313`; amends "Fly reset(0) and SuperFly
+sparkles" (round 3)
+
+Guess: the call site is unknown, sparkles are fire-and-forget, and the appear end only becomes
+alive.
+
+Original [C]:
+- **Call site.** `FUN_00437302` is the first step of the fly physics `FUN_00437547`. The physics
+  runs only when the fly is not appearing (+0x13cd8 == 0). It is called while +0x24c is set,
+  before `FUN_00437138` (+0x210) and before steering.
+  1. If the 8000 ms timer (+0x250) has expired (`FUN_00419506(t, 0)`, no re-arm): SuperFly
+     ends, +0x24c = 0 and slot 36 stops. No sparkles on that tick.
+  2. Otherwise `FUN_00439450(1, 5)`: when the 40 ms timer (+0x9a50) has fired (strictly expired,
+     then re-armed to now + 40), 5 sparkles.
+- **Pool.** 90 slots of 0x170 at +0x18f0. A request is capped at 89. Busy slots are skipped
+  without a draw, and a full pool draws nothing. Each emitted sparkle makes the 7 draws of round
+  3. The first of them, R(60) + 20, is the frame-animation delay (`FUN_00413f92`), not a
+  lifetime.
+- **Lifetime.** It lives in the render `FUN_0043964c`, called from the fly render `FUN_004388ca`
+  while +0x18e8 is set. Each render frame, alpha goes from 255 down by
+  trunc(−255 / (fps × 200 / 1000.0)) (`FUN_0041787c`; 0x45e368 = 1000.0). A sparkle goes
+  inactive when alpha < 1, after about 200–300 ms. The render draws no rand.
+- **Edge case.** When no sparkle is active, the render clears +0x18e8. Only `FUN_0043728f` (the
+  SuperFly start) and `FUN_004387d5` set it again, and `FUN_00437302` does not. So sparkles
+  emitted after that, for example after a pause, are never rendered or faded. They hold their
+  slots, and the pool can fill. Once it is full, the per-40 ms emission draws nothing.
+- **reset(0) order, corrected.** `FUN_004387d5` runs:
+  1. clear the flags
+  2. +0x18e8 = 1, +0x18ec = 0
+  3. the 45 sparkles
+  4. sound 38
+  5. the survival start
+
+  Round 3 put the sparkles last.
+- **The appear end** also runs `FUN_004387d5`, from the render (near decompiled.c:28730). So it
+  draws 45 sparkles (315 rand draws) too.
+
+Verdict: guess wrong on the appear end. `fly_render_driven`'s `become_alive` (fly.rs:1313) lacks
+the 45-sparkle burst and its 315 draws. The 5-per-40 ms emission is right, and the port must also
+model the pool occupancy (the cap and the stuck slots), since a full pool changes the rand count.
+
+### Flypaper push-out: mask outline (round 4)
+`crates/thefly-sim/src/world/traps.rs:685`, `:699`; amends "Zapper and flypaper: solid push-out"
+
+Guess: the flypaper's outline is its frame rectangle (`Outline::rect`).
+
+Original [C]:
+- The flypaper uses a **mask outline**. It is built at placement, after its sprite variant is
+  loaded, by `FUN_0042636b(fp, 0x55)`, which calls `FUN_00426398(fp, h − 85)`.
+- The outline holds the edge pixels of the sprite's mask, found by `FUN_0042dcbd`. That test
+  locks the surface, reads 32 bits (two 16-bit pixels) and compares them with the colour key
+  0xF81FF81F, so x is sampled at half resolution.
+- Only rows 0..85 are built. Row 85 is closed: every pixel between its first and second edge
+  pixels is added.
+- The push-out `FUN_00428003` tests with `FUN_0042f6de(trap, fly x, fly y, fly w, fly h, fly
+  outline)`. That compares the trap's per-row lists (+0x9c) with the fly's outline.
+
+Verdict: guess wrong. Build the outline from the flypaper sprite's mask, rows 0..85, with x
+sampled at half resolution and row 85 filled.
+
+### Bonus round coordinates: screen y, field top 80 (round 4)
+`crates/thefly-sim/src/bonus.rs:182`, `:197`, `:386`, `:795`;
+`crates/thefly/src/draw/between.rs:346`
+
+Guess: the sim works in field coordinates (bg y = 0), draws pieces and the fly at +80, and takes
+the swatter's y as a screen y. The swatter's start x is 400.
+
+Original [C unless marked]:
+- **Field top.** `FUN_004452a1` sets `bckbonusfond`'s y = trunc((600 − h) / 2.0), with the double
+  0x45e778 = 2.0. With h = 440 that is **80**. All bonus y values are screen y:
+  - The fly's bounds come from the caller as (fond y − 15, fond y + 15 + fond h) = [65, 535],
+    clamped to [65, 441] for its 94 px frame. Its start y 150 is a screen y, so field y 70.
+  - Target spawn y = fond y (`FUN_00417d63`) + R(fond h) = 80 + R(440). The Wander bounds are
+    fond y + 15 and fond y + fond h − 15.
+  - The swatter's y is in [351, 472] screen. Its reach (+0x98, 0..375) goes straight into the
+    target hit test `FUN_00431e58` as the box's top y, against the target's screen y (+8).
+  - So the hit box spans screen y [trunc(reach) − 44, trunc(reach) + 154], which is field y
+    reach − 124 to reach + 74.
+- **Swatter start x.** The setup `FUN_00448802`, the class constructor `FUN_00448640` and the
+  base constructor `FUN_00417c00` never write the swatter's x (+4). The bonus object is a fresh
+  `operator new(0xd8a8)` (`FUN_0044f290` → `_nh_malloc` `FUN_004516f0`, not zeroed). So x is
+  uninitialised heap memory until the first mover tick clamps it (x < 1 gives 0, x > 799 gives
+  800). The captures show 0 [I].
+
+Verdict: guess wrong on three counts:
+- The port's field frame is consistent for the fly box, the coins and the target spawn and bounds.
+  But `swat()` (bonus.rs:795) compares a screen-frame reach with field-frame target y, so its hit
+  zone is 80 px too low. Use reach − 80 in the field frame. The same applies to the AI's swatter
+  alignment (bonus.rs:386) and to the swatter-on-fly test once it lands.
+- `FLY_START_Y` = 150 is a screen y. In the port's field frame it is 70; the port draws the fly
+  at 230.
+- `SWATTER_START_X` = 400 should be 0, matching the captures [I].
+
+### Positional sound: the wrap is per source (round 4)
+`crates/thefly/src/mixer.rs:14`, `:17`, test `:279`; amends "Positional sound curve (O14)"
+
+Guess: the object layer's 5000 serves every source, and a negative x is taken on the ring.
+
+Original: each caller of `FUN_0040d1b2(slot, sound, loop, vol, wrap, x, w)` passes its own wrap
+[C].
+
+| Source | Call | Wrap | x | w |
+|---|---|---|---|---|
+| fan 44, single fan only | `FUN_00427270` | the fan's +0x2c = 5000 | its screen x | its +0x54 |
+| zapper hum 40, single zapper only | `FUN_00427270` | its +0x2c = 5000 | its screen x | its +0x54 |
+| zapper 39 | `FUN_00428b47` | the zapper's +0x2c = 5000 | the sub-sprite +0x874's screen x | the sub-sprite's width |
+| winch 47 | `FUN_00431931` | the lift's +0x2c = 5000 | the lift's screen x | its width |
+| farmer voices | `FUN_0043c8a5` | farmer +0x70 = game +0x1a = **4000** | farmer x, +0x90 | +0x74, `j_tapette_1`'s frame width, 181 |
+| flying goodie 42 | `FUN_00432684` | goodie +0x10 = game +0x1a = **4000** | its sprite's screen x | its frame width |
+
+- The lift's layer is 1.25: the double pushed at 0x42a870 in `FUN_0042a85a` is 0x3ff40000…, and
+  trunc(4000 × 1.25) = 5000.
+- The goodie sprites are on a 1.0 layer, so their own wrap is 4000 too.
+- With two or more fans or zappers, the loop plays centred at a fixed volume: −400, or −100
+  when any fan is visible; −500, or −200 when any zapper is visible. The port's
+  `single_trap_pan` already matches.
+- `FUN_0040d1b2` never wraps x. A source at x ≤ 800, or past wrap − w, is centred at full
+  volume, and that includes any negative x.
+- Farmer x is kept in [1, 4000) by `FUN_0043cea5`: x < 1 gives x + 4000, and x ≥ 4000 gives
+  x − 4000. So x = 0 becomes 4000, which plays centred.
+
+Verdict: guess wrong for the farmer voices and the flying goodie (wrap 4000, so half = 2400, not
+2900). It is right for the traps and the winch. The `rem_euclid` in `positional` is port-only:
+the original centres a negative x. `Pan::ScreenX` needs the source's wrap.
+
+### Placement overlap test: the right side has no extra gap (round 4)
+`crates/thefly-sim/src/world/objects.rs:1048`
+
+Guess: (FW §5.2 step 3.3) reject x when [x − wNew, x + wNew] overlaps a placed object's
+[xj, xj + wj].
+
+Original (normal `FUN_0042ac27`, extreme `FUN_0042bdf8`) [C]: reject when
+xj − wNew ≤ x ≤ xj + wj, with xj the placed object's screen x (+0xc) and wj its width (+0x54).
+That is the inclusive overlap of [x, x + wNew] with [xj, xj + wj].
+
+Verdict: guess wrong. The port's `fits` rejects x > xj + wj only when
+xj + wj < x − wNew, i.e. it adds a wNew gap on the right. It rejects x in
+(xj + wj, xj + wj + wNew], which the original accepts. That changes which draws succeed, and so
+the rand consumed, in both placements. The clear test should be
+`x + size.w < p.screen_x || p.screen_x + p.w < x`. FW §5.2's wording is the source of the error.
 
 ## Guess correct
 
@@ -1761,6 +2094,49 @@ starts the looped play whenever the slot is not playing (curve in "Positional so
 
 Verdict: guess correct. Starting the loop on the first tick with vy ≠ 0 is equivalent.
 
+### Trap restore in the push-out is a no-op (round 4)
+`crates/thefly-sim/src/world/traps.rs:419`
+
+Guess [I]: the trap's restore to its previous position is a no-op.
+
+Original [C]:
+- `FUN_00427270` moves each trap with the object motion `FUN_0042ea74(dt, delta)`, then runs its
+  step:
+  - flypapers: `DAT_0046c948`, stride 0x874, count at +4, step `FUN_0042663b`
+  - fans: `DAT_00470478`, stride 0x7568, count at +6, step `FUN_0042a075`
+  - zappers: `DAT_00494f80`, stride 0x3610, count at +8, step `FUN_004288fe`
+- The trap init `FUN_00427f4b` sets collectible (+0x92) = 0 and state (+0x78) = 0, and nothing
+  else writes either. So v is zeroed, x moves by −delta, and the state-0 save (W2 in "Object
+  previous position") leaves prev = the post-scroll position.
+- The solid step `FUN_00428003` runs right after, for the same trap, so its restore (x, y = prev,
+  screen x recomputed) changes nothing.
+- The zapper's column wrap works on a local copy (`local_8`), not on the field.
+
+Verdict: guess correct; the [I] is now [C].
+
+### Extreme placement: the next object after a 1001st-draw success (round 4)
+`crates/thefly-sim/src/world/objects.rs:1022`, `:1056`
+
+Guess: a success on the 1001st draw leaves the next object no draws; it fails at once and resets
+the counter.
+
+Original (`FUN_0042bdf8`) [C]:
+1. The x loop runs `while (!ok && tries < 1001) { tries += 1; x = R(trunc(W × factor)); test }`,
+   with ok cleared before the loop.
+2. Afterwards the object counts as placed when tries < 1000 or ok.
+3. After a success with tries = 1001, the next object's loop does not run: no draw, ok = 0, and
+   1001 < 1000 is false. So it takes the failure path:
+   - the slot is undone
+   - tries = 0
+   - failures += 1
+   - the same index is retried with a fresh budget
+4. Edge case, in both placements: on the 2000th failure, the placed index is decremented before
+   the loop exits (decompiled.c:488–493 for `FUN_0042ac27`), so the returned count leaves out
+   the last placed object.
+
+Verdict: guess correct. `draw_x` returns None with no draw, and `place_extreme` counts a failure
+and resets. The 2000th-failure decrement is not modelled (listed as open).
+
 ## Port decisions
 
 - `crates/thefly-platform/src/audio.rs:292` MIDI loop point: port decision.
@@ -1808,6 +2184,11 @@ Verdict: guess correct. Starting the loop on the first tick with vy ≠ 0 is equ
   `crates/thefly/src/fx.rs:24` by the round-2 crash and zapper sections; `shop.rs:56`, `:59` by
   "Shop tally"; `bonus.rs:134`, `:161` by "Bonus round movers"; `winner.rs:61` and
   `highscores.rs:122` by the port decisions above.
-- Open after round 3:
-  - `FUN_004303e5`, the carried object's stuck-counter path (`objects.rs:614`)
-  - who resets the carry stuck counter (+0x80) and what +0x74 means
+- Open after round 4:
+  - the exact number of fall/re-fall cycles before chips1 settles in the
+    `objects.rs:1829` case. The rules are [C]; the outcome (rest on chips2) is [I]. Running the
+    port after the W1 fix settles it.
+  - the 2000th-failure count decrement in both placements: not modelled
+  - the swatter's start x: uninitialised heap in the original; 0 is taken from the captures
+  - the menu intro fly's `Pan::ScreenX` (menu.rs:300): which positional routine and wrap it uses
+    was not checked
