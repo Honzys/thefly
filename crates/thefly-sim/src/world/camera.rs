@@ -53,14 +53,33 @@ impl Camera {
     /// right wrap (src ≥ width) or the left wrap (acc < 0) rewrites acc. A delta under 1 px
     /// moves no background.
     pub fn scroll(&mut self) {
-        todo!("W1 gaps §4.3")
+        let step = self.delta as i64;
+        for l in &mut self.layers {
+            l.scroll(step);
+        }
     }
 
     /// The source x of layer `i` for the renderer: trunc(acc × factor), after [`Camera::scroll`]'s
     /// wrap.
     pub fn source_x(&self, i: usize) -> i32 {
-        let _ = i;
-        todo!("W1 gaps §4.3")
+        self.layers[i].source_x()
+    }
+}
+
+impl Layer {
+    fn source_x(&self) -> i32 {
+        (self.acc as f64 * self.factor) as i32
+    }
+
+    /// gaps §4.3 steps 1–4, truncations as written (not an exact modulo).
+    fn scroll(&mut self, step: i64) {
+        self.acc += step;
+        let src = self.source_x();
+        if src >= self.width {
+            self.acc = (f64::from(src - self.width) / self.factor) as i64;
+        } else if self.acc < 0 {
+            self.acc = (f64::from(self.width) / self.factor - self.acc.abs() as f64) as i64;
+        }
     }
 }
 
@@ -85,5 +104,42 @@ mod tests {
         assert_eq!(c.layers.map(|l| l.factor), [0.25, 0.75, 1.0, 1.25]);
         assert_eq!(c.layers.map(|l| l.acc), [0, 50, 0, 0]);
         assert_eq!(Camera::new(Scene::Arena, [0; 4]).layers[1].factor, 0.5);
+    }
+
+    fn sky_at(acc: i64, delta: f64) -> Camera {
+        let mut c = Camera::new(Scene::Inside, [800, 800, 4000, 900]);
+        c.layers[0].acc = acc;
+        c.delta = delta;
+        c.scroll();
+        c
+    }
+
+    /// Acceptance W1 12: D is truncated before it is added.
+    #[test]
+    fn a_delta_under_one_pixel_moves_no_background() {
+        let c = sky_at(100, 0.9);
+        assert_eq!(c.layers.map(|l| l.acc), [100, 50, 0, 0]);
+        let c = sky_at(100, -0.9);
+        assert_eq!(c.layers[0].acc, 100);
+        let c = sky_at(100, 3.7);
+        assert_eq!(c.layers.map(|l| l.acc), [103, 53, 3, 3]);
+        assert_eq!(c.source_x(0), 25);
+        assert_eq!(c.source_x(1), 39);
+    }
+
+    #[test]
+    fn the_right_wrap_rewrites_the_accumulator_from_the_overshoot() {
+        // A = 3215, src = trunc(3215 × 0.25) = 803 ≥ 800 → A = trunc(3 / 0.25) = 12, src 3.
+        let c = sky_at(3210, 5.0);
+        assert_eq!((c.layers[0].acc, c.source_x(0)), (12, 3));
+    }
+
+    #[test]
+    fn the_left_wrap_rewrites_the_accumulator_from_the_width() {
+        // A = 2 + trunc(−5.2) = −3 → A = trunc(800 / 0.25 − 3) = 3197, src = trunc(799.25) = 799.
+        let c = sky_at(2, -5.2);
+        assert_eq!((c.layers[0].acc, c.source_x(0)), (3197, 799));
+        // Main layer, f 1.0: −5 → trunc(4000 − 5) = 3995.
+        assert_eq!((c.layers[2].acc, c.source_x(2)), (3995, 3995));
     }
 }
