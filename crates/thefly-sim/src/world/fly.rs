@@ -1491,7 +1491,6 @@ mod tests {
     /// Acceptance W1 13: the kill is recorded on the tick the last piece lands, the respawn
     /// placement runs on the next.
     #[test]
-    #[ignore = "needs W3 (MatchState::record_kill, Stats::record_life)"]
     fn a_splat_records_the_kill_when_it_ends_and_respawns_next_tick() {
         let mut b = Bench::new(1);
         let (mut m, mut w) = world(&mut b);
@@ -1731,7 +1730,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs W3 (MatchState::record_kill, Stats::record_life)"]
     fn the_respawn_timer_records_the_kill_and_requests_a_respawn() {
         let mut b = Bench::new(1);
         let (mut m, _) = world(&mut b);
