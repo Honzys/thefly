@@ -246,6 +246,31 @@ impl Fan {
             -((BLOW_Y_SHARE * p) as i32),
         )
     }
+
+    /// The blade outline at the fan's screen x and y with its frame size (fan +0x9c).
+    fn blades<'a>(&self, cx: &Ctx<'a>) -> Shape<'a> {
+        Shape {
+            x: self.screen_x,
+            y: self.y,
+            size: fan_frame(cx),
+            outline: cx.data.outline(blades_outline(self.facing_right)),
+        }
+    }
+
+    /// The screen x, minus the wrap when the fan straddles the ring end.
+    pub fn visible_x(&self) -> i32 {
+        visible_x(self.screen_x, self.w)
+    }
+}
+
+/// Sound 45 at 20000 + R(6000) Hz: a fan hit on the fly or an object.
+pub fn play_fan_hit(cx: &mut Ctx) {
+    let freq = FAN_HIT_HZ + cx.rng.r(FAN_HIT_HZ_RAND);
+    let params = PlayParams {
+        freq_hz: u32::try_from(freq).ok(),
+        ..PlayParams::default()
+    };
+    cx.sound(SoundSlot::FAN_HIT, SoundOp::Play(params));
 }
 
 impl Zapper {
@@ -398,6 +423,13 @@ impl Traps {
         })
     }
 
+    /// The first fan, in fan order, whose blades touch `s` (answers.md "Object fan push").
+    pub fn blades_hit(&self, s: &Shape<'_>, cx: &Ctx) -> Option<&Fan> {
+        self.fans
+            .iter()
+            .find(|f| outlines_overlap(s, &f.blades(cx), SCREEN_WRAP))
+    }
+
     /// (x, y) is inside a fan's frame, where its wind blows (`FUN_00427885`).
     pub fn fan_touches(&self, x: i32, y: i32, cx: &Ctx) -> bool {
         let h = fan_frame(cx).h;
@@ -533,22 +565,9 @@ impl World {
             size: self.fly.size,
             outline: &fly_outline,
         };
-        let size = fan_frame(cx);
-        let mut hit = None;
-        for (i, f) in self.traps.fans.iter().enumerate() {
-            let rehit_running = !f.rehit.expired(cx.now);
-            let blades = cx.data.outline(blades_outline(f.facing_right));
-            let shape = Shape {
-                x: f.screen_x,
-                y: f.y,
-                size,
-                outline: blades,
-            };
-            if !rehit_running && outlines_overlap(&fly, &shape, SCREEN_WRAP) {
-                hit = Some(i);
-                break;
-            }
-        }
+        let hit = self.traps.fans.iter().position(|f| {
+            f.rehit.expired(cx.now) && outlines_overlap(&fly, &f.blades(cx), SCREEN_WRAP)
+        });
         let Some(i) = hit else {
             return;
         };
@@ -562,12 +581,7 @@ impl World {
         } else {
             cx.rng.r(FAN_DAMAGE_RAND) + FAN_DAMAGE_BASE
         };
-        let freq = FAN_HIT_HZ + cx.rng.r(FAN_HIT_HZ_RAND);
-        let params = PlayParams {
-            freq_hz: u32::try_from(freq).ok(),
-            ..PlayParams::default()
-        };
-        cx.sound(SoundSlot::FAN_HIT, SoundOp::Play(params));
+        play_fan_hit(cx);
         self.fly.add_raw_damage(damage, RawDamage::Fan { dir }, cx);
     }
 
@@ -784,6 +798,29 @@ mod layout_tests {
         let mut w = World::bare(&m, &mut rig.cx(0));
         w.traps = Traps::from_layout(&TrapLayout { slots }, &mut rig.cx(0));
         w
+    }
+
+    /// answers.md "Fan type mapping": kind 1 is `j_ventilo_gauche`, built as internal type 2 with
+    /// the `palesventi_gc` blades, and blows left: at stored 500 (screen 500, y 270) a point
+    /// centred on (300, 370) gets (−61, −20). Kind 2 is `ventilo_droite`, which blows right.
+    #[test]
+    fn kind_1_is_ventilo_gauche_and_blows_left() {
+        assert_eq!(
+            (TrapKind::FanLeft as usize, TRAP_TABLE[1].kind),
+            (1, TrapKind::FanLeft)
+        );
+        assert_eq!(
+            TRAP_TABLE.map(|t| t.sprite)[1..3],
+            ["ventilo_gauche", "ventilo_droite"]
+        );
+        let mut rig = Rig::new(1);
+        let w = world_with(vec![slot(TrapKind::FanLeft, 500)], &mut rig);
+        let f = w.traps.fans[0];
+        assert!(!f.facing_right);
+        assert_eq!(blades_outline(f.facing_right), "palesventi_gc");
+        assert_eq!(f.blow(240, 120, 370), (-61, -20));
+        let w = world_with(vec![slot(TrapKind::FanRight, 500)], &mut rig);
+        assert!(w.traps.fans[0].facing_right);
     }
 
     /// A flypaper at stored 500 (screen 500, 53 × 300 from y 0) divides v by 1.4 per tick.
