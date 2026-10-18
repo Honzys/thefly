@@ -123,21 +123,36 @@ pub struct BonusMover {
     pub vy: f64,
 }
 
-/// shortcut: open item O3. The movers, the scroll speed, the actor boxes and the target rows
-/// are guesses (the bonus layout is not decoded); revisit when `FUN_004452a1` is re-read.
+/// shortcut: the coins' leftward speed and the fly and swatter move speeds are unresolved
+/// (answers.md "Bonus round movers, boxes and target spawns"); revisit when `FUN_00448302`,
+/// `FUN_00448c31` and the coin mover are read.
 pub const SCROLL_PX: f64 = 4.0;
 pub const MOVE_PX: f64 = 6.0;
-pub const FLY_BOX: (f64, f64) = (60.0, 44.0);
+/// shortcut: the bonus swatter sprite (`FUN_00449203`) and its reach are not decoded [I]; an
+/// 80 × 80 swatter whose top is the reach. Revisit when `FUN_00448110` is read.
 pub const SWATTER_BOX: (f64, f64) = (80.0, 80.0);
-pub const TARGET_ROWS: [f64; 5] = [40.0, 110.0, 180.0, 250.0, 320.0];
+/// The swatter's hit box is (x + 30, reach, w − 60, 154) (`FUN_00431e58`).
+const SWAT_INSET: f64 = 30.0;
+const SWAT_H: f64 = 154.0;
+/// The fly's coin box is (x + 50, y + 40, w − 100, h − 80) on its `Face` frame (120 × 94).
+const FLY_INSET: (i32, i32) = (50, 40);
+const FLY_SIZE: (i32, i32) = (120, 94);
 pub const SPAWN_X: f64 = 810.0;
-pub const COIN_LIFETIME_MS: u64 = 25_000;
-/// shortcut: the `piece` sheet's frame count is passed in code and not decoded; 16 frames.
+/// A target enters at x 810 + R(150).
+const TARGET_SPAWN_RAND: i32 = 150;
+pub const LIFETIME_MS: u64 = 25_000;
+/// Port decision: the `piece` sheet's frame count is passed in code; the port uses 16.
 pub const COIN_FRAMES: i32 = 16;
 const FIELD_H: i32 = 440;
 const COIN_H: i32 = 45;
 const TARGET_W: f64 = 48.0;
 const TARGET_H: f64 = 44.0;
+/// The wings (`ailesgoodies`) follow at (x − 24, y − 12). shortcut: their frame count is not
+/// decoded; a third of the 300 px sheet. Revisit with the wing render.
+const WING_DX: f64 = -24.0;
+const WING_W: f64 = 100.0;
+/// Setup: 99 stardust delays R(100) + 700 and one wing delay R(10) + 10 per target slot.
+pub const STARDUST: usize = 99;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BonusAi {
@@ -254,6 +269,14 @@ pub struct BonusRound {
     pub target_spawns: usize,
     /// The previous tick's swing, for the Tab edge.
     pub swing_held: bool,
+    /// Stardust animation delays, one per particle.
+    pub stardust_ms: Vec<i32>,
+    /// Wing animation delays, one per target slot.
+    pub wing_ms: [i32; TARGETS],
+    /// `bckbonusfond`'s height; the field's y is 0.
+    pub bg_h: i32,
+    /// The fly's `Face` frame size.
+    pub fly_size: (i32, i32),
 }
 
 /// §8.3 step 1: h = 1 − meter, with the two edge values.
@@ -267,8 +290,10 @@ fn handicap(meter: f64) -> f64 {
     }
 }
 
-fn overlaps(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
-    a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+/// `FUN_00431e58`: the piece's top-left lies in the box grown up and left by the piece's size,
+/// inclusive.
+fn caught(b: (f64, f64, f64, f64), piece: &Piece, size: (f64, f64)) -> bool {
+    (b.0 - size.0..=b.0 + b.2).contains(&piece.x) && (b.1 - size.1..=b.1 + b.3).contains(&piece.y)
 }
 
 fn steer(m: &mut BonusMover, left: bool, right: bool, up: bool, down: bool, w: f64, h: f64) {
@@ -285,7 +310,12 @@ impl BonusRound {
         let h_fly = handicap(m.economy.meter(Side::Fly));
         let h_farmer = handicap(m.economy.meter(Side::Farmer));
         let bg_h = cx.data.sizes.get("bckbonusfond").map_or(FIELD_H, |s| s.h);
-        let coin_rate = f64::from(cx.rng.r(60) + 1) / 100.0;
+        // `FUN_004452a1`: ω, the stardust and wing delays, then the ω re-roll, before the AI.
+        let _initial_rate = cx.rng.r(60);
+        let stardust_ms = (0..STARDUST).map(|_| cx.rng.r(100) + 700).collect();
+        let wing_ms = std::array::from_fn(|_| cx.rng.r(10) + 10);
+        let coin_rate = wave_rate(h_fly, cx);
+        let fly_size = cx.data.sizes.get("Face").map_or(FLY_SIZE, |s| (s.w, s.h));
         let ai = (m.config.players == Players::One)
             .then(|| BonusAi::new(m.config.ai_level, h_farmer, cx));
         cx.emit(Event::Music(Music::Bonus));
@@ -318,6 +348,10 @@ impl BonusRound {
             amplitude: ((f64::from(bg_h) - 2.5 * f64::from(COIN_H)) / 2.0) as i32,
             target_spawns: 0,
             swing_held: false,
+            stardust_ms,
+            wing_ms,
+            bg_h,
+            fly_size,
         }
     }
 
@@ -377,8 +411,8 @@ impl BonusRound {
             fly.right,
             fly.up,
             fly.down,
-            FLY_BOX.0,
-            FLY_BOX.1,
+            f64::from(self.fly_size.0),
+            f64::from(self.fly_size.1),
         );
         let pad = match &mut self.ai {
             Some(ai) => ai.pad(&self.swatter, &self.targets, self.h_farmer, cx),
@@ -400,7 +434,7 @@ impl BonusRound {
             self.spawn_coin(cx);
         }
         if self.target_timer.expired_rearm(cx.now) {
-            self.spawn_target();
+            self.spawn_target(cx);
         }
         self.scroll(cx.now);
         self.collect(cx);
@@ -428,60 +462,86 @@ impl BonusRound {
             active: true,
             x: SPAWN_X,
             y: f64::from(y),
-            until: Timer::armed(cx.now, COIN_LIFETIME_MS),
+            until: Timer::armed(cx.now, LIFETIME_MS),
             frame,
             anim_ms,
             ..Piece::default()
         };
     }
 
-    fn spawn_target(&mut self) {
+    /// Draws y = R(bg h), then x = 810 + R(150) (the field's y is 0); lifetime 25000 ms.
+    /// shortcut: targets drift and bob under the shared Wander rule (reroll 500, x speed range 1,
+    /// y range trunc(500 × h_farmer + 1), runs 6 and 3, accel 5; answers.md "Bonus round movers,
+    /// boxes and target spawns"); not modelled until the wander mover lands, so they only scroll
+    /// and those draws are missing.
+    fn spawn_target(&mut self, cx: &mut Ctx) {
         let Some(slot) = self.targets.iter().position(|t| !t.active) else {
             return;
         };
-        let y = TARGET_ROWS[self.target_spawns % TARGET_ROWS.len()];
+        let y = cx.rng.r(self.bg_h.max(1));
+        let x = SPAWN_X + f64::from(cx.rng.r(TARGET_SPAWN_RAND));
         self.target_spawns += 1;
         self.targets[slot] = Piece {
             active: true,
-            x: SPAWN_X,
-            y,
+            x,
+            y: f64::from(y),
+            until: Timer::armed(cx.now, LIFETIME_MS),
             ..Piece::default()
         };
     }
 
+    /// A coin leaves once x + w < 0, a target once its wings (x − 24 + wing w) do, or either at
+    /// the end of its lifetime.
     fn scroll(&mut self, now: u64) {
-        for p in self.coins.iter_mut().chain(self.targets.iter_mut()) {
+        let coin_w = f64::from(COIN_H);
+        let pieces = (self.coins.iter_mut().map(|p| (p, coin_w)))
+            .chain(self.targets.iter_mut().map(|p| (p, WING_DX + WING_W)));
+        for (p, right) in pieces {
             p.x -= SCROLL_PX;
-            if p.x < -TARGET_W || p.until.expired(now) {
+            if p.x + right < 0.0 || p.until.expired(now) {
                 p.active = false;
             }
         }
     }
 
     fn collect(&mut self, cx: &mut Ctx) {
-        let fly = (self.fly.x, self.fly.y, FLY_BOX.0, FLY_BOX.1);
+        let (w, h) = self.fly_size;
+        let (dx, dy) = FLY_INSET;
+        let fly = (
+            self.fly.x + f64::from(dx),
+            self.fly.y + f64::from(dy),
+            f64::from(w - 2 * dx),
+            f64::from(h - 2 * dy),
+        );
         let c = f64::from(COIN_H);
         for i in 0..COINS {
             let coin = self.coins[i];
-            if !coin.active || !overlaps(fly, (coin.x, coin.y, c, c)) {
+            if !coin.active || !caught(fly, &coin, (c, c)) {
                 continue;
             }
             self.coins[i].active = false;
             self.coins_taken += 1;
-            let slot = SoundSlot(SoundSlot::RING_A.0 + cx.rng.r(2) as u8);
+            // shortcut: 50 plays when 49 is busy and 50 free (`FUN_0040cf55`); no slot state.
             let freq = 21_500 + cx.rng.r(500) as u32;
-            cx.sound(slot, play_at(freq));
+            cx.sound(SoundSlot::RING_A, play_at(freq));
             if self.coins_taken % 50 == 0 {
                 cx.emit(Event::play(SoundSlot::CHEER_FLY));
             }
         }
     }
 
+    /// The swing edge is the hitting state (shortcut, see [`SWATTER_BOX`]).
     fn swat(&mut self, cx: &mut Ctx) {
-        let sw = (self.swatter.x, self.swatter.y, SWATTER_BOX.0, SWATTER_BOX.1);
+        let s = &self.swatter;
+        let sw = (
+            s.x + SWAT_INSET,
+            s.y.trunc(),
+            SWATTER_BOX.0 - 2.0 * SWAT_INSET,
+            SWAT_H,
+        );
         for i in 0..TARGETS {
             let t = self.targets[i];
-            if !t.active || !overlaps(sw, (t.x, t.y, TARGET_W, TARGET_H)) {
+            if !t.active || !caught(sw, &t, (TARGET_W, TARGET_H)) {
                 continue;
             }
             self.targets[i].active = false;
@@ -542,6 +602,7 @@ fn after_bonus(m: &mut MatchState, cx: &mut Ctx) -> MatchScreen {
 mod tests {
     use super::*;
     use crate::match_state::MatchConfig;
+    use crate::rng::MsvcRand;
     use crate::screen::rig::Rig;
 
     const TICK_CAP: usize = 10_000;
@@ -575,7 +636,8 @@ mod tests {
         assert!((35_000..35_020).contains(&(end - play)), "{}", end - play);
         // AR §0: a 50 ms timer re-arms from the tick it fires on, so every 4 ticks (61.5 ms).
         assert!((560..=575).contains(&b.coin_spawns), "{}", b.coin_spawns);
-        assert!((90..=100).contains(&b.target_spawns), "{}", b.target_spawns);
+        // ≈ 99 firings at 23 ticks; a firing with all 10 slots taken spawns nothing.
+        assert!((80..=100).contains(&b.target_spawns), "{}", b.target_spawns);
         let fly_ahead = 2 * b.coins_taken >= 10 * b.hits;
         assert!(fly_ahead);
         assert_eq!(rig.events.last(), Some(&Event::play(SoundSlot::CHEER_FLY)));
@@ -612,5 +674,104 @@ mod tests {
             rig.events.last(),
             Some(&Event::play(SoundSlot::CHEER_FARMER))
         );
+    }
+
+    fn two_player_round(rig: &mut Rig) -> (MatchState, BonusRound) {
+        let config = MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        };
+        let m = rig.cx(|cx| MatchState::new(config, false, cx));
+        rig.rng = MsvcRand::new(1);
+        let b = rig.cx(|cx| BonusRound::new(&m, cx));
+        (m, b)
+    }
+
+    /// answers.md "Bonus round movers": ω R(60), 99 stardust R(100) + 700, 10 wings R(10) + 10,
+    /// then the ω re-roll (h 0.5: (R(60) + 1) / 100). Seed 1: the first stardust is
+    /// 18467 % 100 + 700 = 767.
+    #[test]
+    fn the_setup_draws_the_stardust_and_wings_before_the_rate() {
+        let mut rig = Rig::new(1);
+        let (_, b) = two_player_round(&mut rig);
+        let mut probe = MsvcRand::new(1);
+        let draws: Vec<i32> = (0..111).map(|_| probe.rand()).collect();
+        assert_eq!(b.stardust_ms.len(), 99);
+        assert_eq!(b.stardust_ms[0], 767);
+        assert_eq!(b.stardust_ms[98], draws[99] % 100 + 700);
+        assert_eq!(b.wing_ms[0], draws[100] % 10 + 10);
+        assert_eq!(b.wing_ms[9], draws[109] % 10 + 10);
+        assert_eq!(b.coin_rate, f64::from(draws[110] % 60 + 1) / 100.0);
+        assert_eq!(rig.rng, probe);
+    }
+
+    /// The coin's top-left must lie in [fx + 50 − 45, fx + 50 + 20] × [fy + 40 − 45, fy + 40 +
+    /// 14], inclusive; the catch plays 49 at 21500 + R(500) (seed 1: 21541), one draw.
+    #[test]
+    fn a_coin_is_caught_by_its_top_left_in_the_grown_fly_box() {
+        let mut rig = Rig::new(1);
+        let (_, mut b) = two_player_round(&mut rig);
+        (b.fly.x, b.fly.y) = (100.0, 200.0);
+        let at = |x: f64, y: f64| Piece {
+            active: true,
+            x,
+            y,
+            ..Piece::default()
+        };
+        b.coins[0] = at(105.0, 195.0);
+        b.coins[1] = at(170.0, 254.0);
+        b.coins[2] = at(104.0, 195.0);
+        b.coins[3] = at(171.0, 254.0);
+        b.coins[4] = at(170.0, 255.0);
+        rig.rng = MsvcRand::new(1);
+        let before = rig.events.len();
+        rig.cx(|cx| b.collect(cx));
+        let taken: Vec<bool> = b.coins[..5].iter().map(|c| !c.active).collect();
+        assert_eq!(taken, [true, true, false, false, false]);
+        let ring = Event::Sound {
+            slot: SoundSlot::RING_A,
+            op: play_at(21_541),
+        };
+        assert_eq!(rig.events[before], ring);
+        let mut probe = MsvcRand::new(1);
+        probe.rand();
+        probe.rand();
+        assert_eq!(rig.rng, probe);
+    }
+
+    /// Seed 1: y = 41 % 440 = 41, then x = 810 + 18467 % 150 = 827.
+    #[test]
+    fn a_target_spawns_at_a_random_height_past_the_right_edge() {
+        let mut rig = Rig::new(1);
+        let (_, mut b) = two_player_round(&mut rig);
+        rig.rng = MsvcRand::new(1);
+        let now = rig.now();
+        rig.cx(|cx| b.spawn_target(cx));
+        let t = b.targets[0];
+        assert_eq!((t.active, t.x, t.y), (true, 827.0, 41.0));
+        assert_eq!(t.until.remaining_ms(now), LIFETIME_MS);
+    }
+
+    /// The swatter at (400, 200) hits through (430, 200, 20, 154) grown by the 48 × 44 target.
+    #[test]
+    fn a_target_is_hit_by_its_top_left_in_the_grown_swatter_box() {
+        let mut rig = Rig::new(1);
+        let (_, mut b) = two_player_round(&mut rig);
+        (b.swatter.x, b.swatter.y) = (400.0, 200.0);
+        let at = |x: f64, y: f64| Piece {
+            active: true,
+            x,
+            y,
+            ..Piece::default()
+        };
+        b.targets[0] = at(382.0, 156.0);
+        b.targets[1] = at(450.0, 354.0);
+        b.targets[2] = at(381.0, 156.0);
+        b.targets[3] = at(451.0, 354.0);
+        b.targets[4] = at(450.0, 355.0);
+        rig.cx(|cx| b.swat(cx));
+        let hit: Vec<bool> = b.targets[..5].iter().map(|t| !t.active).collect();
+        assert_eq!(hit, [true, true, false, false, false]);
+        assert_eq!(b.hits, 2);
     }
 }
