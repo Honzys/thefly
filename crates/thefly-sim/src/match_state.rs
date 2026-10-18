@@ -334,9 +334,12 @@ impl MatchState {
         }
     }
 
-    /// Period clock limit in minutes.
+    /// Period clock limit in minutes. shortcut: docs/re/observed.md, the tutorial period ran
+    /// 2 min under Wine (one run) against AR §8.6's 3; `TUTORIAL_PERIOD_MINUTES` stays for the
+    /// code-read path. Revisit with a second tutorial capture.
     pub fn period_minutes(&self) -> u64 {
-        if self.config.tutorial {
+        const TUTORIAL_AS_OBSERVED: bool = true;
+        if self.config.tutorial && !TUTORIAL_AS_OBSERVED {
             TUTORIAL_PERIOD_MINUTES
         } else {
             PERIOD_MINUTES
@@ -414,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn tutorial_wins_over_extreme_and_lasts_three_minutes() {
+    fn tutorial_wins_over_extreme_and_lasts_two_minutes_as_observed() {
         let config = MatchConfig {
             players: Players::Two,
             mode: Mode::Special,
@@ -423,7 +426,7 @@ mod tests {
         };
         let (m, _) = build(config, false);
         assert_eq!(m.economy.fly, starting_fly(Setup::Tutorial));
-        assert_eq!(m.period_minutes(), 3);
+        assert_eq!(m.period_minutes(), 2);
     }
 
     /// Seed 1: the winch takes the first three draws, the music coin the fourth, and only when
