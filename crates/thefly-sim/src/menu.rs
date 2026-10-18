@@ -112,7 +112,7 @@ const DECOR_REST_Y: f64 = -600.0;
 const DECOR_EASE_Y: f64 = 300.0;
 const EASE_FLOOR: f64 = 0.2;
 const FLY_START_X: f64 = -120.0;
-/// shortcut: `i_cochon_corps` is not in the sized sprites; its height falls back to this.
+/// Port decision: `i_cochon_corps` is not a sized sprite; the real value is its asset height.
 const PIG_H: i32 = 300;
 const BOOT_H: i32 = 575;
 const BOOT_REST_Y: f64 = 350.0;
@@ -135,8 +135,7 @@ impl Page {
         }
     }
 
-    /// Esc: back one page. shortcut: Esc on the top page does nothing (Quit is an item; the
-    /// docs do not say); revisit with a capture.
+    /// Esc: back one page; the top page does not read Esc (`FUN_0041be05`).
     fn parent(self, cfg: &MatchConfig) -> Option<Page> {
         Some(match self {
             Page::Top => return None,
@@ -162,7 +161,7 @@ impl Page {
 }
 
 impl Menu {
-    /// shortcut: fields start at their defaults; W3 sets the intro's start pose here.
+    /// Port decision: fields start at their defaults; the first tick sets the start pose.
     pub fn new(first_visit: bool) -> Self {
         Self {
             first_visit,

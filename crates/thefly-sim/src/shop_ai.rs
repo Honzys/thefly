@@ -124,8 +124,7 @@ impl GoodiesShopAi {
             self.plan[id - 1] -= 1;
             return Some(Press::Button(id - 1));
         }
-        // shortcut: the cursor moves to "done" on the expiry after the last press (§3.2 step 3
-        // does not say which tick); revisit with a capture.
+        // `FUN_00441414`: "done" is selected on the expiry after the last press, pressed one later.
         if self.next == self.order.len() {
             self.next += 1;
             return Some(Press::SelectDone);

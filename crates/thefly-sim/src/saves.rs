@@ -66,8 +66,7 @@ pub fn decode_scores(bytes: &[u8]) -> Result<HighScoreTable, DecodeError> {
         .iter()
         .any(|e| e.score != 0 && !matches(e.checksum, e.score));
     let sum: i32 = s.entries.iter().map(|e| e.score).sum();
-    // shortcut: a sum below 1 carries a random trailer, so it is not checked (game-spec §7.1
-    // does not say how the original validates it); revisit if a capture shows otherwise.
+    // Port decision: unlike the original, a sub-1 sum's random trailer is not checked.
     if bad || (sum >= 1 && !matches(s.trailer, sum)) {
         return Err(DecodeError::Checksum);
     }

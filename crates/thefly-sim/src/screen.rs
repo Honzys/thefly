@@ -186,8 +186,7 @@ impl Gameplay {
         if m.advance(cx) == Advance::Over {
             return MatchFlow::Leave(Flow::Menu);
         }
-        // shortcut: open item O16, the backdrop pick is drawn before the world is built;
-        // revisit if a capture shows the other order.
+        // `FUN_004015c8`: the backdrop parity is the first draw of the game init.
         let loading_alt = cx.rng.odd();
         let world = World::new(m, cx);
         MatchFlow::Next(MatchScreen::Gameplay(Box::new(Self::loading(
@@ -383,7 +382,7 @@ impl QuitDialog {
 pub enum Screen {
     /// 0x00: creates the sound manager → intro video.
     Boot,
-    /// 0x8c. shortcut: the video is deferred and Boot goes straight to the logo (Esc skips the
+    /// 0x8c. Port decision: the video is deferred and Boot goes straight to the logo (Esc skips the
     /// video in the original anyway); upgrade when the frontend can decode `Intro.avi`.
     IntroVideo,
     Logo(Logo),
