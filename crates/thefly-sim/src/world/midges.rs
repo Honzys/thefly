@@ -3,11 +3,11 @@
 
 use super::collision::Rect;
 use super::farmer::{Farmer, SPRITE_H, SPRITE_W};
-use super::flying_goodies::Wander;
 use super::traps::Traps;
 use super::{W, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
+use crate::mover::Wander;
 
 pub const SWARM_SLOTS: usize = 300;
 /// Each use adds min(this, 300 − active) midges.

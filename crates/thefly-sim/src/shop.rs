@@ -13,6 +13,7 @@ use crate::economy::{ITEMS, Item, KILL_VALUE};
 use crate::event::{Event, Music, SoundSlot};
 use crate::input::{KeyState, Scancode};
 use crate::match_state::{MatchState, PlaceError, Players};
+use crate::mover::FpsRun;
 use crate::screen::{FADE_MS, Fade, Flow, MatchFlow, MatchScreen};
 use crate::shop_ai::{GoodiesShopAi, Press, TrapAction, TrapsShopAi};
 use crate::world::lift::{ANCHOR_GAP, draw_anchors};
@@ -64,16 +65,14 @@ pub enum ShopSide {
     Fly,
 }
 
-/// `FUN_004180af`: exactly |v| px per run of FPS frames; the run restarts when v changes.
+/// A sprite moved by the shared FPS integrator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Mover {
     pub x: i32,
     pub y: i32,
     pub vx: i32,
     pub vy: i32,
-    run: (i32, i32),
-    frames: i32,
-    rem: (i32, i32),
+    run: FpsRun,
 }
 
 impl Mover {
@@ -87,23 +86,10 @@ impl Mover {
     }
 
     fn step(&mut self) {
-        if (self.vx, self.vy) != self.run || self.frames >= FPS {
-            (self.run, self.frames, self.rem) = ((self.vx, self.vy), 0, (0, 0));
-        }
-        self.frames += 1;
-        self.x += fps_share(self.vx, &mut self.rem.0);
-        self.y += fps_share(self.vy, &mut self.rem.1);
+        let (dx, dy) = self.run.step([self.vx, self.vy]);
+        self.x += dx;
+        self.y += dy;
     }
-}
-
-/// This frame's share of |v| px over FPS frames (duplicates `world::flying_goodies::fps_share`).
-fn fps_share(v: i32, rem: &mut i32) -> i32 {
-    *rem += v.abs() % FPS;
-    let carry = *rem >= FPS;
-    if carry {
-        *rem -= FPS;
-    }
-    v.signum() * (v.abs() / FPS + i32::from(carry))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

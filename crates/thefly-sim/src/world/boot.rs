@@ -5,9 +5,10 @@ use std::cmp::Ordering;
 
 use super::collision::Rect;
 use super::{OBJECT_PARALLAX, SCREEN_H, W, World};
-use crate::clock::{FPS, Timer};
+use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::event::{Effect, Event, SoundOp, SoundSlot};
+use crate::mover::FpsRun;
 
 pub const RETARGET_FIRST_MS: u64 = 1000;
 /// The boot leaves after this many floor hits (count > 9).
@@ -241,7 +242,7 @@ impl Boot {
         }
         let vx = if self.horizontal_on { self.vx } else { 0 };
         let vy = if self.vertical_on { self.vy } else { 0 };
-        let (dx, dy) = self.run.step(vx, vy);
+        let (dx, dy) = self.run.step([vx, vy]);
         self.layer_x = (self.layer_x + dx + (-delta) as i32).rem_euclid(W);
         self.x = ((f64::from(self.layer_x) * OBJECT_PARALLAX) as i32).rem_euclid(BOOT_WRAP);
         self.y = (self.y + dy).clamp(-self.h, FLOOR_Y - self.h);
@@ -290,49 +291,6 @@ impl Boot {
         };
         Some(Contact { side1, side2 })
     }
-}
-
-/// The run state of the FPS mover (`FUN_004180af`, FW §4.1): exactly |v| px over each run of
-/// FPS frames; the run restarts when v changes or the frame count reaches FPS.
-// shortcut: a copy of flying_goodies.rs's Wander::integrate, which W2 does not own this round.
-// Revisit by moving both onto one shared mover.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct FpsRun {
-    pub frames: i32,
-    pub rem_x: i32,
-    pub rem_y: i32,
-    pub run_vx: i32,
-    pub run_vy: i32,
-}
-
-impl FpsRun {
-    fn step(&mut self, vx: i32, vy: i32) -> (i32, i32) {
-        if vx != self.run_vx || vy != self.run_vy || self.frames >= FPS {
-            *self = Self {
-                run_vx: vx,
-                run_vy: vy,
-                ..Self::default()
-            };
-        }
-        self.frames += 1;
-        (
-            fps_share(vx, &mut self.rem_x),
-            fps_share(vy, &mut self.rem_y),
-        )
-    }
-}
-
-/// This frame's share of |v| px over FPS frames: the quotient, plus 1 when the remainder carries.
-fn fps_share(v: i32, rem: &mut i32) -> i32 {
-    let (q, r) = (v.abs() / FPS, v.abs() % FPS);
-    *rem += r;
-    let carry = if *rem >= FPS {
-        *rem -= FPS;
-        1
-    } else {
-        0
-    };
-    v.signum() * (q + carry)
 }
 
 /// Steps 3–4 on the boot's screen ring: q = (bootX − target + Wb) / (Wb / 2.0) and the

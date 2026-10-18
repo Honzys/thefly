@@ -17,6 +17,7 @@ pub mod highscores;
 pub mod input;
 pub mod match_state;
 pub mod menu;
+pub mod mover;
 pub mod rng;
 pub mod saves;
 pub mod scenario;
