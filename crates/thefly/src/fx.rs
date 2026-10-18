@@ -66,6 +66,8 @@ pub struct Particle {
     scale_max: f32,
     /// Drawn and scaled from its top-left, as the D3D path does (SR §1.1), not centred.
     top_left: bool,
+    /// Hidden and still until this runs out (a sparkle's start delay).
+    delay_ms: f32,
 }
 
 impl Particle {
@@ -89,11 +91,16 @@ impl Particle {
             alpha_step: 0.0,
             scale_max: f32::INFINITY,
             top_left: false,
+            delay_ms: 0.0,
         }
     }
 
     fn step(&mut self) {
         self.prev = (self.x, self.y);
+        if self.delay_ms > 0.0 {
+            self.delay_ms -= DT * 1000.0;
+            return;
+        }
         self.age_ms += DT * 1000.0;
         self.vy += self.gravity;
         self.x += self.vx * DT;
@@ -258,9 +265,54 @@ impl Fx {
             } => self.shockwave(x, y, scale, sparks),
             Effect::Crash { x, y } => self.crash(x, y),
             Effect::Splat { x, y, dir } => self.splat(x as f32, y as f32, dir),
-            // Drawn by the frontend owner; the sim emits them from the zapper arc and the fly.
-            Effect::Spark { .. } | Effect::Sparkles { .. } => {}
+            Effect::Spark {
+                x,
+                y,
+                frame,
+                vx,
+                vy,
+                life_ms,
+            } => self.spark(x, y, frame, vx, vy, life_ms),
+            Effect::Sparkles {
+                x,
+                y,
+                vx,
+                vy,
+                delay_ms,
+            } => self.sparkle(x, y, vx, vy, delay_ms),
         }
+    }
+
+    /// One zapper-arc spark (answers.md "Zapper arc on the fly"): straight flight at the sim's
+    /// velocity for its life. The sim's frame is R(3 + 1), so it wraps onto the 3-frame sheet.
+    /// shortcut: no fade or gravity documented for `etincelle` here; revisit against a capture.
+    fn spark(&mut self, x: i32, y: i32, frame: i32, vx: i32, vy: i32, life_ms: i32) {
+        self.push(Particle {
+            frame: frame.rem_euclid(3) as u32,
+            vx: vx as f32,
+            vy: vy as f32,
+            life_ms: life_ms.max(1) as f32,
+            ..Particle::new("etincelle", x as f32, y as f32)
+        });
+    }
+
+    /// One fly sparkle (answers.md "Fly reset(0) and SuperFly sparkles"): waits `delay_ms`, then
+    /// drifts and fades like a `stardust` mote.
+    /// shortcut: the sparkle sprite and life are undocumented; `stardust` with its 400-499 ms
+    /// fade (SR §5.3) stands in. Revisit against a capture.
+    fn sparkle(&mut self, x: i32, y: i32, vx: i32, vy: i32, delay_ms: i32) {
+        let life = self.r(400, 499);
+        let frame_ms = self.r(20, 79);
+        self.push(Particle {
+            frames: 3,
+            frame_ms,
+            vx: vx as f32,
+            vy: vy as f32,
+            life_ms: life,
+            alpha_step: -255.0 / (life / 1000.0 * 65.0),
+            delay_ms: delay_ms.max(0) as f32,
+            ..Particle::new("stardust", x as f32, y as f32)
+        });
     }
 
     /// The crash sprite at the fly's top-left and its blood spray (answers.md "Crash animation
@@ -365,7 +417,7 @@ impl Fx {
     }
 
     pub fn draw_particles(&self, g: &mut Gfx, l: Lerp) -> Result<(), Error> {
-        for p in &self.particles {
+        for p in self.particles.iter().filter(|p| p.delay_ms <= 0.0) {
             let x = l.f(Some(f64::from(p.prev.0)), f64::from(p.x));
             let y = l.f(Some(f64::from(p.prev.1)), f64::from(p.y));
             let frame = p.frame + (p.age_ms / p.frame_ms) as u32 % p.frames.max(1);
@@ -448,6 +500,60 @@ mod tests {
         }
         assert!(fx.particles.iter().all(|p| p.top_left));
         for _ in 0..50 {
+            fx.step();
+        }
+        assert!(fx.particles.is_empty());
+    }
+
+    #[test]
+    fn a_spark_flies_straight_and_dies_with_its_life() {
+        let mut fx = Fx::new(1);
+        let spark = |life_ms| Effect::Spark {
+            x: 100,
+            y: 200,
+            frame: 3,
+            vx: 130,
+            vy: -65,
+            life_ms,
+        };
+        fx.effect(spark(1000));
+        assert_eq!(
+            fx.particles[0].frame, 0,
+            "frame 3 wraps onto the 3-frame sheet"
+        );
+        for _ in 0..13 {
+            fx.step();
+        }
+        // 13 ticks = 200 ms
+        let p = &fx.particles[0];
+        assert!((p.x - 126.0).abs() < 0.01 && (p.y - 187.0).abs() < 0.01);
+        fx.clear();
+        fx.effect(spark(100));
+        for _ in 0..8 {
+            fx.step();
+        }
+        assert!(fx.particles.is_empty());
+    }
+
+    #[test]
+    fn a_sparkle_waits_out_its_delay_then_moves_and_fades() {
+        let mut fx = Fx::new(1);
+        fx.effect(Effect::Sparkles {
+            x: 50,
+            y: 60,
+            vx: 65,
+            vy: 0,
+            delay_ms: 100,
+        });
+        // 100 ms is 6.5 ticks: hidden and still for 6, moving after the 8th
+        for _ in 0..6 {
+            fx.step();
+        }
+        assert!(fx.particles[0].delay_ms > 0.0 && fx.particles[0].x == 50.0);
+        fx.step();
+        fx.step();
+        assert!(fx.particles[0].x > 50.0);
+        for _ in 0..40 {
             fx.step();
         }
         assert!(fx.particles.is_empty());

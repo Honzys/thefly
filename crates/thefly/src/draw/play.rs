@@ -4,17 +4,19 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 use thefly_platform::{Color, Error};
 use thefly_sim::match_state::{MatchState, Meal, Scene};
-use thefly_sim::screen::{GamePhase, Gameplay, LOADING_STEPS, MatchScreen};
+use thefly_sim::screen::{GamePhase, Gameplay, LOADING_STEPS, MatchScreen, Screen};
+use thefly_sim::sim::State;
 use thefly_sim::world::camera::layer_images;
 use thefly_sim::world::fly::{APPEAR_TICKS, Fly, Heading};
 use thefly_sim::world::flying_goodies::{Flyer, MYSTERY_KIND};
 use thefly_sim::world::midges::Midge;
+use thefly_sim::world::traps::{SCREEN_WRAP, Zapper};
 use thefly_sim::world::{OBJECT_PARALLAX, W, World};
 
 use super::View;
 use crate::assets::{ARIAL_BLACK, JOINT};
 use crate::gfx::{Gfx, WHITE, centred_x};
-use crate::lerp::layer_src;
+use crate::lerp::{Lerp, layer_src};
 
 const SCREEN_W: f32 = 800.0;
 const SCREEN_H: f32 = 600.0;
@@ -148,7 +150,7 @@ fn scene(g: &mut Gfx, v: &View, m: &MatchState, w: &World, p: Option<&World>) ->
     hud(g, v, m, w)?;
     flyers(g, v, w, p)?;
     swatter(g, v, w, p)?;
-    traps_front(g, v, w, cam)?;
+    traps_front(g, w, cam)?;
     v.fx.draw_particles(g, v.l)?;
     bubbles(g, w)
 }
@@ -224,6 +226,47 @@ fn lift(g: &mut Gfx, v: &View, w: &World, p: Option<&World>, cam: f32) -> Result
     Ok(())
 }
 
+/// The zapper sprite is 635 × 131 (game-spec ig53).
+const ZAPPER_W: f32 = 635.0;
+
+/// The arc box and its sparks share the sim's `screen_x` space with the zapper (the target is
+/// matched against it), so they ride the zapper's drawn position rather than the 800 px screen:
+/// the shift from the sim's x to the drawn x.
+fn arc_shift(z: &Zapper, cam: f32) -> f32 {
+    let at = if z.screen_x as f32 >= SCREEN_WRAP as f32 - ZAPPER_W {
+        z.screen_x - SCREEN_WRAP
+    } else {
+        z.screen_x
+    };
+    ring_x(z.x as f32, cam, ZAPPER_W) - at as f32
+}
+
+/// Where a spark thrown at sim x `x` shows on screen: it leaves an arc, so it takes that arc's
+/// shift. Unmoved when no arc is on (a spark outliving its arc is drawn where it spawned).
+pub fn spark_shift(s: &State, x: i32) -> f32 {
+    let Screen::Match(im) = &s.screen else {
+        return 0.0;
+    };
+    let MatchScreen::Gameplay(gp) = &im.screen else {
+        return 0.0;
+    };
+    let main = &gp.world.camera.layers[2];
+    let cam = layer_src(
+        Lerp { alpha: 1.0 },
+        None,
+        main.acc,
+        main.factor * OBJECT_PARALLAX,
+        OBJECT_RING as i32,
+    );
+    let z = gp
+        .world
+        .traps
+        .zappers
+        .iter()
+        .find(|z| z.arcing && (z.arc.x..=z.arc.x + z.arc.w).contains(&x));
+    z.map_or(0.0, |z| arc_shift(z, cam))
+}
+
 fn traps_back(g: &mut Gfx, w: &World, cam: f32) -> Result<(), Error> {
     for f in &w.traps.flypapers {
         let name = if f.variant2 {
@@ -242,7 +285,7 @@ fn traps_back(g: &mut Gfx, w: &World, cam: f32) -> Result<(), Error> {
 }
 
 /// Fans, their wind and the zapper arcs go over the fly.
-fn traps_front(g: &mut Gfx, v: &View, w: &World, cam: f32) -> Result<(), Error> {
+fn traps_front(g: &mut Gfx, w: &World, cam: f32) -> Result<(), Error> {
     for f in &w.traps.fans {
         let name = if f.facing_right {
             "ventilo_droite"
@@ -253,10 +296,15 @@ fn traps_front(g: &mut Gfx, v: &View, w: &World, cam: f32) -> Result<(), Error> 
         g.spr(name, ring_x(f.x as f32, cam, fw), f.y as f32, 0)?;
     }
     for z in w.traps.zappers.iter().filter(|z| z.arcing) {
-        let (zw, zh) = g.size("tue_mouche")?;
-        let (ew, eh) = g.size("eclaires")?;
-        let x = ring_x(z.x as f32, cam, zw) + (zw - ew) / 2.0;
-        g.spr("eclaires", x, z.y as f32 + (zh - eh) / 2.0, v.anim(50, 4))?;
+        let a = z.arc;
+        let frame = u32::try_from(z.arc_frame - 1).unwrap_or(0);
+        let x = a.x as f32 + arc_shift(z, cam);
+        g.spr_stretched(
+            "eclaires",
+            frame,
+            (x, a.y as f32, a.w as f32, a.h as f32),
+            255.0,
+        )?;
     }
     Ok(())
 }

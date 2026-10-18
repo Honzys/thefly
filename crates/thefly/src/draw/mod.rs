@@ -6,6 +6,8 @@ mod end;
 mod front;
 mod play;
 
+pub use play::spark_shift;
+
 use thefly_platform::Error;
 use thefly_sim::match_state::MatchState;
 use thefly_sim::screen::{InMatch, MatchScreen, Screen};
