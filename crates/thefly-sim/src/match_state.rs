@@ -226,15 +226,13 @@ pub struct MatchState {
     pub winch: [i32; 3],
     /// The Options toggle at match start.
     pub music_on: bool,
-    /// Picked per match when music is on.
-    pub music_game2: bool,
 }
 
 impl MatchState {
-    /// `FUN_00408113` steps 1–3: reset, starting inventories, extreme setup, music pick.
+    /// `FUN_00408113` steps 1–3: reset, starting inventories, extreme setup.
     ///
-    /// Draw order (decisions in the plan): the winch slots first (`FUN_0040b994`, gap 36), then,
-    /// only when music is on, one `rand % 2` for the track [I].
+    /// Draws the winch slots (`FUN_0040b994`, gap 36) and nothing else; the music track is
+    /// drawn at each banner end ([`crate::screen::Gameplay`]).
     pub fn new(config: MatchConfig, music_on: bool, cx: &mut Ctx) -> Self {
         let setup = if config.tutorial {
             Setup::Tutorial
@@ -244,7 +242,6 @@ impl MatchState {
             Setup::Normal
         };
         let winch = draw_anchors(ANCHOR_GAP, cx);
-        let music_game2 = music_on && cx.rng.odd();
         Self {
             config,
             progress: Progress::default(),
@@ -253,7 +250,6 @@ impl MatchState {
             traps: TrapLayout::default(),
             winch,
             music_on,
-            music_game2,
         }
     }
 
@@ -426,18 +422,15 @@ mod tests {
         assert_eq!(m.period_minutes(), 2);
     }
 
-    /// Seed 1: the winch takes the first three draws, the music coin the fourth, and only when
-    /// music is on.
+    /// Seed 1: the match start draws only the three winch slots; the music track is drawn at
+    /// each period's banner end (answers.md "Period clock start").
     #[test]
-    fn the_music_coin_is_drawn_only_when_music_is_on() {
-        let (off, rng_off) = build(MatchConfig::default(), false);
-        let (on, rng_on) = build(MatchConfig::default(), true);
-        assert!(!off.music_game2);
-        assert_eq!(off.winch, on.winch);
+    fn the_match_start_draws_only_the_winch() {
+        let (_, rng_off) = build(MatchConfig::default(), false);
+        let (_, rng_on) = build(MatchConfig::default(), true);
         let mut probe = MsvcRand::new(1);
         (0..3).for_each(|_| _ = probe.rand());
         assert_eq!(rng_off, probe);
-        assert_eq!(on.music_game2, probe.odd());
         assert_eq!(rng_on, probe);
     }
 

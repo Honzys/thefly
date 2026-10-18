@@ -158,7 +158,7 @@ pub enum SoundOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Music {
-    /// `music_game.wav` or `music_game2.wav`, picked per match.
+    /// `music_game.wav` or `music_game2.wav`, picked at each period's banner end.
     Game(bool),
     Goodies,
     Bonus,
