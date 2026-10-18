@@ -8,7 +8,7 @@ use crate::event::{Event, Music, Pan, PlayParams, SaveFile, SoundOp, SoundSlot};
 use crate::highscores::HighScoreScreen;
 use crate::input::{KeyState, Scancode};
 use crate::match_state::{MatchConfig, Mode, Players};
-use crate::mover::Wander;
+use crate::mover::{FpsRun, Wander};
 use crate::saves::{Options, encode_options};
 use crate::screen::{CLICK, Flow, Screen};
 use crate::world::ai::AiLevel;
@@ -85,11 +85,19 @@ pub struct BootSlide {
     pub target: Page,
 }
 
-/// Credits choreography (scene slide, letterbox, wandering photos, five text pairs at 7000 ms).
+/// Credits choreography (answers.md "Credits: slide-in, page 9, slide-out and Esc"): page 7
+/// slides the scene in, page 9 shows it (letterbox, text pairs), page 8 slides it out.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Credits {
+    /// The scene's offset from its rest pose: layer 0 (the decor) is at y −600 + `scene_y`.
     pub scene_y: f64,
-    pub scene_vy: f64,
+    /// px/s, moved through the FPS integrator.
+    pub scene_vy: i32,
+    scene_run: FpsRun,
+    /// Page 7's stop test passed in the render step; the next input step goes to page 9.
+    slid_in: bool,
+    /// The slide-out has bounced once: its accel is −40 from then on.
+    pub bounced: bool,
     pub letterbox: i32,
     pub pair: u8,
     pub hold: Timer,
@@ -123,19 +131,33 @@ const BOOT_REST_Y: f64 = 350.0;
 /// Credits: five text pairs held 7000 ms each, looping until Esc (`FUN_0041be05`).
 pub const CREDIT_PAIRS: u8 = 5;
 pub const CREDIT_HOLD_MS: u64 = 7000;
-/// SR §2.3: the scene slides down at 520 px/s, 5 px/s slower each tick; the letterbox grows
-/// 10 px a tick to 120.
-const CREDIT_SLIDE_VY: f64 = 520.0;
-const CREDIT_SLIDE_DECEL: f64 = 5.0;
+/// Page 7: the scene slides down at 520 px/s, 5 px/s slower each tick, until layer 0's y ≥ −200
+/// or vy ≤ 0. Page 9: the letterbox grows 10 px a tick to 120. Page 8: vy −20, accel −5, then −40
+/// after the first bounce; once layer 0's y + h < 601 the scene snaps back, booms at volume 300,
+/// and stops if |vy| < 61, else bounces with −(vy / 2).
+const CREDIT_SLIDE_VY: i32 = 520;
+const CREDIT_SLIDE_DECEL: i32 = 5;
+const SLIDE_IN_STOP: f64 = 400.0;
+const SLIDE_OUT_VY: i32 = -20;
+const SLIDE_OUT_ACCEL: [i32; 2] = [-5, -40];
+const SLIDE_OUT_SNAP_BELOW: f64 = 1.0;
+const BOUNCE_STOP: i32 = 61;
+const BOOM_VOLUME_CB: i32 = 300;
 const LETTERBOX_STEP: i32 = 10;
 const LETTERBOX_MAX: i32 = 120;
-/// The photos start at (100, −300) and (400, −300) and wander (answers.md "Credits: end and
-/// rand"): reroll 500, speeds 30/30, runs 8/6, accel 0 while sliding, then 5.
+/// The photos start at (100, −300) and (400, −300) and wander: reroll 500, speeds 30/30, runs
+/// 8/6, accel 0, y accel flag set (so only x re-rolls); page 8 sets the y accel to 5. In page 9
+/// they keep to x + w ≤ 820 and letterbox − 20 ≤ screen y ≤ 620 − letterbox − h.
 const PHOTO_START: [[i32; 2]; 2] = [[100, -300], [400, -300]];
 const PHOTO_REROLL_MS: i32 = 500;
 const PHOTO_SPEED: (i32, i32) = (30, 30);
 const PHOTO_RUNS: (i32, i32) = (8, 6);
-const PHOTO_ACCEL: (i32, i32) = (5, 5);
+const SLIDE_OUT_PHOTO_ACCEL: (i32, i32) = (0, 5);
+/// `i_credit_seb` and `i_credit_gaga` frames (SR §2.3).
+const PHOTO_SIZE: [(i32, i32); 2] = [(200, 111), (200, 113)];
+const PHOTO_RIGHT: i32 = 820;
+const PHOTO_TOP_SLACK: i32 = 20;
+const PHOTO_BOTTOM: i32 = 620;
 
 /// Top page grid, 3 × 2, cells [−1, 0, −2 / 1, 2, 3].
 const TOP_GRID: [[Option<usize>; 3]; 2] = [[None, Some(0), None], [Some(1), Some(2), Some(3)]];
@@ -210,7 +232,7 @@ impl Menu {
         }
         if keys.pressed(Scancode::ESCAPE) {
             if let Some(parent) = self.page.parent(cfg) {
-                self.go(parent, cfg, cx);
+                self.go(parent, cfg);
             }
             return Flow::Stay;
         }
@@ -367,7 +389,7 @@ impl Menu {
         }
     }
 
-    fn go(&mut self, page: Page, cfg: &MatchConfig, cx: &mut Ctx) {
+    fn go(&mut self, page: Page, cfg: &MatchConfig) {
         let was_top = self.page == Page::Top;
         self.page = page;
         self.selected = page.preselect(cfg);
@@ -382,10 +404,10 @@ impl Menu {
         }
         b.target = page;
         if let Page::Credits(_) = page {
-            let mover = Wander::new(PHOTO_REROLL_MS, PHOTO_SPEED, PHOTO_RUNS, (0, 0));
+            let mover = Wander::new(PHOTO_REROLL_MS, PHOTO_SPEED, PHOTO_RUNS, (0, 0))
+                .with_accel_flags(false, true);
             self.credits = Credits {
                 scene_vy: CREDIT_SLIDE_VY,
-                hold: Timer::armed(cx.now, CREDIT_HOLD_MS),
                 photos: PHOTO_START,
                 movers: [mover; 2],
                 ..Credits::default()
@@ -493,26 +515,44 @@ impl Menu {
             (Page::ViewKeys, _) => Page::Options,
             (Page::Credits(_), _) => Page::Top,
         };
-        self.go(next, cfg, cx);
+        self.go(next, cfg);
         Flow::Stay
     }
 
-    // shortcut: Esc returns to the top page at once; the slide-out (page 8: the scene rises,
-    // bounces with −v/2, boom at volume 300, SR §2.3) is not modelled, nor which photo steps
-    // first or when the slide ends (taken as vy reaching 0) [I]. Revisit with the page 8 decode.
+    /// The input step runs the page machine (`FUN_0041be05`); the render step then moves the
+    /// layers, then the photos, seb first (`FUN_0041eb60`).
     fn credits_tick(&mut self, keys: &KeyState, cfg: &MatchConfig, cx: &mut Ctx) -> Flow {
         let c = &mut self.credits;
-        c.slide();
-        for (pos, mover) in c.photos.iter_mut().zip(c.movers.iter_mut()) {
-            let (dx, dy) = mover.step(cx);
-            *pos = [pos[0] + dx, pos[1] + dy];
+        match self.page {
+            Page::Credits(7) if c.slid_in => {
+                self.page = Page::Credits(9);
+                c.hold.arm(cx.now, CREDIT_HOLD_MS);
+            }
+            // Page 9 reads only the Esc edge; pages 7 and 8 read nothing.
+            Page::Credits(9) if keys.pressed(Scancode::ESCAPE) => {
+                self.page = Page::Credits(8);
+                c.scene_vy = SLIDE_OUT_VY;
+                for mover in &mut c.movers {
+                    mover.set_accel(SLIDE_OUT_PHOTO_ACCEL);
+                }
+            }
+            _ => {}
         }
-        if c.hold.expired_rearm(cx.now) {
-            c.pair = (c.pair + 1) % CREDIT_PAIRS;
-        }
-        // Page 9 reads only the Esc edge; the pairs loop until then.
-        if keys.pressed(Scancode::ESCAPE) {
-            self.go(Page::Top, cfg, cx);
+        let shown = self.page == Page::Credits(9);
+        let done = match self.page {
+            Page::Credits(7) => {
+                c.slide_in();
+                false
+            }
+            Page::Credits(9) => {
+                c.show(cx.now);
+                false
+            }
+            _ => c.slide_out(cx),
+        };
+        c.move_photos(shown, cx);
+        if done {
+            self.go(Page::Top, cfg);
             self.boot.phase = SlidePhase::Parked;
         }
         Flow::Stay
@@ -520,20 +560,68 @@ impl Menu {
 }
 
 impl Credits {
-    /// One tick of the scene slide and the letterbox; the photos accelerate once it stops.
-    fn slide(&mut self) {
+    fn move_scene(&mut self) {
+        self.scene_y += f64::from(self.scene_run.step([0, self.scene_vy]).1);
+    }
+
+    /// Page 7: move, then the stop test, else slow down; the letterbox does not grow. This order
+    /// gives answers.md's ends: tick 86 at y −200, vy 100 (60 fps) and tick 106 at y −228 (65 fps),
+    /// counting the Enter tick as tick 1.
+    fn slide_in(&mut self) {
+        self.move_scene();
+        self.slid_in = self.scene_y >= SLIDE_IN_STOP || self.scene_vy <= 0;
+        if !self.slid_in {
+            self.scene_vy -= CREDIT_SLIDE_DECEL;
+        }
+    }
+
+    /// Page 9: the letterbox grows and the text pairs loop.
+    fn show(&mut self, now: u64) {
         self.letterbox = (self.letterbox + LETTERBOX_STEP).min(LETTERBOX_MAX);
-        if self.scene_vy <= 0.0 {
-            return;
+        if self.hold.expired_rearm(now) {
+            self.pair = (self.pair + 1) % CREDIT_PAIRS;
         }
-        self.scene_vy -= CREDIT_SLIDE_DECEL;
-        if self.scene_vy > 0.0 {
-            self.scene_y += self.scene_vy * DT;
-            return;
+    }
+
+    /// Page 8; true once a bounce is slow enough to stop.
+    // shortcut: answers.md gives the page 8 steps but not whether the accel is added before or
+    // after the move; it follows page 7 (move first). Revisit with a capture of the bounce ticks.
+    fn slide_out(&mut self, cx: &mut Ctx) -> bool {
+        self.letterbox = (self.letterbox - LETTERBOX_STEP).max(0);
+        self.move_scene();
+        if self.scene_y < SLIDE_OUT_SNAP_BELOW {
+            self.scene_y = 0.0;
+            let boom = PlayParams {
+                volume_cb: BOOM_VOLUME_CB,
+                ..PlayParams::default()
+            };
+            cx.sound(SoundSlot::BOOM, SoundOp::Play(boom));
+            if self.scene_vy.abs() < BOUNCE_STOP {
+                return true;
+            }
+            self.scene_vy = -(self.scene_vy / 2);
+            self.bounced = true;
         }
-        self.scene_vy = 0.0;
-        for mover in &mut self.movers {
-            mover.set_accel(PHOTO_ACCEL);
+        self.scene_vy += SLIDE_OUT_ACCEL[usize::from(self.bounced)];
+        false
+    }
+
+    /// Each photo wanders on the scene (its camera delta is the layer step); in page 9 it is
+    /// clamped in screen space, the left bound never applied.
+    // shortcut: whether the page 9 bounds stay on in page 8 is not given; they are dropped there.
+    fn move_photos(&mut self, bounded: bool, cx: &mut Ctx) {
+        let scene = self.scene_y as i32;
+        let top = self.letterbox - PHOTO_TOP_SLACK;
+        for (i, (w, h)) in PHOTO_SIZE.into_iter().enumerate() {
+            let (dx, dy) = self.movers[i].step(cx);
+            let [x, y] = &mut self.photos[i];
+            (*x, *y) = (*x + dx, *y + dy);
+            if !bounded {
+                continue;
+            }
+            let bottom = PHOTO_BOTTOM - self.letterbox - h;
+            *x = (*x).min(PHOTO_RIGHT - w);
+            *y = (*y + scene).max(top).min(bottom) - scene;
         }
     }
 }
@@ -570,7 +658,7 @@ mod tests {
 
     fn in_credits(rig: &mut Rig) -> (Menu, MatchConfig) {
         let (mut m, cfg) = (Menu::new(false), MatchConfig::default());
-        rig.cx(|cx| m.go(Page::Credits(7), &cfg, cx));
+        m.go(Page::Credits(7), &cfg);
         rig.rng = MsvcRand::new(1);
         (m, cfg)
     }
@@ -579,76 +667,113 @@ mod tests {
         rig.step(&[], |k, cx| m.credits_tick(k, cfg, cx));
     }
 
-    /// answers.md "Credits: end and rand", seed 1, accel 0 while sliding: seb x d 7 (+1),
-    /// 6334 % 30 + 65 = 69; y d 9 (+1), 15724 % 30 + 65 = 69; gaga x d 8, 26962 % 30 + 65 = 87;
-    /// y d 5, 28145 % 30 + 65 = 70. Each moves 1 px on both axes.
+    /// answers.md "Credits: slide-in, page 9, slide-out and Esc", seed 1: the y accel flag is set,
+    /// so only x re-rolls. seb x: timer 41, d 18467 % 10 = 7 (+1), 6334 % 30 + 65 = 69; gaga x:
+    /// timer 26500, d 9 (+1), 15724 % 30 + 65 = 69. Each moves 1 px right; y stays.
     #[test]
-    fn the_credit_photos_wander_from_the_first_tick() {
+    fn the_credit_photos_wander_on_x_only() {
         let mut rig = Rig::new(1);
         let (mut m, cfg) = in_credits(&mut rig);
         tick(&mut rig, &mut m, &cfg);
         let c = m.credits;
-        assert_eq!(c.movers.map(|w| w.v), [[69, 69], [87, 70]]);
-        assert_eq!(c.photos, [[101, -299], [401, -299]]);
-        assert_eq!(rig.rng.rand(), 23281);
+        assert_eq!(c.movers.map(|w| w.v), [[69, 0], [69, 0]]);
+        assert_eq!(c.photos, [[101, -300], [401, -300]]);
+        assert_eq!(rig.rng.rand(), 11478);
     }
 
-    /// SR §2.3: vy 520 less 5 per tick moves Σ (520 − 5k) / 65 for k = 1..103 = 26780 / 65 = 412
-    /// px and stops on tick 104; the letterbox reaches 120 after 12 ticks. While sliding no
-    /// photo speed passes R(30) + 65 ≤ 94; after it, accel 5 pushes one past.
+    /// Page 7: v changes every tick, so each FPS run is fresh and moves trunc(v / 65):
+    /// Σ trunc((520 − 5k) / 65) for k = 0..=104 is 372. Tick 105 moves at vy 0 and ends the
+    /// slide; page 9 starts on tick 106. The letterbox stays 0 in page 7 and Esc is ignored.
     #[test]
-    fn the_scene_slides_412_px_then_the_photos_accelerate() {
+    fn the_scene_slides_in_372_px_then_page_9_shows() {
         let mut rig = Rig::new(1);
         let (mut m, cfg) = in_credits(&mut rig);
-        let fastest = |m: &Menu| {
-            m.credits
-                .movers
-                .iter()
-                .flat_map(|w| w.v)
-                .map(i32::abs)
-                .max()
-        };
-        for _ in 0..12 {
-            tick(&mut rig, &mut m, &cfg);
+        for t in 1..=105 {
+            let esc: &[Scancode] = if t == 50 { &[Scancode::ESCAPE] } else { &[] };
+            rig.step(esc, |k, cx| m.credits_tick(k, &cfg, cx));
+            assert_eq!((m.page, m.credits.letterbox), (Page::Credits(7), 0), "{t}");
         }
-        assert_eq!(m.credits.letterbox, 120);
-        for _ in 12..103 {
-            tick(&mut rig, &mut m, &cfg);
-            assert!(fastest(&m) <= Some(94));
-        }
-        assert_eq!(m.credits.scene_vy, 5.0);
+        assert_eq!((m.credits.scene_y, m.credits.scene_vy), (372.0, 0));
         tick(&mut rig, &mut m, &cfg);
-        assert_eq!(m.credits.scene_vy, 0.0);
-        assert!(
-            (m.credits.scene_y - 412.0).abs() < 1e-9,
-            "{}",
-            m.credits.scene_y
-        );
-        let passed = (0..TICK_CAP).any(|_| {
-            tick(&mut rig, &mut m, &cfg);
-            fastest(&m) > Some(94)
-        });
-        assert!(passed);
-        assert_eq!(m.credits.letterbox, 120);
+        assert_eq!((m.page, m.credits.letterbox), (Page::Credits(9), 10));
     }
 
-    /// answers.md "Credits: the first hold is 7000 ms": the first pair, too, holds 7000 ms from
-    /// the slide-in, and each later pair 7000 ms more.
+    fn shown(rig: &mut Rig) -> (Menu, MatchConfig) {
+        let (mut m, cfg) = in_credits(rig);
+        for _ in 0..TICK_CAP {
+            tick(rig, &mut m, &cfg);
+            if m.page == Page::Credits(9) {
+                break;
+            }
+        }
+        (m, cfg)
+    }
+
+    /// Page 9 bounds, in screen space: at scene 372 the photos sit at screen y 72, and the top
+    /// bound letterbox − 20 pushes them to 100 once the letterbox is 120 (12 ticks): scene y
+    /// 100 − 372 = −272. x stays ≤ 820 − 200.
+    #[test]
+    fn page_9_keeps_the_photos_inside_the_letterbox() {
+        let mut rig = Rig::new(1);
+        let (mut m, cfg) = shown(&mut rig);
+        for _ in 1..12 {
+            tick(&mut rig, &mut m, &cfg);
+        }
+        let c = m.credits;
+        assert_eq!(c.letterbox, 120);
+        assert_eq!(c.photos.map(|p| p[1]), [-272, -272]);
+        for _ in 0..TICK_CAP {
+            tick(&mut rig, &mut m, &cfg);
+            assert!(m.credits.photos.iter().all(|p| p[0] <= 620));
+        }
+    }
+
+    /// Esc in page 9 starts page 8 at vy −20, accel −5 (moving first, as in page 7): the scene
+    /// is back at rest on tick 101 at vy −520 (boom, bounce to 260, accel −40), again on 113 at
+    /// −220 (110) and 118 at −90 (45). 45 − 40 = 5 moves 0 px, so tick 119 snaps again at
+    /// |vy| 5 < 61: the last boom, and the top page.
+    #[test]
+    fn esc_slides_the_scene_out_with_bounces() {
+        let mut rig = Rig::new(1);
+        let (mut m, cfg) = shown(&mut rig);
+        let mut booms = Vec::new();
+        for t in 1..=200 {
+            let esc: &[Scancode] = if t == 1 { &[Scancode::ESCAPE] } else { &[] };
+            let before = rig.events.len();
+            rig.step(esc, |k, cx| m.credits_tick(k, &cfg, cx));
+            let boom =
+                |e: &Event| matches!(e, Event::Sound { slot, .. } if *slot == SoundSlot::BOOM);
+            if rig.events[before..].iter().any(boom) {
+                booms.push(t);
+            }
+            if t == 12 {
+                assert_eq!((m.page, m.credits.letterbox), (Page::Credits(8), 0));
+            }
+            if m.page == Page::Top {
+                break;
+            }
+        }
+        assert_eq!(booms, [101, 113, 118, 119]);
+        assert_eq!((m.page, m.credits.scene_y), (Page::Top, 0.0));
+    }
+
+    /// answers.md "Credits: the first hold is 7000 ms": the pairs cycle in page 9, the first hold
+    /// counted from its start; each flip is due on the first tick strictly past 7000 ms.
     #[test]
     fn every_credit_pair_holds_7000_ms_the_first_included() {
         let mut rig = Rig::new(1);
-        let start = rig.now();
-        let (mut m, cfg) = in_credits(&mut rig);
-        let mut flips = Vec::new();
+        let (mut m, cfg) = shown(&mut rig);
+        let mut last = rig.now() - 16;
+        let mut gaps = Vec::new();
         for _ in 0..1000 {
             let (pair, now) = (m.credits.pair, rig.now());
             tick(&mut rig, &mut m, &cfg);
             if m.credits.pair != pair {
-                flips.push(now - start);
+                gaps.push(now - last);
+                last = now;
             }
         }
-        assert!(flips.len() >= 2, "{flips:?}");
-        // Due on the first tick strictly past the deadline: 7015 (tick 456), re-armed from there.
-        assert_eq!(flips[..2], [7015, 14_030]);
+        assert!(gaps.len() >= 2, "{gaps:?}");
+        assert!(gaps.iter().all(|g| (7000..7032).contains(g)), "{gaps:?}");
     }
 }

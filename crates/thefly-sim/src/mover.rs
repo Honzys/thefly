@@ -53,8 +53,9 @@ impl FpsRun {
 /// between steps; one that only needs the integrator calls [`Wander::integrate`]. Bounds belong
 /// to the caller: clamp the position and leave the velocity, there is no bounce.
 ///
-/// [`Wander::with_gravity`] is true gravity (+0x130): v += accel instead of sign(v) × accel. Not
-/// modelled, as no user sets them: the accel flags (+0xa8, +0xac; set, an axis never re-rolls).
+/// [`Wander::with_gravity`] is true gravity (+0x130): v += accel instead of sign(v) × accel.
+/// [`Wander::with_accel_flags`] sets the accel flags (+0xa8 x, +0xac y): a flagged axis never
+/// re-rolls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Wander {
     reroll_ms: i32,
@@ -66,6 +67,7 @@ pub struct Wander {
     /// (vx, vy) in px/s.
     pub v: [i32; 2],
     gravity: bool,
+    accel_flags: [bool; 2],
     fps: FpsRun,
 }
 
@@ -92,6 +94,13 @@ impl Wander {
         self.accel = [accel.0, accel.1];
     }
 
+    pub fn with_accel_flags(self, x: bool, y: bool) -> Self {
+        Self {
+            accel_flags: [x, y],
+            ..self
+        }
+    }
+
     pub fn with_gravity(self) -> Self {
         Self {
             gravity: true,
@@ -102,7 +111,7 @@ impl Wander {
     /// One tick: re-roll the expired axes, accelerate, integrate; returns (dx, dy) in px.
     pub fn step(&mut self, cx: &mut Ctx) -> (i32, i32) {
         for a in 0..2 {
-            if self.timers[a].expired(cx.now) {
+            if !self.accel_flags[a] && self.timers[a].expired(cx.now) {
                 self.reroll(a, cx);
             }
             let dir = if self.gravity { 1 } else { self.v[a].signum() };
@@ -204,5 +213,16 @@ mod tests {
             })
             .collect();
         assert_eq!(v, [[70, 70], [70, 70], [-60, -60]]);
+    }
+
+    /// A set accel flag (+0xac for y) stops that axis re-rolling: seed 1, x alone draws timer 41,
+    /// d 18467 % 10 = 7 (+1), 6334 % 1 + 65 = 65; y stays at 0 and the next draw is 26500.
+    #[test]
+    fn a_flagged_axis_never_rerolls() {
+        let mut rig = Rig::new(1);
+        let mut w = Wander::new(0, (1, 1), (1, 1), (0, 0)).with_accel_flags(false, true);
+        w.step(&mut rig.at(0));
+        assert_eq!(w.v, [65, 0]);
+        assert_eq!(rig.rng.rand(), 26500);
     }
 }
