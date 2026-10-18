@@ -325,7 +325,7 @@ fn boot(g: &mut Gfx, v: &View, w: &World, p: Option<&World>) -> Result<(), Error
     g.spr("i_botte", x, y, 0)
 }
 
-const SWATTERS: [&str; 5] = [
+pub(super) const SWATTERS: [&str; 5] = [
     "tapette-1",
     "tapette-3",
     "tapette-5",

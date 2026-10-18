@@ -1,7 +1,7 @@
 //! Between-period screens: goodies shop, traps shop, bourse (SR §3) and the bonus round (SR §6).
 
 use thefly_platform::{Color, Error};
-use thefly_sim::bonus::{BonusPhase, BonusRound, COIN_VALUE, HIT_VALUE, Piece};
+use thefly_sim::bonus::{BonusPhase, BonusRound, COIN_VALUE, HIT_VALUE, Piece, SWATTER_H};
 use thefly_sim::bourse::{Bourse, COLUMN_OBJECT};
 use thefly_sim::economy::ITEMS;
 use thefly_sim::match_state::MatchState;
@@ -11,6 +11,7 @@ use thefly_sim::world::objects::{EXTREME_TYPES, NORMAL_TYPES};
 use thefly_sim::world::traps::TrapKind;
 
 use super::View;
+use super::play::SWATTERS;
 use crate::assets::{ARIAL_BLACK, JOINT};
 use crate::gfx::{BLACK, Gfx, WHITE, centred_x};
 
@@ -345,28 +346,57 @@ fn targets(g: &mut Gfx, v: &View, b: &BonusRound, prev: Option<&BonusRound>) -> 
 const BONUS_Y: f32 = 80.0;
 /// `bckbonusbarre`'s y: its bottom on the field's bottom edge (observed).
 const BARRE_Y: f32 = BONUS_Y + 440.0 - 317.0;
+/// Both layers scroll at the bar's −600 layer px/s; `bckbonusfond` is on a 0.7 layer
+/// (answers.md "Bonus round").
+const FOND_LAYER: f64 = 0.7;
+const LAYER_W: f64 = 800.0;
+/// `j_transi_est` flaps through frames 6–9 at 20 ms, as in the menu intro (SR §2.2 row 2).
+const BONUS_FLY_FRAMES: (u32, u32) = (5, 4);
 
-/// SR §6: the layout is open (open item O3). The field sits between black bars, coins are
-/// `piece`, the farmer's targets the winged `piecetap` balloons (as captured). shortcut: O3, the
-/// bonus swatter is drawn as the in-game hand `tapette-1` with its head on the mover box and the
-/// fly as `Face`; the countdown in Joint and the tally in `boitedlg`. Revisit with O3.
+/// A layer scrolled to `x`, tiled across the screen.
+fn scrolled(g: &mut Gfx, name: &str, x: f64, y: f32) -> Result<(), Error> {
+    let x = x.rem_euclid(LAYER_W) as f32;
+    g.spr(name, x - LAYER_W as f32, y, 0)?;
+    g.spr(name, x, y, 0)
+}
+
+/// The swatter, `j_tapette_1..5` by swing frame, bottom-aligned on the idle frame's 178 px as
+/// in play. Its y (351..=472) is a screen y: at 351 the idle hand is cut by the bottom bar at
+/// 520, as in 65-bonus-*. shortcut: the swing frames' anchor is not in the docs (O3), and the
+/// drawn head does not follow `bonus::reach`. Revisit with O3.
+fn bonus_swatter(
+    g: &mut Gfx,
+    v: &View,
+    b: &BonusRound,
+    p: Option<&BonusRound>,
+) -> Result<(), Error> {
+    let name = SWATTERS[usize::try_from(b.swing.frame).unwrap_or(0).min(4)];
+    let (_, h) = g.size(name)?;
+    let x = v.l.f(p.map(|p| p.swatter.x), b.swatter.x);
+    let y = v.l.f(p.map(|p| p.swatter.y), b.swatter.y);
+    g.spr(name, x, y + SWATTER_H as f32 - h, 0)
+}
+
+/// SR §6, laid out as 65-bonus-* show it: the field between black bars, the scrolling backdrop
+/// and fence, then in the original's draw-pass order (answers.md "Bonus round: target right
+/// bound and the tick order") the swatter, the winged `piecetap` targets, the `piece` coins and
+/// the fly. The countdown is in Joint and the tally in `boitedlg`.
 pub fn bonus(g: &mut Gfx, v: &View, b: &BonusRound) -> Result<(), Error> {
     let prev = match v.prev_screen() {
         Some(MatchScreen::Bonus(p)) => Some(p.as_ref()),
         _ => None,
     };
     g.fill(0.0, 0.0, 800.0, 600.0, BLACK)?;
-    g.spr("bckbonusfond", 0.0, BONUS_Y, 0)?;
-    // the coins and the actors pass in front of the fence (65-bonus-*)
-    g.spr("bckbonusbarre", 0.0, BARRE_Y, 0)?;
+    let bar_x = f64::from(v.l.i(prev.map(|p| p.bar.x), b.bar.x));
+    scrolled(g, "bckbonusfond", bar_x * FOND_LAYER, BONUS_Y)?;
+    scrolled(g, "bckbonusbarre", bar_x, BARRE_Y)?;
+    bonus_swatter(g, v, b, prev)?;
+    targets(g, v, b, prev)?;
     coins(g, v, b, prev)?;
     let fx = v.l.f(prev.map(|p| p.fly.x), b.fly.x);
     let fy = v.l.f(prev.map(|p| p.fly.y), b.fly.y) + BONUS_Y;
-    g.spr("Face", fx, fy, v.anim(50, 10))?;
-    targets(g, v, b, prev)?;
-    let sx = v.l.f(prev.map(|p| p.swatter.x), b.swatter.x);
-    let sy = v.l.f(prev.map(|p| p.swatter.y), b.swatter.y) + BONUS_Y;
-    g.spr("tapette-1", sx - 50.0, sy - 10.0, 0)?;
+    let (first, frames) = BONUS_FLY_FRAMES;
+    g.spr("transi-est", fx, fy, first + v.anim(20, frames))?;
     // the bars cut off whatever leaves the field (65-bonus-05: the hand ends at y 520)
     let field_h = b.bg_h as f32;
     g.fill(0.0, 0.0, 800.0, BONUS_Y, BLACK)?;
