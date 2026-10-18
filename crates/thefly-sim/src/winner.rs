@@ -115,7 +115,7 @@ impl Winner {
         if faded {
             self.wait.arm(now, INTRO_WAIT_MS);
         }
-        if self.wait.expired(now) {
+        if self.wait.is_armed() && self.wait.expired(now) {
             self.stage = Stage::CountUp;
         }
     }

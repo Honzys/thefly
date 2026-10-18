@@ -195,15 +195,13 @@ impl World {
     /// again or ends Nuclear.
     pub fn mystery_expiry(&mut self, cx: &mut Ctx) {
         let g = &mut self.goodies;
-        if g.fly_mystery_timer.expired(cx.now) {
-            g.fly_mystery_timer.disarm();
+        if g.fly_mystery != Mystery::None && g.fly_mystery_timer.expired(cx.now) {
             if g.fly_mystery == Mystery::Second {
                 self.fly.end_turbo();
             }
             g.fly_mystery = Mystery::None;
         }
-        if g.farmer_mystery_timer.expired(cx.now) {
-            g.farmer_mystery_timer.disarm();
+        if g.farmer_mystery != Mystery::None && g.farmer_mystery_timer.expired(cx.now) {
             match g.farmer_mystery {
                 Mystery::First => self.farmer.swing.blocked = false,
                 Mystery::Second => self.farmer.end_nuclear(),
@@ -381,7 +379,8 @@ mod tests {
         assert!(w.boot.active && m.economy.farmer.boot == 0);
     }
 
-    /// A mystery lasts 15000 ms (tick 975): the "cannot hit" flag clears then.
+    /// A mystery lasts 15000 ms: tick 975 is exactly 15000, so the "cannot hit" flag clears on
+    /// tick 976.
     #[test]
     fn a_mystery_lasts_15000_ms() {
         let mut rig = Rig::new(1);
@@ -389,9 +388,9 @@ mod tests {
         w.goodies.farmer_mystery = Mystery::First;
         w.goodies.farmer_mystery_timer = Timer::armed(0, MYSTERY_MS);
         w.farmer.swing.blocked = true;
-        w.mystery_expiry(&mut rig.at(974));
-        assert!(w.farmer.swing.blocked);
         w.mystery_expiry(&mut rig.at(975));
+        assert!(w.farmer.swing.blocked);
+        w.mystery_expiry(&mut rig.at(976));
         assert!(!w.farmer.swing.blocked);
         assert_eq!(w.goodies.farmer_mystery, Mystery::None);
     }

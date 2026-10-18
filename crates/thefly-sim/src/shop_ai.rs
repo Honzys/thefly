@@ -88,6 +88,7 @@ pub struct GoodiesShopAi {
     pub plan: Plan,
     /// Ids 1..=5 in visit order.
     pub order: [usize; 5],
+    /// The visit index; order.len() + 1 once "done" is selected, + 2 once it is pressed.
     pub next: usize,
     pub timer: Timer,
     /// Paused until the farmer's payout tally finishes.
@@ -114,7 +115,8 @@ impl GoodiesShopAi {
     }
 
     pub fn tick(&mut self, cx: &mut Ctx) -> Option<Press> {
-        if self.paused || !self.timer.expired_rearm(cx.now) {
+        let finished = self.next > self.order.len() + 1;
+        if finished || self.paused || !self.timer.expired_rearm(cx.now) {
             return None;
         }
         while self.next < self.order.len() && self.plan[self.order[self.next] - 1] < 1 {
@@ -129,7 +131,7 @@ impl GoodiesShopAi {
             self.next += 1;
             return Some(Press::SelectDone);
         }
-        self.timer.disarm();
+        self.next += 1;
         Some(Press::Done)
     }
 }
@@ -232,6 +234,7 @@ pub enum ReplayStep {
 pub struct TrapsShopAi {
     /// Accepted traps to replay; empty when the gate said "keep the tokens".
     pub queue: Vec<TrapSlot>,
+    /// The replay index; past the queue once "done" is pressed.
     pub next: usize,
     pub step: ReplayStep,
     pub timer: Timer,
@@ -291,11 +294,11 @@ impl TrapsShopAi {
     }
 
     pub fn tick(&mut self, cx: &mut Ctx) -> Option<TrapAction> {
-        if !self.timer.expired(cx.now) {
+        if self.next > self.queue.len() || !self.timer.expired(cx.now) {
             return None;
         }
         let Some(&slot) = self.queue.get(self.next) else {
-            self.timer.disarm();
+            self.next += 1;
             return Some(TrapAction::Done);
         };
         let (action, step, ms) = match self.step {
@@ -413,6 +416,8 @@ mod tests {
         assert_eq!(rng.rand(), 292);
     }
 
+    /// Polled every ms: each expiry is 1 ms past its deadline (strictly before now) and re-arms
+    /// from there, so presses are 701 ms apart; "done" is pressed once.
     #[test]
     fn presses_come_700_ms_apart_in_the_drawn_order() {
         let (m, mut rng) = shop_match(1000, 0);
@@ -429,13 +434,13 @@ mod tests {
         assert_eq!(
             presses,
             [
-                (700, Button(2)),
-                (1400, Button(0)),
-                (2100, Button(0)),
-                (2800, Button(3)),
-                (3500, Button(3)),
-                (4200, SelectDone),
-                (4900, Done),
+                (701, Button(2)),
+                (1402, Button(0)),
+                (2103, Button(0)),
+                (2804, Button(3)),
+                (3505, Button(3)),
+                (4206, SelectDone),
+                (4907, Done),
             ]
         );
     }
@@ -477,9 +482,11 @@ mod tests {
             TrapsShopAi::new(AiLevel::Normal, &mut m, cx)
         });
         assert!(ai.queue.is_empty());
-        assert_eq!(run(800, &mut rng, |cx| ai.tick(cx)), Some(TrapAction::Done));
+        assert_eq!(run(800, &mut rng, |cx| ai.tick(cx)), None);
+        assert_eq!(run(801, &mut rng, |cx| ai.tick(cx)), Some(TrapAction::Done));
     }
 
+    /// Polled every ms: each step fires 1 ms past its deadline and the next is armed from there.
     #[test]
     fn the_replay_runs_at_800_500_1000_800_ms() {
         let slot = TrapSlot {
@@ -504,13 +511,13 @@ mod tests {
         assert_eq!(
             got,
             [
-                (800, Select(1)),
-                (1300, Press),
-                (2300, Place(slot)),
-                (3100, Select(1)),
-                (3600, Press),
-                (4600, Place(slot)),
-                (5400, Done),
+                (801, Select(1)),
+                (1302, Press),
+                (2303, Place(slot)),
+                (3104, Select(1)),
+                (3605, Press),
+                (4606, Place(slot)),
+                (5407, Done),
             ]
         );
     }

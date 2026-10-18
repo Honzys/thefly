@@ -113,7 +113,7 @@ impl Wander {
     pub(crate) fn step(&mut self, cx: &mut Ctx) -> (i32, i32) {
         for a in 0..2 {
             let t = self.timers[a];
-            if !t.is_armed() || t.expired(cx.now) {
+            if t.expired(cx.now) {
                 self.reroll(a, cx);
             }
             self.v[a] += self.v[a].signum() * self.accel[a];
@@ -428,10 +428,7 @@ mod tests {
     #[test]
     fn a_spawn_draws_kind_then_position_and_no_speed() {
         let mut rig = Rig::new(1);
-        let mut g = FlyingGoodies {
-            fly_check: Timer::armed(0, 0),
-            ..FlyingGoodies::default()
-        };
+        let mut g = FlyingGoodies::default();
         g.check(Side::Fly, || 0.5, SIZE, &mut rig.cx(0));
         let f = g.fly;
         assert!(f.active);
@@ -456,10 +453,7 @@ mod tests {
     fn a_failed_roll_rearms_without_spawning() {
         let mut rig = Rig::new(1);
         rig.rng.rand();
-        let mut g = FlyingGoodies {
-            farmer_check: Timer::armed(0, 0),
-            ..FlyingGoodies::default()
-        };
+        let mut g = FlyingGoodies::default();
         g.check(Side::Farmer, || 0.5, SIZE, &mut rig.cx(0));
         assert!(!g.farmer.active);
         assert_eq!(g.farmer_check.remaining_ms(0), 12_000);
@@ -495,17 +489,13 @@ mod tests {
         }
     }
 
-    /// Seed 1, both checks due at p = 0.5: the fly side takes 41 (spawn), 67, kind 4, x 100,
+    /// Seed 1, both checks never armed (so due) at p = 0.5: the fly side takes 41 (spawn), 67, kind 4, x 100,
     /// y 169; then the farmer side 15724 % 100 = 24 (spawn), 78, kind 29358 % 3 + 3 = 3,
     /// x 26962 % 800 = 562, y 24464 % 500 = 464.
     #[test]
     fn the_fly_side_is_checked_before_the_farmer_side() {
         let mut rig = Rig::new(1);
-        let mut g = FlyingGoodies {
-            fly_check: Timer::armed(0, 0),
-            farmer_check: Timer::armed(0, 0),
-            ..FlyingGoodies::default()
-        };
+        let mut g = FlyingGoodies::default();
         g.checks(|_| 0.5, SIZE, &mut rig.cx(0));
         assert_eq!((g.fly.kind, g.fly.x, g.fly.y), (4, 100, 169));
         assert_eq!((g.farmer.kind, g.farmer.frame), (3, 8));
@@ -547,8 +537,8 @@ mod tests {
         assert_eq!(v, [[65, 65], [65, 65], [-65, -65], [-65, 65]]);
     }
 
-    /// The fly's goodie lives 8000 ms (tick 520), clamps to y ≤ 450 and scrolls by −delta. Tick 1,
-    /// seed 1, the default mover (reroll, speed and runs 0): x draws 41, 18467 % 10 = 7 (≥ 5, v 0,
+    /// The fly's goodie lives 8000 ms (tick 520 is exactly 8000 ms, so it goes on 521), clamps to
+    /// y ≤ 450 and scrolls by −delta. Tick 1, seed 1, the default mover (reroll, speed and runs 0): x draws 41, 18467 % 10 = 7 (≥ 5, v 0,
     /// run 0 ≤ 0: +1), 6334 % 1 → vx 65; y draws 26500, 19169 % 10 = 9 → vy 65; each moves 1 px.
     #[test]
     fn a_goodie_expires_and_scrolls_with_the_layer() {
@@ -565,12 +555,12 @@ mod tests {
         };
         f.update(10.6, &mut rig.at(1));
         assert_eq!((f.x, f.y), (400 + 1 - 10, 449 + 1));
-        for tick in 2..520 {
+        for tick in 2..=520 {
             f.update(0.0, &mut rig.at(tick));
             assert!((0..=450).contains(&f.y));
         }
         assert!(f.active);
-        f.update(0.0, &mut rig.at(520));
+        f.update(0.0, &mut rig.at(521));
         assert!(!f.active);
     }
 

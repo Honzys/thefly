@@ -888,9 +888,10 @@ mod tests {
         assert_eq!((c.dx, c.dy, c.distance), (810, 95, 800));
     }
 
-    /// AR §2.4 step 7, gaps §11.1: a new x direction waits 130 + 41 % 100 = 171 ms; an aligned
-    /// axis keeps it while rand % 5 ≥ 2 (18467 % 5 = 2, 6334 % 5 = 4) and drops it on 26500 % 5
-    /// = 0, which waits 130 + 19169 % 100 = 199 ms; y applies at once.
+    /// AR §2.4 step 7, gaps §11.1: a new x direction applies once 130 + 41 % 100 = 171 ms are
+    /// strictly past (at 172); an aligned axis keeps it while rand % 5 ≥ 2 (18467 % 5 = 2,
+    /// 6334 % 5 = 4) and drops it on 26500 % 5 = 0, which waits 130 + 19169 % 100 = 199 ms
+    /// (due at 430); y applies at once.
     #[test]
     fn the_x_direction_waits_for_the_reaction_delay() {
         let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
@@ -910,9 +911,9 @@ mod tests {
             (0, -1, false, false)
         );
         assert!(a.pad().up && !a.pad().right);
-        step(170, 100, 0, &mut a);
-        assert_eq!((a.x_dir, a.y_dir), (0, 0));
         step(171, 100, 0, &mut a);
+        assert_eq!((a.x_dir, a.y_dir), (0, 0));
+        step(172, 100, 0, &mut a);
         assert_eq!(a.x_dir, 1);
         assert!(a.pad().right);
         let al = step(200, 10, 0, &mut a);
@@ -921,9 +922,9 @@ mod tests {
         assert_eq!(a.x_dir, 1);
         step(230, 10, 0, &mut a);
         assert_eq!((a.x_dir, a.pending_x_dir), (1, Some(0)));
-        step(428, -10, 0, &mut a);
-        assert_eq!(a.x_dir, 1);
         step(429, -10, 0, &mut a);
+        assert_eq!(a.x_dir, 1);
+        step(430, -10, 0, &mut a);
         assert_eq!(a.x_dir, 0);
     }
 }
@@ -966,7 +967,7 @@ mod farmer_ai_tests {
         let (mut ai, _) = normal_ai(&mut rig);
         ai.dwell = Some(Timer::armed(0, 1000));
         (ai.aligner.x_dir, ai.aligner.y_dir, ai.aligner.pending_x_dir) = (1, -1, Some(0));
-        ai.dwell_step(&mut rig.cx(1000));
+        ai.dwell_step(&mut rig.cx(1001));
         assert_eq!((ai.controller.ox, ai.controller.oy), (5, -74));
         assert!(ai.swing_request && ai.dwell.is_none());
         assert_eq!(
