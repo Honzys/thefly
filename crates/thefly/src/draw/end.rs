@@ -70,23 +70,15 @@ pub fn winner(g: &mut Gfx, v: &View, w: &Winner) -> Result<(), Error> {
     g.fade(w.fade.alpha)
 }
 
-/// A hop's lift and length. shortcut: the sim does not move the trophy while it hops (its
-/// Wander mover is not modelled, answers.md "Winner trophy"); a 20 px arc over the last 500 ms
-/// of the hop stands in. Revisit when the wander mover lands in the sim.
-const HOP_PX: f32 = 20.0;
-const HOP_ARC_MS: u64 = 500;
-
-/// The trophy falls (sim `trophy_y`, +`trophy_vy` px/s per tick) onto the loser, then hops.
+/// The trophy falls onto the loser, then hops; both are sim positions, interpolated.
 fn trophy(g: &mut Gfx, v: &View, w: &Winner, prev: Option<&Winner>) -> Result<(), Error> {
     let (_, th) = g.size("winnercoupe")?;
-    let mut ty =
+    let tx =
+        v.l.f(prev.map(|p| f64::from(p.trophy_x)), f64::from(w.trophy_x));
+    let ty =
         v.l.f(prev.map(|p| p.trophy_y), w.trophy_y)
             .min(TROPHY_FLOOR as f32 - th);
-    if w.hopping {
-        let left = w.hop.remaining_ms(v.now).min(HOP_ARC_MS) as f32 / HOP_ARC_MS as f32;
-        ty -= HOP_PX * (left * std::f32::consts::PI).sin();
-    }
-    g.spr("winnercoupe", w.trophy_x() as f32, ty, 0)
+    g.spr("winnercoupe", tx, ty, 0)
 }
 
 const PANEL: Color = Color::RGB(124, 150, 228);
