@@ -1713,7 +1713,10 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds.len(), 46);
-        assert!(kinds[..45].iter().all(|&k| k) && !kinds[45], "sparkles before 38");
+        assert!(
+            kinds[..45].iter().all(|&k| k) && !kinds[45],
+            "sparkles before 38"
+        );
     }
 
     /// The first sparkle after `Fly::new` (draw 0 = 41, so x = 161, y = 253; Face 120 × 94):
@@ -1759,14 +1762,21 @@ mod tests {
         }
         assert_eq!(burst(&mut b, &mut fly), 0, "alpha 8 still shows");
         fly.render_sparkles();
-        assert!(!fly.sparkles_visible, "no sparkle left clears the render flag");
+        assert!(
+            !fly.sparkles_visible,
+            "no sparkle left clears the render flag"
+        );
         assert_eq!(burst(&mut b, &mut fly), 315);
         for _ in 0..14 {
             fly.render_sparkles();
         }
         let before = b.draws_since(1, 0);
         b.with(|cx| fly.sparkles(100, cx));
-        assert_eq!(b.draws_since(1, before), 89 * 7, "a request is capped at 89");
+        assert_eq!(
+            b.draws_since(1, before),
+            89 * 7,
+            "a request is capped at 89"
+        );
     }
 
     /// The render flag: only the SuperFly start and `FUN_004387d5` set it, so sparkles emitted
