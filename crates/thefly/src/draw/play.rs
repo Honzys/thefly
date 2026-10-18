@@ -131,12 +131,21 @@ fn scene(g: &mut Gfx, v: &View, m: &MatchState, w: &World, p: Option<&World>) ->
     let sc = m.scene();
     layers(g, v, sc, w, p, &[0, 1, 2])?;
     tint(g, m)?;
-    midges(g, v, &w.midges.slots, p.map(|p| p.midges.slots.as_slice()))?;
+    midges(
+        g,
+        v,
+        &w.midges.slots,
+        p.map(|p| p.midges.slots.as_slice()),
+        GOODIE_SPRITE,
+        GOODIE_RING,
+    )?;
     midges(
         g,
         v,
         &w.ambient_midges.slots,
         p.map(|p| p.ambient_midges.slots.as_slice()),
+        AMBIENT_SPRITE,
+        AMBIENT_RING,
     )?;
     // SR §4.3 step 6: the table front goes under the objects and actors, as the captures show;
     // §4.2's "layer 3 last" is the coarse pass list
@@ -169,22 +178,56 @@ fn tint(g: &mut Gfx, m: &MatchState) -> Result<(), Error> {
     g.shade(cell, alpha)
 }
 
-/// Midge sprite frames (27 × 27, six of them).
-const MIDGE_FRAMES: u32 = 6;
+/// Midge sprite (27 × 27, six frames, viewed in the real sheet): two flap frames facing left
+/// (0, 1), two facing right (2, 3), then the splat and the zapped husk.
+/// shortcut: the docs name the facing sets (+0x184 / +0x186) but not their frames; read off the
+/// art. The splat (4) and husk (5) for stunned and falling midges are not drawn yet.
+const MIDGE_FLAP: u32 = 2;
+const MIDGE_RIGHT: u32 = 2;
 
 /// Each midge's own period of R(5) + 30 ms per frame (answers.md "Midge wrap, bounds and frame
-/// period"), `Midge::size` in the sim; the slot index staggers the midges.
-fn midge_frame(now: u64, period_ms: i32, slot: usize) -> u32 {
+/// period"), `Midge::frame_ms` in the sim; the slot index staggers the midges. A left-facing
+/// midge (vx < 0, "Ambient midge update") plays the left set.
+fn midge_frame(now: u64, period_ms: i32, slot: usize, facing_left: bool) -> u32 {
     let period = u64::try_from(period_ms).unwrap_or(0).max(1);
-    ((now / period + slot as u64) % u64::from(MIDGE_FRAMES)) as u32
+    let flap = ((now / period + slot as u64) % u64::from(MIDGE_FLAP)) as u32;
+    flap + if facing_left { 0 } else { MIDGE_RIGHT }
 }
 
-fn midges(g: &mut Gfx, v: &View, cur: &[Midge], prev: Option<&[Midge]>) -> Result<(), Error> {
+/// Wrap rings of the midge layers: goodie 4000 at scale 1.0, ambient 5000 at 1.25 (answers.md
+/// "Midge wrap, bounds and frame period (round 5)").
+/// `j_moucheron1` / `j_moucheron` (answers.md, same place).
+const GOODIE_SPRITE: &str = "moucheron1";
+const AMBIENT_SPRITE: &str = "moucheron";
+const GOODIE_RING: f64 = 4000.0;
+const AMBIENT_RING: f64 = 5000.0;
+const MIDGE_SIZE: f32 = 27.0;
+
+/// Screen x of a midge, interpolated the short way round its ring so the wrap tick does not slide
+/// across the screen, then folded so a midge straddling the wrap shows on the negative side.
+fn midge_x(l: Lerp, prev: Option<i32>, cur: i32, ring: f64) -> f32 {
+    let x = l.ring(prev.map(f64::from), f64::from(cur), ring);
+    if x > ring as f32 - MIDGE_SIZE {
+        x - ring as f32
+    } else {
+        x
+    }
+}
+
+fn midges(
+    g: &mut Gfx,
+    v: &View,
+    cur: &[Midge],
+    prev: Option<&[Midge]>,
+    sprite: &str,
+    ring: f64,
+) -> Result<(), Error> {
     for (i, md) in cur.iter().enumerate().filter(|(_, md)| md.active) {
         let pm = prev.and_then(|p| p.get(i)).filter(|p| p.active);
-        let x = v.l.i(pm.map(|p| p.x), md.x);
+        let x = midge_x(v.l, pm.map(|p| p.x), md.x, ring);
         let y = v.l.i(pm.map(|p| p.y), md.y);
-        g.spr("moucheron", x, y, midge_frame(v.now, md.size, i))?;
+        let frame = midge_frame(v.now, md.frame_ms, i, md.facing_left);
+        g.spr(sprite, x, y, frame)?;
     }
     Ok(())
 }
@@ -593,14 +636,29 @@ mod tests {
         assert_eq!(ring_x(10.0, 4990.0, 50.0), 20.0);
     }
 
-    /// At 300 ms a 30 ms midge is on frame 10 % 6 = 4 and a 34 ms one on 8 % 6 = 2; slot 3 is
-    /// three frames ahead; a bad period does not divide by zero.
+    /// At 300 ms a 30 ms midge is on flap 10 % 2 = 0, a 37 ms one on 8 % 2 = 0 and a 33 ms one on
+    /// 9 % 2 = 1; slot 1 is one flap ahead; a right-facing midge plays frames 2-3; a bad period does not
+    /// divide by zero.
     #[test]
-    fn midges_animate_at_their_own_frame_period() {
-        assert_eq!(midge_frame(300, 30, 0), 4);
-        assert_eq!(midge_frame(300, 34, 0), 2);
-        assert_eq!(midge_frame(300, 30, 3), 1);
-        assert_eq!(midge_frame(300, 0, 0), 300 % 6);
+    fn midges_flap_at_their_own_frame_period_per_facing() {
+        assert_eq!(midge_frame(300, 30, 0, true), 0);
+        assert_eq!(midge_frame(300, 30, 1, true), 1);
+        assert_eq!(midge_frame(300, 37, 0, true), 0);
+        assert_eq!(midge_frame(300, 33, 0, true), 1);
+        assert_eq!(midge_frame(300, 30, 1, false), 3);
+        assert_eq!(midge_frame(300, 0, 0, false), 2);
+    }
+
+    /// An ambient midge at 4990 of 5000 shows 10 px left of the screen; one that was at 5 on the
+    /// previous tick moves the short way round (−15 px), halfway is −2.5.
+    #[test]
+    fn midges_fold_across_the_wrap_without_sliding() {
+        let l = Lerp { alpha: 0.5 };
+        assert_eq!(midge_x(l, None, 4990, AMBIENT_RING), -10.0);
+        assert_eq!(midge_x(l, None, 4972, AMBIENT_RING), 4972.0);
+        assert_eq!(midge_x(l, Some(5), 4990, AMBIENT_RING), -2.5);
+        assert_eq!(midge_x(l, Some(3990), 3995, GOODIE_RING), -7.5);
+        assert_eq!(midge_x(l, Some(100), 110, GOODIE_RING), 105.0);
     }
 
     #[test]
