@@ -169,6 +169,10 @@ impl Audio {
         Ok(self.music.as_ref().map(|p| p.id))
     }
 
+    pub fn stop_music(&mut self) {
+        self.music = None;
+    }
+
     pub fn set_volume(&mut self, voice: Voice, volume: f32) {
         let Some(p) = self.find(voice) else { return };
         if let Err(e) = p.stream.set_gain(volume) {
