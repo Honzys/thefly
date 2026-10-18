@@ -324,11 +324,11 @@ impl World {
             .update(fly_x, fly_w, splatted, self.camera.delta, cx);
     }
 
-    /// Step 10: only while the fly is alive, the contact test (`FUN_0043b157`) and the push
-    /// (`FUN_0043734c`), which may splat the fly. On a tie side1 is horizontal, so the push
-    /// cannot splat.
+    /// Step 10: only while the fly is alive and the game is not paused, the contact test
+    /// (`FUN_0043b157`) and the push (`FUN_0043734c`), which may splat the fly. On a tie side1 is
+    /// horizontal, so the push cannot splat.
     pub fn boot_collision(&mut self, cx: &mut Ctx) {
-        if !self.boot.active || !self.fly.alive() {
+        if !self.boot.active || !self.fly.alive() || self.paused {
             return;
         }
         let Some(contact) = self.boot.contact(self.fly.boot_box()) else {
