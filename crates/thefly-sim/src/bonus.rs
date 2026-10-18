@@ -521,7 +521,7 @@ impl BonusRound {
             }
             self.coins[i].active = false;
             self.coins_taken += 1;
-            // shortcut: 50 plays when 49 is busy and 50 free (`FUN_0040cf55`); no slot state.
+            // Port decision: 50 plays when 49 is busy and 50 free (`FUN_0040cf55`); no slot state.
             let freq = 21_500 + cx.rng.r(500) as u32;
             cx.sound(SoundSlot::RING_A, play_at(freq));
             if self.coins_taken % 50 == 0 {
