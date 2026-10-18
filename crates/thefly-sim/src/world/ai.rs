@@ -1,10 +1,13 @@
 //! W2. The in-game farmer AI (ai-and-rules §2): target controller, per-tick decisions, goodie
 //! decisions and budgets. [`Aligner`] is shared with the bonus-round AI (W3, `bonus.rs`).
 
+use super::World;
+use super::farmer::HITBOX_W;
 use super::goodies::FarmerGoodie;
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::input::FarmerPad;
+use crate::match_state::MatchState;
 
 /// The fly's controller ring (`FUN_0043b845`).
 pub const FLY_RING: i32 = 4392;
@@ -12,6 +15,8 @@ pub const FLY_RING: i32 = 4392;
 pub const WANDER_SPREAD: i32 = 700;
 /// Nuclear decision distance split (ai-and-rules §2.5 step 5).
 pub const NUKE_NEAR: i32 = 801;
+/// The far timer is destroyed below 800, one less than the split (AR §2.5 step 5.4).
+pub const NUKE_FAR_DROP: i32 = 800;
 /// UB guard for the frenzy-on modulus `m = 1 − trunc(frenzyOnRand / L)`, which is 0 when the
 /// quotient is 1 (the original divides by zero; the shipped table never gets there). The port
 /// uses `rand % m.abs().max(FRENZY_DIVISOR_FLOOR)`, which equals `rand % m` for every m ≠ 0.
@@ -28,6 +33,16 @@ pub const ALIGN_STOP_ROLL: i32 = 5;
 pub const ALIGN_STOP_BELOW: i32 = 2;
 /// The Triple bonus applies above this carried-object price.
 pub const TRIPLE_PRICE_THRESHOLD: f32 = 70.0;
+/// Above the threshold the Triple roll gains trunc(pTriple · 0.3).
+pub const TRIPLE_PRICE_BONUS: f64 = 0.3;
+/// The swatter centre is x + 130/2 (AR §1.4).
+pub const SWATTER_CENTRE_DX: i32 = HITBOX_W / 2;
+/// The midge-escape point (farmerX + 90, 430) (AR §2.4 step 4).
+pub const ESCAPE_DX: i32 = 90;
+pub const ESCAPE_Y: i32 = 430;
+/// Boot interval divisors: /5 on the level term, /14 (= 5 + 2 + 7 trap caps) on the trap term.
+pub const BOOT_LEVEL_DIVISOR: i32 = 5;
+pub const BOOT_TRAP_DIVISOR: i32 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AiLevel {
@@ -362,27 +377,447 @@ pub struct FarmerAi {
 
 impl FarmerAi {
     /// `FUN_0043ee0b`: parameters, timers, target the fly, offset, budgets.
+    // shortcut: AR §2.1 says the Triple, Nuclear and boot timers are "created" but not their first
+    // deadline; the port arms them with tripleIdleMs, nukeWaitMs and the boot interval, so each
+    // decision first fires one period in. Revisit with a trace of FUN_0043ee0b.
     pub fn new(level: AiLevel, view: &AiView, cx: &mut Ctx) -> Self {
-        let _ = (level, view, cx);
-        todo!("W2 ai-and-rules §2.1, §2.6")
+        let params = AI_PARAMS[level as usize];
+        let mut ai = Self {
+            level,
+            params,
+            controller: Controller {
+                target: Target::Fly,
+                ring: FLY_RING,
+                spread: params.aim_spread,
+                ..Controller::default()
+            },
+            aligner: Aligner {
+                align_tol: params.align_tol,
+                react_base: params.react_base,
+                react_rand: params.react_rand,
+                ..Aligner::default()
+            },
+            paused: false,
+            dwell: None,
+            wander_timer: Timer::UNARMED,
+            wandering: false,
+            escape_timer: None,
+            escaping: false,
+            escape_flag: false,
+            chase_timer: Timer::UNARMED,
+            chasing: false,
+            frenzy_timer: Timer::UNARMED,
+            frenzy: false,
+            swing_request: false,
+            triple_timer: Timer::armed(cx.now, params.triple_idle_ms),
+            triple_armed: false,
+            nuke_timer: Timer::armed(cx.now, params.nuke_wait_ms),
+            nuke_far: None,
+            boot_timer: Timer::UNARMED,
+            budgets: [0; 3],
+            prev_triple_on: false,
+            prev_midges_on: false,
+        };
+        ai.boot_timer.arm(cx.now, ai.boot_interval(view));
+        ai.controller.reroll_offset(cx);
+        for (item, owned) in view.owned.into_iter().enumerate() {
+            ai.bump_budget(item, owned, cx);
+        }
+        ai
     }
 
     /// `FUN_0043f611` steps 1–8 and 11; the caller moves and swings the farmer with the output.
+    /// Step 11 never fires (gaps §6.2).
     pub fn update(&mut self, view: &AiView, cx: &mut Ctx) -> AiOutput {
-        let _ = (view, cx);
-        todo!("W2 ai-and-rules §2.4, §2.5")
+        if self.paused {
+            return AiOutput::default();
+        }
+        self.controller.spread = self.spread(view);
+        let target = self.target_point(view);
+        self.controller.refresh(view.swatter_centre, target);
+        self.dwell_step(cx);
+        self.wander_step(cx);
+        self.escape_step(view, cx);
+        self.chase_step(view, cx);
+        self.frenzy_step(view, cx);
+        self.align_step(cx);
+        let goodie = self.goodie_step(view, cx);
+        let swing = std::mem::take(&mut self.swing_request);
+        AiOutput {
+            pad: self.aligner.pad(),
+            swing,
+            goodie,
+        }
+    }
+
+    /// 700 while wandering, else aimSpread, cut while Triple is on (AR §2.3).
+    fn spread(&self, view: &AiView) -> i32 {
+        if self.wandering {
+            return WANDER_SPREAD;
+        }
+        if view.triple_on {
+            return self.params.aim_spread - self.params.aim_spread_cut;
+        }
+        self.params.aim_spread
+    }
+
+    fn target_point(&self, view: &AiView) -> (i32, i32) {
+        match self.controller.target {
+            Target::Dummy { x, y } => (x, y),
+            Target::FlyingGoodie => view.farmer_goodie.unwrap_or(view.fly_centre),
+            Target::Fly | Target::BonusTarget(_) => view.fly_centre,
+        }
+    }
+
+    /// A mode change: new target and a fresh offset (AR §2.3).
+    fn retarget(&mut self, target: Target, cx: &mut Ctx) {
+        self.controller.target = target;
+        self.controller.reroll_offset(cx);
+    }
+
+    /// Step 2.
+    // shortcut: "reset speed" is read as clearing the held direction keys. Revisit with
+    // FUN_0043f611.
+    fn dwell_step(&mut self, cx: &mut Ctx) {
+        if !self.dwell.is_some_and(|t| t.expired(cx.now)) {
+            return;
+        }
+        self.aligner.x_dir = 0;
+        self.aligner.y_dir = 0;
+        self.aligner.pending_x_dir = None;
+        self.swing_request = true;
+        self.dwell = None;
+    }
+
+    /// Step 3.
+    fn wander_step(&mut self, cx: &mut Ctx) {
+        let fired = self
+            .wander_timer
+            .ai_tick(cx.now, self.params.wander_check_ms);
+        if !fired || self.escaping || self.chasing {
+            return;
+        }
+        if self.wandering {
+            self.wandering = false;
+            self.wander_timer.arm(cx.now, self.params.wander_check_ms);
+        } else if cx.rng.r(100) < self.params.p_wander {
+            self.wandering = true;
+            self.wander_timer.arm(cx.now, self.params.wander_ms);
+        } else {
+            return;
+        }
+        self.controller.spread = if self.wandering {
+            WANDER_SPREAD
+        } else {
+            self.params.aim_spread
+        };
+        self.controller.reroll_offset(cx);
+    }
+
+    /// Step 4.
+    fn escape_step(&mut self, view: &AiView, cx: &mut Ctx) {
+        let point = Target::Dummy {
+            x: view.swatter_centre.0 - SWATTER_CENTRE_DX + ESCAPE_DX,
+            y: ESCAPE_Y,
+        };
+        let Some(timer) = self.escape_timer.as_mut() else {
+            return;
+        };
+        let fired = !self.wandering && !self.chasing && timer.expired_rearm(cx.now);
+        if fired && !self.escaping && cx.rng.r(100) < self.params.p_escape {
+            timer.arm(cx.now, self.params.escape_ms);
+            self.escaping = true;
+            self.retarget(point, cx);
+        } else if fired {
+            self.escaping = false;
+            self.retarget(Target::Fly, cx);
+        }
+        if self.escaping {
+            self.controller.target = point;
+        }
+    }
+
+    /// Step 5. The goodie ring is not documented; the port keeps the fly's 4392.
+    fn chase_step(&mut self, view: &AiView, cx: &mut Ctx) {
+        let fired = self.chase_timer.ai_tick(cx.now, self.params.chase_off_ms);
+        if fired && !self.escaping && !self.wandering {
+            if self.chasing {
+                self.chasing = false;
+                self.chase_timer.arm(cx.now, self.params.chase_off_ms);
+                self.retarget(Target::Fly, cx);
+            } else if view.farmer_goodie.is_some() && cx.rng.r(100) < self.params.p_chase {
+                self.chasing = true;
+                self.chase_timer.arm(cx.now, self.params.chase_on_ms);
+                self.retarget(Target::FlyingGoodie, cx);
+            }
+        }
+        if self.chasing && view.farmer_goodie.is_none() {
+            self.chasing = false;
+            self.retarget(Target::Fly, cx);
+        }
+    }
+
+    /// Step 6. L is the farmer's bought level.
+    fn frenzy_step(&mut self, view: &AiView, cx: &mut Ctx) {
+        let p = &self.params;
+        let first = u64::try_from(p.frenzy_off_base + p.frenzy_off_rand).unwrap_or(0);
+        if self.frenzy_timer.ai_tick(cx.now, first) {
+            self.toggle_frenzy(view.farmer_level, cx);
+        }
+        if self.frenzy && !view.triple_on {
+            self.swing_request = true;
+        }
+    }
+
+    fn toggle_frenzy(&mut self, level: i32, cx: &mut Ctx) {
+        let p = self.params;
+        if self.frenzy {
+            let n = if level == 0 {
+                p.frenzy_off_rand
+            } else {
+                p.frenzy_off_rand / level
+            };
+            self.frenzy = false;
+            let ms = p.frenzy_off_base + cx.rng.r(n.max(FRENZY_DIVISOR_FLOOR));
+            self.frenzy_timer
+                .arm(cx.now, u64::try_from(ms).unwrap_or(0));
+            return;
+        }
+        if cx.rng.r(100) >= p.p_frenzy {
+            return;
+        }
+        let m = if level == 0 {
+            1
+        } else {
+            1 - p.frenzy_on_rand / level
+        };
+        self.frenzy = true;
+        let ms = p.frenzy_on_base + cx.rng.r(m.abs().max(FRENZY_DIVISOR_FLOOR));
+        self.frenzy_timer
+            .arm(cx.now, u64::try_from(ms).unwrap_or(0));
+    }
+
+    /// Step 7.4–7.5.
+    fn align_step(&mut self, cx: &mut Ctx) {
+        let al = self
+            .aligner
+            .step(self.controller.dx, self.controller.dy, cx);
+        if al.x_aligned && al.y_aligned {
+            self.swing_request = true;
+            self.controller.reroll_offset(cx);
+            self.dwell = None;
+        } else if al.x_aligned && self.dwell.is_none() {
+            self.dwell = Some(Timer::armed(cx.now, self.params.dwell_ms));
+        }
+    }
+
+    /// `FUN_0043f930` (AR §2.5).
+    fn goodie_step(&mut self, view: &AiView, cx: &mut Ctx) -> Option<FarmerGoodie> {
+        if self.prev_triple_on && !view.triple_on {
+            self.triple_timer.arm(cx.now, self.params.triple_idle_ms);
+        }
+        if self.prev_midges_on && !view.midges_on && self.escape_flag {
+            self.end_escape(cx);
+        }
+        self.prev_triple_on = view.triple_on;
+        self.prev_midges_on = view.midges_on;
+        if view.triple_on || view.nuke_on {
+            return None;
+        }
+        self.triple_decision(view, cx)
+            .or_else(|| self.nuke_decision(view, cx))
+            .or_else(|| self.boot_decision(view, cx))
+    }
+
+    fn end_escape(&mut self, cx: &mut Ctx) {
+        self.escape_flag = false;
+        self.escape_timer = None;
+        if self.escaping {
+            self.escaping = false;
+            self.retarget(Target::Fly, cx);
+        }
+    }
+
+    /// Step 4: reason 1 while the fly carries, 2 on the idle timer.
+    fn triple_decision(&mut self, view: &AiView, cx: &mut Ctx) -> Option<FarmerGoodie> {
+        if view.owned[0] <= 0 {
+            return None;
+        }
+        let reason = if !view.fly_carrying {
+            self.triple_idle_reason(cx)
+        } else if !self.triple_armed {
+            self.triple_timer.arm(cx.now, self.params.triple_armed_ms);
+            self.triple_armed = true;
+            1
+        } else if self.triple_timer.expired_rearm(cx.now) {
+            self.triple_armed = false;
+            1
+        } else {
+            0
+        };
+        if reason == 0 {
+            return None;
+        }
+        let p_triple = self.params.p_triple;
+        let bonus = match view.carried_price {
+            Some(price) if reason == 1 && price > TRIPLE_PRICE_THRESHOLD => {
+                (f64::from(p_triple) * TRIPLE_PRICE_BONUS) as i32
+            }
+            _ if reason == 1 => TRIPLE_CHEAP_OBJECT_BONUS,
+            _ => 0,
+        };
+        let p = (p_triple - self.budgets[0]).max(0) + bonus;
+        self.roll(p, FarmerGoodie::Triple, view.owned[0], cx)
+    }
+
+    fn triple_idle_reason(&mut self, cx: &mut Ctx) -> i32 {
+        if self.triple_armed {
+            self.triple_timer.arm(cx.now, self.params.triple_idle_ms);
+            self.triple_armed = false;
+            return 0;
+        }
+        if self.triple_timer.expired_rearm(cx.now) {
+            return 2;
+        }
+        0
+    }
+
+    /// Step 5.
+    fn nuke_decision(&mut self, view: &AiView, cx: &mut Ctx) -> Option<FarmerGoodie> {
+        if view.owned[1] <= 0 {
+            return None;
+        }
+        let d = self.controller.distance;
+        let reason = if self.nuke_timer.expired_rearm(cx.now) {
+            1
+        } else if d < NUKE_NEAR {
+            self.escape_reason(view, cx)
+        } else {
+            let far = self.nuke_far.get_or_insert(Timer::UNARMED);
+            if far.ai_tick(cx.now, self.params.nuke_far_ms) {
+                2
+            } else {
+                0
+            }
+        };
+        let out = if reason == 0 {
+            None
+        } else {
+            let extra = if reason == 3 {
+                self.params.p_nuke_escape
+            } else {
+                0
+            };
+            let p = (self.params.p_nuke - self.budgets[1]).max(0) + extra;
+            self.roll(p, FarmerGoodie::Nuclear, view.owned[1], cx)
+        };
+        if d < NUKE_FAR_DROP {
+            self.nuke_far = None;
+        }
+        out
+    }
+
+    fn escape_reason(&mut self, view: &AiView, cx: &mut Ctx) -> i32 {
+        if !(view.midges_on && !self.escape_flag && view.slowed) {
+            return 0;
+        }
+        self.escape_flag = true;
+        self.escape_timer = Some(Timer::armed(cx.now, self.params.escape_wait_ms));
+        3
+    }
+
+    /// Step 6.
+    fn boot_decision(&mut self, view: &AiView, cx: &mut Ctx) -> Option<FarmerGoodie> {
+        if view.boot_active || view.owned[2] <= 0 || !self.boot_timer.expired(cx.now) {
+            return None;
+        }
+        let p = self.params.p_boot - self.budgets[2];
+        let out = self.roll(p, FarmerGoodie::Boot, view.owned[2], cx);
+        let interval = self.boot_interval(view);
+        self.boot_timer.arm(cx.now, interval);
+        out
+    }
+
+    fn roll(
+        &mut self,
+        p: i32,
+        goodie: FarmerGoodie,
+        owned: i32,
+        cx: &mut Ctx,
+    ) -> Option<FarmerGoodie> {
+        if cx.rng.r(100) >= p {
+            return None;
+        }
+        self.bump_budget(goodie as usize, owned, cx);
+        Some(goodie)
     }
 
     /// `FUN_00440068`.
+    // shortcut: (flyStrength + flySpeed)/2 is taken as a float; the docs do not say whether the
+    // division is integer. Revisit with FUN_00440068.
     pub fn boot_interval(&self, view: &AiView) -> u64 {
-        let _ = view;
-        todo!("W2 ai-and-rules §2.6")
+        let p = &self.params;
+        let (strength, speed) = view.fly_levels;
+        let fly_avg = f64::from(strength + speed) / 2.0;
+        let a = ((f64::from(view.farmer_level) - fly_avg) * f64::from(p.boot_level_k)
+            / f64::from(BOOT_LEVEL_DIVISOR)) as i32;
+        let a = a.min(0);
+        let b = view.trap_count * p.boot_trap_k / BOOT_TRAP_DIVISOR;
+        let interval = p.boot_base_ms - a - b;
+        let interval = if interval <= 0 {
+            p.boot_base_ms
+        } else {
+            interval
+        };
+        u64::try_from(interval).unwrap_or(0)
     }
 
     /// `FUN_0044021a`: item 0 Triple, 1 Nuclear, 2 Boot.
     pub fn bump_budget(&mut self, item: usize, owned: i32, cx: &mut Ctx) {
-        let _ = (item, owned, cx);
-        todo!("W2 ai-and-rules §2.6")
+        let p_item = [self.params.p_triple, self.params.p_nuke, self.params.p_boot];
+        let (Some(&p), Some(_)) = (p_item.get(item), self.budgets.get(item)) else {
+            return;
+        };
+        if cx.rng.rand() % 2 != 0 || owned <= 1 {
+            return;
+        }
+        let k = (p - 5) / owned;
+        if k > 0 {
+            self.budgets[item] += cx.rng.r(k) + 1;
+        }
+    }
+}
+
+impl World {
+    /// What the AI reads this tick (step 6, and `World::new` for [`FarmerAi::new`]).
+    // shortcut: the carried object's `kind` is taken as the index into the food prices. Revisit
+    // if W1's type table maps kinds to price indices differently.
+    pub fn ai_view(&self, m: &MatchState) -> AiView {
+        let f = &self.farmer;
+        let carried_price = self
+            .objects
+            .carried
+            .and_then(|i| self.objects.list.get(i))
+            .and_then(|o| o.kind)
+            .and_then(|k| m.economy.food_prices.get(k).copied());
+        let g = &self.flying_goodies.farmer;
+        let eco = &m.economy;
+        AiView {
+            swatter_centre: (f.x + SWATTER_CENTRE_DX, f.swatter_y()),
+            fly_centre: self.fly.centre(),
+            fly_carrying: self.objects.carrying,
+            carried_price,
+            farmer_goodie: g.active.then_some((g.x + g.w / 2, g.y + g.h / 2)),
+            boot_active: self.boot.active,
+            triple_on: f.triple.on,
+            nuke_on: f.nuclear.on,
+            midges_on: f.midges_on,
+            slowed: f.slowed,
+            owned: [eco.farmer.triple, eco.farmer.nuclear, eco.farmer.boot],
+            farmer_level: eco.farmer.level,
+            fly_levels: (eco.fly.strength, eco.fly.speed),
+            trap_count: i32::try_from(m.traps.slots.len()).unwrap_or(i32::MAX),
+        }
     }
 }
 
@@ -465,5 +900,128 @@ mod tests {
         assert_eq!(a.x_dir, 1);
         step(429, -10, 0, &mut a);
         assert_eq!(a.x_dir, 0);
+    }
+}
+
+#[cfg(test)]
+mod farmer_ai_tests {
+    use super::super::collision::Rect;
+    use super::super::farmer::Farmer;
+    use super::super::farmer::rig::Rig;
+    use super::*;
+    use crate::rng::MsvcRand;
+    use crate::stats::Stats;
+
+    fn view(farmer: &Farmer, fly: (i32, i32), owned: [i32; 3]) -> AiView {
+        AiView {
+            swatter_centre: (farmer.x + SWATTER_CENTRE_DX, farmer.swatter_y()),
+            fly_centre: fly,
+            owned,
+            fly_levels: (2, 2),
+            ..AiView::default()
+        }
+    }
+
+    #[test]
+    fn normal_parameters_follow_the_table() {
+        let p = AI_PARAMS[AiLevel::Normal as usize];
+        assert_eq!(
+            (p.align_tol, p.aim_spread, p.aim_spread_cut, p.dwell_ms),
+            (40, 181, 60, 1000)
+        );
+    }
+
+    /// A 700 ms AI timer is armed on tick 0 (0 ms) and fires on ticks 46 (707 ms), 92
+    /// (1415 ≥ 1407) and 138 (2123 ≥ 2115): each re-arm counts from the firing tick.
+    #[test]
+    fn ai_timers_fire_on_ticks_46_92_and_138_for_700_ms() {
+        let mut rig = Rig::new(1);
+        let farmer = Farmer::new(0, &mut rig.cx(0));
+        let v = view(&farmer, (farmer.x + 65, 300), [0; 3]);
+        let mut ai = FarmerAi::new(AiLevel::Normal, &v, &mut rig.cx(0));
+        (
+            ai.params.wander_check_ms,
+            ai.params.wander_ms,
+            ai.params.p_wander,
+        ) = (700, 700, 100);
+        let mut flips = Vec::new();
+        for tick in 0..=140 {
+            let was = ai.wandering;
+            ai.update(&v, &mut rig.at(tick));
+            if ai.wandering != was {
+                flips.push(tick);
+            }
+        }
+        assert_eq!(flips, [46, 92, 138]);
+    }
+
+    /// FUN_00440068 at Normal, L 0, fly levels (2, 2), 7 traps: a = trunc((0 − 2) · 7000 / 5) =
+    /// −2800, b = 7 · 4000 / 14 = 2000, so 11000 + 2800 − 2000.
+    #[test]
+    fn the_boot_interval_follows_the_levels_and_traps() {
+        let mut rig = Rig::new(1);
+        let farmer = Farmer::new(0, &mut rig.cx(0));
+        let mut v = view(&farmer, (0, 0), [0; 3]);
+        v.trap_count = 7;
+        let ai = FarmerAi::new(AiLevel::Normal, &v, &mut rig.cx(0));
+        assert_eq!(ai.boot_interval(&v), 11_800);
+        v.farmer_level = 5;
+        assert_eq!(ai.boot_interval(&v), 11_000 - 2000);
+    }
+
+    /// Seed 1: 41 and 18467 are odd (no bump); 6334 is even, k = (30 − 5) / 2 = 12, and
+    /// 26500 % 12 + 1 = 5. With one owned the draw still happens but nothing is added.
+    #[test]
+    fn a_budget_grows_on_an_even_draw_with_more_than_one_owned() {
+        let mut rig = Rig::new(1);
+        let farmer = Farmer::new(0, &mut rig.cx(0));
+        let v = view(&farmer, (0, 0), [0; 3]);
+        let mut ai = FarmerAi::new(AiLevel::Normal, &v, &mut rig.cx(0));
+        (rig.rng, ai.budgets) = (MsvcRand::new(1), [0; 3]);
+        for _ in 0..3 {
+            ai.bump_budget(0, 2, &mut rig.cx(0));
+        }
+        assert_eq!(ai.budgets, [5, 0, 0]);
+        ai.bump_budget(1, 1, &mut rig.cx(0));
+        // The single-owned bump draws 19169, so the next draw is 15724.
+        assert_eq!((ai.budgets, rig.rng.rand()), ([5, 0, 0], 15724));
+    }
+
+    /// A W1-free stand-in for the 1P scenario: a still fly, the AI drives the real farmer for 30
+    /// s. It closes to within alignTol, swings, and never asks for a goodie it does not own.
+    #[test]
+    fn the_ai_closes_on_a_still_fly_and_swings_without_unowned_goodies() {
+        let mut rig = Rig::new(1);
+        let mut farmer = Farmer::new(0, &mut rig.cx(0));
+        let fly = (700, 470);
+        let mut ai = FarmerAi::new(AiLevel::Normal, &view(&farmer, fly, [0; 3]), &mut rig.cx(0));
+        let mut stats = Stats::default();
+        let (mut closest, mut goodies) = (i32::MAX, 0);
+        let fly_box = Rect::new(fly.0 - 60, fly.1 - 47, 120, 94);
+        for tick in 1..=30 * 65 {
+            let v = view(&farmer, fly, [0; 3]);
+            let mut cx = rig.at(tick);
+            let out = ai.update(&v, &mut cx);
+            goodies += i32::from(out.goodie.is_some());
+            farmer.move_by(&out.pad, 0.0);
+            farmer.swing_and_hit(out.swing, fly_box, &mut stats, &mut cx);
+            closest = closest.min((v.swatter_centre.0 - fly.0).abs());
+        }
+        assert!(closest <= ai.params.align_tol, "closest {closest}");
+        assert!(stats.swings > 0 && goodies == 0);
+    }
+
+    /// With goodies owned, the decisions do fire.
+    #[test]
+    fn owned_goodies_get_requested() {
+        let mut rig = Rig::new(3);
+        let farmer = Farmer::new(0, &mut rig.cx(0));
+        let v = view(&farmer, (farmer.x + 2000, 450), [3, 3, 3]);
+        let mut ai = FarmerAi::new(AiLevel::Intelligent, &v, &mut rig.cx(0));
+        let asked: Vec<FarmerGoodie> = (1..=120 * 65)
+            .filter_map(|t| ai.update(&v, &mut rig.at(t)).goodie)
+            .collect();
+        assert!(asked.contains(&FarmerGoodie::Nuclear) && asked.contains(&FarmerGoodie::Triple));
+        assert!(asked.contains(&FarmerGoodie::Boot));
     }
 }
