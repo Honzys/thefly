@@ -14,7 +14,7 @@ use crate::gfx::{BLACK, Gfx, NORMAL, SELECTED, WHITE};
 pub fn logo(g: &mut Gfx, v: &View, logo: &Logo) -> Result<(), Error> {
     g.spr("Present", 0.0, 0.0, 0)?;
     // shortcut: "default GDI font" is the Windows system face; the Arial stand-in is used
-    g.text(ARIAL_BLACK, 13, "Release 1.2", 700.0, 7.0, WHITE)?;
+    g.text_fit(ARIAL_BLACK, 13, "Release 1.2", (700.0, 7.0), 90.0, WHITE)?;
     let prev = match v.prev.map(|s| &s.screen) {
         Some(Screen::Logo(p)) => Some(p.fade.alpha),
         _ => None,
@@ -222,8 +222,8 @@ pub fn keys_page(g: &mut Gfx, players: Players) -> Result<(), Error> {
     }
     // shortcut: open item O6, the fill colour is unresolved; black until it is
     g.fill(0.0, 0.0, 400.0, SCREEN_H, BLACK)?;
-    g.text(ARIAL_BLACK, 35, "1 Player : ", 130.0, 245.0, WHITE)?;
-    g.text(ARIAL_BLACK, 35, "The Fly", 130.0, 285.0, WHITE)
+    g.text_fit(ARIAL_BLACK, 35, "1 Player : ", (130.0, 245.0), 260.0, WHITE)?;
+    g.text_fit(ARIAL_BLACK, 35, "The Fly", (130.0, 285.0), 260.0, WHITE)
 }
 
 /// SR §2.5. The YES/NO x use the steady-state values (open item O15 covers the first show).
@@ -275,13 +275,14 @@ pub fn high_scores(g: &mut Gfx, v: &View, hs: &HighScoreScreen) -> Result<(), Er
             _ => row.name.clone(),
         };
         let cells = [
-            (50.0, format!("{}.", i + 1)),
-            (100.0, name),
-            (250.0, format!("{}  Pts", row.score)),
+            (50.0, 45.0, format!("{}.", i + 1)),
+            (100.0, 145.0, name),
+            (250.0, 300.0, format!("{}  Pts", row.score)),
         ];
-        for (x, s) in &cells {
-            g.text(ARIAL_BLACK, 25, s, x - 1.0, row_y(i) + 1.0, BLACK)?;
-            g.text(ARIAL_BLACK, 25, s, *x, row_y(i), c)?;
+        for (x, w, s) in &cells {
+            let size = g.fit_size(ARIAL_BLACK, 25, s, *w)?;
+            g.text(ARIAL_BLACK, size, s, x - 1.0, row_y(i) + 1.0, BLACK)?;
+            g.text(ARIAL_BLACK, size, s, *x, row_y(i), c)?;
         }
     }
     if hs.revealed == 0 || !hs.sweep.is_armed() {

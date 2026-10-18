@@ -13,6 +13,9 @@ pub const NORMAL: Color = Color::RGB(0, 168, 255);
 /// Default outline offset of `FUN_0044daa6` (SR §1.1).
 pub const OUTLINE_PX: f32 = 3.0;
 
+/// The smallest point size [`Gfx::fit_size`] shrinks to.
+const MIN_FIT_SIZE: u16 = 8;
+
 pub struct Gfx<'g, 'a, 'tc> {
     pub r: &'g mut Renderer<'a, 'tc>,
 }
@@ -171,6 +174,30 @@ impl Gfx<'_, '_, '_> {
         c: Color,
     ) -> Result<(), Error> {
         self.r.draw_text(font, size, s, (x, y), c)
+    }
+
+    /// The largest size up to `size` at which `s` is at most `max_w` wide, never below
+    /// [`MIN_FIT_SIZE`]. The stand-in for Arial Black is wider than the original face.
+    pub fn fit_size(&mut self, font: &str, size: u16, s: &str, max_w: f32) -> Result<u16, Error> {
+        let mut fit = size;
+        while fit > MIN_FIT_SIZE && self.r.text_width(font, fit, s)? > max_w {
+            fit -= 1;
+        }
+        Ok(fit)
+    }
+
+    /// `s` at `(x, y)`, shrunk until it is at most `max_w` wide.
+    pub fn text_fit(
+        &mut self,
+        font: &str,
+        size: u16,
+        s: &str,
+        (x, y): (f32, f32),
+        max_w: f32,
+        c: Color,
+    ) -> Result<(), Error> {
+        let size = self.fit_size(font, size, s, max_w)?;
+        self.text(font, size, s, x, y, c)
     }
 
     /// `s` centred on `cx`.

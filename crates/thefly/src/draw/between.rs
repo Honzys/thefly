@@ -70,10 +70,11 @@ pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> R
     for (i, &x) in SHOP_SLOTS[..5].iter().enumerate() {
         let k = item0 + i;
         let price = format!("{} $", e.item_prices[k]);
-        let w = g.r.text_width(ARIAL_BLACK, 18, &price)?;
+        let size = g.fit_size(ARIAL_BLACK, 18, &price, BOX_W - 8.0)?;
+        let w = g.r.text_width(ARIAL_BLACK, size, &price)?;
         g.text(
             ARIAL_BLACK,
-            18,
+            size,
             &price,
             x + BOX_DX + BOX_W - 5.0 - w,
             12.0,
@@ -86,7 +87,9 @@ pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> R
         }
         g.spr("Goodies", x, 541.0, icon0 + i as u32)?;
         let count = (x + BOX_DX + BOX_W / 2.0, 566.0);
-        g.text_centred(ARIAL_BLACK, 18, &format!("x{owned}"), count, WHITE)?;
+        let owned = format!("x{owned}");
+        let size = g.fit_size(ARIAL_BLACK, 18, &owned, BOX_W - 4.0)?;
+        g.text_centred(ARIAL_BLACK, size, &owned, count, WHITE)?;
     }
     let money = match (&s.tally, fly) {
         (Some(t), _) if t.side == s.side => t.shown,
@@ -114,7 +117,14 @@ pub fn traps_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &TrapsShop) -> Resul
         g.spr("p_fleche", x, y, v.anim(30, 3))?;
     }
     let tokens = m.economy.farmer.tokens;
-    g.text(ARIAL_BLACK, 30, &format!("x{tokens}"), 680.0, 540.0, GREEN)?;
+    g.text_fit(
+        ARIAL_BLACK,
+        30,
+        &format!("x{tokens}"),
+        (680.0, 540.0),
+        110.0,
+        GREEN,
+    )?;
     g.fade(shop_fade(v, s.fade.alpha))
 }
 
@@ -182,7 +192,7 @@ pub fn bourse(g: &mut Gfx, _v: &View, m: &MatchState, b: &Bourse) -> Result<(), 
         }
         let label = format!("{}$", price(obj));
         let lx = x - 5.0 - shift(&label, 5.0, 10.0);
-        g.text(ARIAL_BLACK, 22, &label, lx, base + 5.0, WHITE)?;
+        g.text_fit(ARIAL_BLACK, 22, &label, (lx, base + 5.0), 64.0, WHITE)?;
     }
     let (left, right) = (e.farmer.score, e.fly.score);
     let right_leads = right >= left;

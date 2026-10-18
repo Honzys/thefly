@@ -13,6 +13,7 @@ pub use sdl3::pixels::Color;
 pub use sdl3::render::FRect;
 
 use crate::error::{Error, sdl};
+use crate::fonts;
 
 /// Cell `index` of a sprite sheet cut into `cols` x `rows` equal cells, numbered row by row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub(crate) struct AssetStore<'tc> {
     creator: &'tc TextureCreator<WindowContext>,
     ttf: Sdl3TtfContext,
     data_dir: PathBuf,
+    os_fonts: Vec<PathBuf>,
     sprites: HashMap<String, Texture<'tc>>,
     fonts: HashMap<(String, u16), Font<'static>>,
     texts: HashMap<TextKey, Texture<'tc>>,
@@ -65,6 +67,7 @@ impl<'tc> AssetStore<'tc> {
             creator,
             ttf,
             data_dir: data_dir.to_path_buf(),
+            os_fonts: fonts::os_dirs(),
             sprites: HashMap::new(),
             fonts: HashMap::new(),
             texts: HashMap::new(),
@@ -82,12 +85,12 @@ impl<'tc> AssetStore<'tc> {
         }
     }
 
-    /// `name` is a file name in `data/rsc/`, for example `casual.ttf`.
+    /// `name` is a file name in `data/rsc/`, or `|`-separated candidates (see `fonts`).
     fn font(&mut self, name: &str, size: u16) -> Result<&Font<'static>, Error> {
         match self.fonts.entry((name.to_owned(), size)) {
             Entry::Occupied(e) => Ok(e.into_mut()),
             Entry::Vacant(e) => {
-                let path = self.data_dir.join("rsc").join(name);
+                let path = fonts::resolve(&self.data_dir.join("rsc"), &self.os_fonts, name);
                 // the sdl3 crate panics on non-UTF-8 font paths, so reject them here
                 if path.to_str().is_none() {
                     return Err(Error::Sdl(format!(
@@ -207,7 +210,7 @@ impl Renderer<'_, '_> {
         Ok(())
     }
 
-    /// Draws `text` in font `font` (a file in `data/rsc/`, e.g. `casual.ttf`) at `size` points.
+    /// Draws `text` in font `font` (see `fonts`) at `size` points.
     pub fn draw_text(
         &mut self,
         font: &str,

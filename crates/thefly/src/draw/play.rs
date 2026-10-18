@@ -440,7 +440,14 @@ fn icons(
         if n == 0 {
             g.spr("croix_goodies", x + 3.0, y + 3.0, 0)?;
         } else {
-            g.text(ARIAL_BLACK, 22, &n.to_string(), x + 4.0, y + 24.0, WHITE)?;
+            g.text_fit(
+                ARIAL_BLACK,
+                22,
+                &n.to_string(),
+                (x + 4.0, y + 24.0),
+                30.0,
+                WHITE,
+            )?;
         }
     }
     Ok(())
