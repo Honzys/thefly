@@ -927,7 +927,8 @@ mod tests {
         assert_eq!(m.credits.pair, 0);
         tap(&mut rig, &mut s, Scancode::ESCAPE);
         assert_eq!(menu_page(&s), Some(crate::menu::Page::Credits(8)));
-        for _ in 0..116 {
+        // The slide-out stops on tick 131 after the Esc press (menu.rs, round 5); the tap is two.
+        for _ in 0..128 {
             rig.step(&[], |k, cx| s.tick(k, cx));
         }
         assert_eq!(menu_page(&s), Some(crate::menu::Page::Credits(8)));
