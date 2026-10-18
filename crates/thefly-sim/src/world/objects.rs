@@ -244,29 +244,30 @@ impl Objects {
     }
 
     /// §5.5 step 1 in the two passes of `FUN_0042c888` (answers.md "Object fan push"): every
-    /// active object in ascending index gets its landing dust and, when not held, the motion of
-    /// §5.4; then each moving collectible object, in descending index, the object–object step
-    /// and the fan push.
+    /// active object in ascending index gets its landing dust, joins the pass-2 list when it is
+    /// moving and collectible, then, when not held, takes the motion of §5.4; pass 2 walks that
+    /// list in descending index with the object–object step and the fan push.
     ///
-    /// shortcut: answers.md "Object fan push" and "Object side test" leave open whether the
-    /// moving gate is read when pass 2 visits (taken here, so an object pushed earlier in pass 2
-    /// is visited) and which touching object is picked (the first in index order).
+    /// shortcut: answers.md "Object side test" does not say which touching object is picked;
+    /// the port takes the first in index order.
     pub fn step_objects(&mut self, delta: f64, traps: &Traps, cx: &mut Ctx) {
+        let mut moving = Vec::with_capacity(self.list.len());
         for i in 0..self.list.len() {
             if !self.list[i].active {
                 continue;
             }
             self.landing_dust(i, cx);
-            if !self.list[i].held {
-                self.list[i].motion(delta);
+            let o = &mut self.list[i];
+            if o.collectible && o.state != ObjState::Rest {
+                moving.push(i);
+            }
+            if !o.held {
+                o.motion(delta);
             }
         }
-        for i in (0..self.list.len()).rev() {
-            let o = &self.list[i];
-            if o.active && o.collectible && o.state != ObjState::Rest {
-                self.interact(i, cx);
-                self.fan_bounce(i, traps, cx);
-            }
+        for &i in moving.iter().rev() {
+            self.interact(i, cx);
+            self.fan_bounce(i, traps, cx);
         }
     }
 
