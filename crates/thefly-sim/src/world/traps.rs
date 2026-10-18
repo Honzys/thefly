@@ -2,13 +2,13 @@
 //! §7.4). Built each period from the shop's [`TrapLayout`]. Ticks step 13.
 
 use super::collision::{Rect, Shape, fly_outline, outlines_overlap};
-use super::fly::RawDamage;
+use super::fly::{Fly, RawDamage};
 use super::lift::SHOP_SCALE;
 use super::{OBJECT_PARALLAX, SCREEN_W, W, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
-use crate::data::Size;
-use crate::event::{Pan, PlayParams, SoundOp, SoundSlot};
+use crate::data::{Outline, Size};
+use crate::event::{Effect, Event, Pan, PlayParams, SoundOp, SoundSlot};
 use crate::match_state::TrapLayout;
 
 pub const MAX_FLYPAPERS: usize = 7;
@@ -74,10 +74,36 @@ pub const ARC_HZ: i32 = 11_025;
 /// fly"); the fly's arc target sits 45 px below its top.
 pub const GRILL_INSET: i32 = 60;
 pub const ARC_TARGET_DY: i32 = 45;
-/// An arc on the fly throws 10 sparks (`FUN_00428ffc`) of 8 draws each: R(5), R(5), the frame,
-/// R(10) sign, R(181) + 70, R(10) sign, R(181) + 70, R(60) + 100 ms life.
-pub const ARC_SPARKS: u32 = 10;
-pub const SPARK_DRAWS: u32 = 8;
+/// Step 7, the arc fit: `j_eclaires` frames are 125 × 156 at y 78, scaled by
+/// 1 + (target y − 234) / 156 (0.02 when that ratio is ≤ −1), and must sit in
+/// [zapper x + 55, zapper x − 30 + zapper w]. Inside, the frame is R(4) + 1.
+pub const ARC_Y: i32 = 78;
+pub const ARC_FRAME_W: f64 = 125.0;
+pub const ARC_FRAME_H: f64 = 156.0;
+pub const ARC_FIT_BOTTOM: i32 = 234;
+pub const ARC_MIN_SCALE: f64 = 0.02;
+pub const ARC_LEFT_INSET: i32 = 55;
+pub const ARC_RIGHT_INSET: i32 = 30;
+pub const ARC_FRAME_ROLL: i32 = 4;
+/// An arc on the fly throws up to 10 sparks (`FUN_00428ffc`) into the zapper's 30-slot pool,
+/// one per free slot, each of 8 draws: R(5), R(5), frame R(3 + 1), R(10) < 6 negates vx,
+/// R(181) + 70, R(10) < 4 negates vy, R(181) + 70, then R(60) + 100 ms life.
+pub const ARC_SPARKS: usize = 10;
+pub const SPARK_POOL: usize = 30;
+pub const SPARK_JITTER: i32 = 5;
+/// `etincelle` is a 3-frame sheet (screens-and-rendering §4.6).
+pub const SPARK_FRAMES: i32 = 3;
+pub const SPARK_NEG_X_BELOW: i32 = 6;
+pub const SPARK_NEG_Y_BELOW: i32 = 4;
+pub const SPARK_SPEED_RAND: i32 = 181;
+pub const SPARK_SPEED_BASE: i32 = 70;
+pub const SPARK_LIFE_RAND: i32 = 60;
+pub const SPARK_LIFE_BASE_MS: i32 = 100;
+/// The solid step `FUN_00428003`: at most this many 1 px steps out of a trap.
+pub const SOLID_TRIES: u32 = 1000;
+/// The flypaper's catch box is the fly frame inset by 50 left and right and 25 at the top.
+pub const CATCH_INSET_X: i32 = 50;
+pub const CATCH_INSET_TOP: i32 = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrapKind {
@@ -182,8 +208,13 @@ pub struct Zapper {
     /// An arc is on (slot 39 played at its start), until `arc_timer` runs out.
     pub arcing: bool,
     pub arc_timer: Timer,
-    /// +0x948: after a failed arc roll, no arc for 100 ms.
+    /// +0x948: after an arc roll, no arc for 100 ms.
     pub retry: Timer,
+    /// The last fitted arc (screen box, from y [`ARC_Y`]) and its frame 1..=4.
+    pub arc: Rect,
+    pub arc_frame: i32,
+    /// The spark pool: a slot is free once its spark's life has run out.
+    pub sparks: [Timer; SPARK_POOL],
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -283,7 +314,8 @@ pub fn play_fan_hit(cx: &mut Ctx) {
 
 impl Zapper {
     /// `FUN_00428b47` for one target (answers.md "Zapper arc reach and schedule"): column, no
-    /// arc on or retry running, reach, then the R(100) chance. True when an arc starts.
+    /// arc on or retry running, reach, the R(100) chance, then the arc fit. True when an arc
+    /// starts; a fit that fails starts nothing and leaves the retry unarmed.
     fn arc_at(&mut self, t: Rect, size: Size, cx: &mut Ctx) -> bool {
         let zx = visible_x(self.screen_x, size.w);
         let column = t.x - size.w <= zx && zx <= t.x + t.w;
@@ -298,8 +330,13 @@ impl Zapper {
             self.retry.arm(cx.now, ARC_RETRY_MS);
             return false;
         }
+        let Some(frame) = fit_arc(&mut self.arc, t, zx, size.w, cx) else {
+            return false;
+        };
+        self.arc_frame = frame;
         let ms = cx.rng.r(ARC_LEN_RAND) + ARC_LEN_BASE_MS;
         self.arc_timer.arm(cx.now, u64::try_from(ms).unwrap_or(0));
+        self.retry.arm(cx.now, ARC_RETRY_MS);
         self.arcing = true;
         let freq = cx.rng.r(ARC_HZ_RAND) + ARC_HZ;
         let params = PlayParams {
@@ -309,6 +346,107 @@ impl Zapper {
         cx.sound(SoundSlot::ZAPPER_ARC, SoundOp::Play(params));
         true
     }
+}
+
+/// Step 7 of "Zapper arc reach (O9)": fits the arc over target `t` into `arc` and returns its
+/// frame, or None when it overhangs both insets by more than half its width. Compared in f64;
+/// the original's float compares are [I].
+fn fit_arc(arc: &mut Rect, t: Rect, zx: i32, zw: i32, cx: &mut Ctx) -> Option<i32> {
+    let ratio = f64::from(t.y - ARC_FIT_BOTTOM) / ARC_FRAME_H;
+    let scale = if ratio <= -1.0 {
+        ARC_MIN_SCALE
+    } else {
+        1.0 + ratio
+    };
+    let w = ARC_FRAME_W * scale;
+    let centre = (f64::from(t.x) + f64::from(t.w) / 2.0) as i32;
+    let x = (f64::from(centre) - w / 2.0) as i32;
+    let (left, right) = (zx + ARC_LEFT_INSET, zx - ARC_RIGHT_INSET + zw);
+    let (x0, x1) = (f64::from(x), f64::from(x) + w);
+    let frame = if x >= left && x1 <= f64::from(right) {
+        cx.rng.r(ARC_FRAME_ROLL) + 1
+    } else if x < left && f64::from(left) - x0 <= w / 2.0 {
+        3
+    } else if x1 > f64::from(right) && x1 - f64::from(right) <= w / 2.0 {
+        2
+    } else {
+        return None;
+    };
+    *arc = Rect::new(x, ARC_Y, w as i32, (ARC_FRAME_H * scale) as i32);
+    Some(frame)
+}
+
+/// `FUN_00428ffc`: up to [`ARC_SPARKS`] sparks from the bottom centre of the zapper's arc, one
+/// per free pool slot. Which R(5) offsets x and which y is [I].
+fn throw_sparks(z: &mut Zapper, cx: &mut Ctx) {
+    let (x, y) = (z.arc.x + z.arc.w / 2, z.arc.y + z.arc.h);
+    let now = cx.now;
+    let free = z.sparks.iter_mut().filter(|s| s.expired(now));
+    for slot in free.take(ARC_SPARKS) {
+        let dx = cx.rng.r(SPARK_JITTER);
+        let dy = cx.rng.r(SPARK_JITTER);
+        let frame = cx.rng.r(SPARK_FRAMES + 1);
+        let sx = if cx.rng.r(10) < SPARK_NEG_X_BELOW {
+            -1
+        } else {
+            1
+        };
+        let vx = (cx.rng.r(SPARK_SPEED_RAND) + SPARK_SPEED_BASE) * sx;
+        let sy = if cx.rng.r(10) < SPARK_NEG_Y_BELOW {
+            -1
+        } else {
+            1
+        };
+        let vy = (cx.rng.r(SPARK_SPEED_RAND) + SPARK_SPEED_BASE) * sy;
+        let life_ms = cx.rng.r(SPARK_LIFE_RAND) + SPARK_LIFE_BASE_MS;
+        slot.arm(cx.now, u64::try_from(life_ms).unwrap_or(0));
+        cx.emit(Event::Effect(Effect::Spark {
+            x: x + dx,
+            y: y + dy,
+            frame,
+            vx,
+            vy,
+            life_ms,
+        }));
+    }
+}
+
+/// `FUN_00428003` (answers.md "Zapper and flypaper: solid push-out"): when the trap's outline
+/// meets the fly's, the fly goes back to its previous position and steps 1 px against vx, then
+/// against vy while vy ≠ 0, until clear; then v = trunc(−v / 1.4). The trap also goes back to
+/// its previous position, which is a no-op here: traps run the object motion `FUN_0042ea74`,
+/// whose state-0 save (FW §5.4 step 4) leaves the previous position at the current one [I].
+fn push_out(fly: &mut Fly, trap: &Shape<'_>) {
+    let outline = fly_outline();
+    let touches = |fly: &Fly| {
+        let f = Shape {
+            x: fly.x,
+            y: fly.y,
+            size: fly.size,
+            outline: &outline,
+        };
+        outlines_overlap(trap, &f, SCREEN_WRAP)
+    };
+    if !touches(fly) {
+        return;
+    }
+    (fly.x, fly.y) = (fly.prev_x, fly.prev_y);
+    for _ in 0..SOLID_TRIES {
+        if !touches(fly) {
+            break;
+        }
+        fly.x -= fly.vx.signum();
+        if fly.vy != 0 && touches(fly) {
+            fly.y -= fly.vy.signum();
+        }
+    }
+    fly.vx = (f64::from(-fly.vx) / FLYPAPER_DRAG) as i32;
+    fly.vy = (f64::from(-fly.vy) / FLYPAPER_DRAG) as i32;
+}
+
+/// `FUN_0042825c`: box overlap with both bounds inclusive.
+fn boxes_touch(a: &Rect, b: &Rect) -> bool {
+    a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h
 }
 
 impl Traps {
@@ -355,6 +493,9 @@ impl Traps {
                         arcing: false,
                         arc_timer: Timer::UNARMED,
                         retry: Timer::UNARMED,
+                        arc: Rect::default(),
+                        arc_frame: 0,
+                        sparks: [Timer::UNARMED; SPARK_POOL],
                     });
                 }
                 _ => {}
@@ -528,7 +669,7 @@ impl World {
             return;
         }
         if self.fly.alive() {
-            self.flypaper_drag(cx);
+            self.flypaper_step(cx);
         }
         // answers.md "Fan strength": the fan skips the fly only while it is splatted (+0x2a4).
         if !self.fly.splatted {
@@ -538,21 +679,43 @@ impl World {
         self.zapper_hits(cx);
     }
 
-    /// FW §7.4 flypaper: both velocity components / 1.4 per overlapping tick, no sound.
-    fn flypaper_drag(&mut self, cx: &Ctx) {
-        let fly = self.fly_rect();
-        let touching = self.traps.flypapers.iter().any(|p| {
+    /// `FUN_0042663b` per flypaper (answers.md "Zapper and flypaper: solid push-out"): the solid
+    /// step, then v / 1.4 when the fly's catch box touches the paper (inclusive), no sound.
+    ///
+    /// shortcut: the flypaper's outline source is undocumented and there is no `.bor`; the port
+    /// uses the frame's rectangle outline. Revisit if the original builds it from the mask, as
+    /// it does for the zapper (`FUN_0042dda4`).
+    fn flypaper_step(&mut self, cx: &Ctx) {
+        for i in 0..self.traps.flypapers.len() {
+            let p = self.traps.flypapers[i];
             let sprite = if p.variant2 {
                 FLYPAPER_VARIANT_SPRITE
             } else {
                 TrapKind::Flypaper.spec().sprite
             };
             let size = cx.data.size(sprite);
-            Rect::new(visible_x(p.screen_x, size.w), p.y, size.w, size.h).overlaps(&fly)
-        });
-        if touching {
-            self.fly.vx = (f64::from(self.fly.vx) / FLYPAPER_DRAG) as i32;
-            self.fly.vy = (f64::from(self.fly.vy) / FLYPAPER_DRAG) as i32;
+            let paper = Rect::new(visible_x(p.screen_x, size.w), p.y, size.w, size.h);
+            if paper.overlaps(&self.fly_rect()) {
+                let outline = Outline::rect(size);
+                let shape = Shape {
+                    x: paper.x,
+                    y: paper.y,
+                    size,
+                    outline: &outline,
+                };
+                push_out(&mut self.fly, &shape);
+            }
+            let f = self.fly_rect();
+            let catch = Rect::new(
+                f.x + CATCH_INSET_X,
+                f.y + CATCH_INSET_TOP,
+                f.w - 2 * CATCH_INSET_X,
+                f.h - CATCH_INSET_TOP,
+            );
+            if boxes_touch(&catch, &paper) {
+                self.fly.vx = (f64::from(self.fly.vx) / FLYPAPER_DRAG) as i32;
+                self.fly.vy = (f64::from(self.fly.vy) / FLYPAPER_DRAG) as i32;
+            }
         }
     }
 
@@ -594,12 +757,10 @@ impl World {
     }
 
     /// `FUN_004288fe` per zapper in index order (answers.md "Zapper arc on the fly"), each only
-    /// while the fly is not dying, splatted or zapped: the grill near the top of the column, then,
-    /// grilled or not, that zapper's arc test on (x, y + 45, w). An arc pushes the fly up 180,
+    /// while the fly is not dying, splatted or zapped. The zapper's x is unwrapped first (x −
+    /// wrap when x ≥ wrap − w, round 3). Inside the column the grill near the top; outside it the
+    /// solid step. Then that zapper's arc test on (x, y + 45, w): an arc pushes the fly up 180,
     /// throws its sparks and adds 1.
-    ///
-    /// shortcut: the off-column branch `FUN_00428003` is open in answers.md "Port decisions";
-    /// the sparks' 30-slot pool is not modelled, so every arc draws all 80. Revisit when read.
     fn zapper_hits(&mut self, cx: &mut Ctx) {
         let size = TrapKind::Zapper.spec_size(cx);
         for i in 0..self.traps.zappers.len() {
@@ -607,20 +768,28 @@ impl World {
             if f.dying || f.splatted || f.zapper_splat {
                 return;
             }
-            let zx = visible_x(self.traps.zappers[i].screen_x, size.w);
+            let z = &self.traps.zappers[i];
+            let zx = visible_x(z.screen_x, size.w);
             let column = f.x <= zx + size.w - GRILL_INSET && f.x + f.size.w >= zx + GRILL_INSET;
-            if column && f.y <= self.traps.zappers[i].y + size.h - GRILL_MARGIN {
+            if !column {
+                let shape = Shape {
+                    x: zx,
+                    y: z.y,
+                    size,
+                    outline: cx.data.outline(TrapKind::Zapper.spec().sprite),
+                };
+                push_out(&mut self.fly, &shape);
+            } else if f.y <= z.y + size.h - GRILL_MARGIN {
                 self.fly.grill(cx);
             }
             let f = &self.fly;
             let target = Rect::new(f.x, f.y + ARC_TARGET_DY, f.size.w, f.size.h);
-            if !self.traps.zappers[i].arc_at(target, size, cx) {
+            let z = &mut self.traps.zappers[i];
+            if !z.arc_at(target, size, cx) {
                 continue;
             }
             self.fly.vy -= ARC_PUSH;
-            for _ in 0..ARC_SPARKS * SPARK_DRAWS {
-                let _ = cx.rng.rand();
-            }
+            throw_sparks(z, cx);
             self.fly
                 .add_raw_damage(ARC_DAMAGE, RawDamage::ZapperArc, cx);
         }
@@ -771,8 +940,11 @@ mod tests {
 mod layout_tests {
     use super::super::farmer::rig::Rig;
     use super::*;
+    use crate::data::Outline;
+    use crate::event::Effect;
     use crate::event::Event;
     use crate::match_state::{MatchConfig, MatchState, Players, TrapSlot};
+    use crate::rng::MsvcRand;
 
     fn slot(kind: TrapKind, x: i32) -> TrapSlot {
         TrapSlot {
@@ -843,17 +1015,44 @@ mod layout_tests {
         assert!(w.traps.fans[0].facing_right);
     }
 
-    /// A flypaper at stored 500 (screen 500, 53 × 300 from y 0) divides v by 1.4 per tick.
+    /// answers.md "Zapper and flypaper: solid push-out": the drag tests the fly box (x + 50,
+    /// y + 25, w − 100, h − 25) inclusively. A flypaper at stored 500 covers 500..553 × 0..300; a
+    /// fly at y 272 has its outline rows (301..356) below the paper, so no solid hit. At x 430 the
+    /// box's right edge is 500: v / 1.4. At x 429 it is 499: nothing.
     #[test]
-    fn a_flypaper_divides_the_fly_speed_by_1_4() {
+    fn a_flypaper_drags_through_the_inset_catch_box() {
         let mut rig = Rig::new(1);
         let mut w = world_with(vec![slot(TrapKind::Flypaper, 500)], &mut rig);
-        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (480, 100, 300, -140);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (430, 272, 300, -140);
+        (w.fly.prev_x, w.fly.prev_y) = (430, 272);
         w.traps_step(&mut rig.at(1));
-        assert_eq!((w.fly.vx, w.fly.vy), (214, -100));
-        w.fly.x = 700;
+        assert_eq!(
+            (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy),
+            (430, 272, 214, -100)
+        );
+        w.fly.x = 429;
         w.traps_step(&mut rig.at(2));
         assert_eq!((w.fly.vx, w.fly.vy), (214, -100));
+    }
+
+    /// The flypaper's outline (a 53 × 300 rect here: half-x 250 and 275) meets the fly's right
+    /// side (half-x x / 2 + 45) at x 410. The fly goes back to its previous position: from 409
+    /// it is clear, so it stays there; from 411 it steps x −1 (still touching), y +1 against
+    /// vy −140, then x −1 to 409, clear. Then v = trunc(−v / 1.4), and the inset box (459..479)
+    /// misses the paper, so no drag.
+    #[test]
+    fn a_flypaper_pushes_the_fly_back_out_of_its_outline() {
+        let mut rig = Rig::new(1);
+        let mut w = world_with(vec![slot(TrapKind::Flypaper, 500)], &mut rig);
+        for (prev_x, want_y) in [(409, 100), (411, 101)] {
+            (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (410, 100, 300, -140);
+            (w.fly.prev_x, w.fly.prev_y) = (prev_x, 100);
+            w.traps_step(&mut rig.at(1));
+            assert_eq!(
+                (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy),
+                (409, want_y, -214, 100)
+            );
+        }
     }
 
     /// The blades knock the fly at most once per 100 ms (tick 7 is 107 ms after tick 0).
@@ -890,12 +1089,14 @@ mod layout_tests {
     }
 
     /// FW §4.4 step 6: a trap whose screen x is within its width of the 5000 ring end is drawn
-    /// at x − 5000, so a flypaper at stored 4990 (layer 3992, screen 4990) covers x 0..43.
+    /// at x − 5000. A flypaper at stored 4999 (layer 3999, screen trunc(3999 × 1.25) = 4998)
+    /// covers x −2..51, so a fly at (0, 272) drags (box 50..70).
     #[test]
     fn a_flypaper_at_the_ring_end_drags_a_fly_at_the_left_edge() {
         let mut rig = Rig::new(1);
-        let mut w = world_with(vec![slot(TrapKind::Flypaper, 4990)], &mut rig);
-        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (0, 100, 300, -140);
+        let mut w = world_with(vec![slot(TrapKind::Flypaper, 4999)], &mut rig);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (0, 272, 300, -140);
+        (w.fly.prev_x, w.fly.prev_y) = (0, 272);
         w.traps_step(&mut rig.at(1));
         assert_eq!((w.fly.vx, w.fly.vy), (214, -100));
     }
@@ -965,7 +1166,8 @@ mod layout_tests {
     /// Zapper at stored 1000 (screen 1000, 635 × 131 from y 0); a fly at (1000, 86) is below
     /// the grill zone (y ≤ 51) and its arc target y 86 + 45 = 131 is at d = 0, so the chance is
     /// 100. Seed 1: R(100) = 41 ≤ 100 arcs, 18467 % 80 + 30 = 97 ms, slot 39 at
-    /// 6334 % 800 + 11025 = 11759 Hz; vy −180, then 10 sparks of 8 draws (rands 4..=83), then
+    /// 6334 % 800 + 11025 = 11759 Hz (the arc, x 1038, overhangs L = 1055 by less than half its
+    /// 42 px: frame 3, no draw); vy −180, then 10 sparks of 8 draws (rands 4..=83), then
     /// damage 1. The next tick the arc is still on and nothing is drawn: rand 84 is 19954.
     #[test]
     fn an_arc_starts_on_the_chance_roll_and_lasts_r80_plus_30_ms() {
@@ -976,6 +1178,7 @@ mod layout_tests {
         w.traps_step(&mut rig.at(1));
         let z = w.traps.zappers[0];
         assert!(z.arcing && !w.fly.splatted);
+        assert_eq!(z.arc_frame, 3);
         assert_eq!(z.arc_timer.remaining_ms(rig.at(1).now), 97);
         assert_eq!((w.fly.vy, w.fly.damage_total), (-180, 1));
         let freq = PlayParams {
@@ -1036,6 +1239,132 @@ mod layout_tests {
         let [first, second] = [w.traps.zappers[0], w.traps.zappers[1]];
         assert!(first.arcing || !first.retry.expired(at));
         assert!(!second.arcing && second.retry.expired(at));
+    }
+
+    /// Outside the grill column (fly x < 1060 − 120) the zapper is solid. Its outline (a 100 ×
+    /// 100 rect here, half-x 500 and 549) meets the fly's top row (half-x 470..500) at x 910;
+    /// from the previous x 909 (470..499 → 469..499) it is clear: the fly stays there and
+    /// v = trunc(−v / 1.4). The retry timer keeps the arc off.
+    #[test]
+    fn a_zapper_outside_its_column_pushes_the_fly_back() {
+        let mut rig = Rig::new(7);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
+        let mut rig = Rig::new(1);
+        w.traps.zappers[0].retry.arm(rig.at(1).now, ARC_RETRY_MS);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (910, 0, 300, 0);
+        (w.fly.prev_x, w.fly.prev_y) = (909, 0);
+        w.traps_step(&mut rig.at(1));
+        assert_eq!((w.fly.x, w.fly.y, w.fly.vx, w.fly.vy), (909, 0, -214, 0));
+        assert!(!w.fly.splatted);
+        assert_eq!(rig.rng.rand(), 41);
+    }
+
+    /// answers.md round 3: before the column test a zapper with x ≥ wrap − w moves left by the
+    /// wrap. At stored 4995 (screen 4995) it sits at −5, so with its full 635 × 131 rect outline
+    /// its right side is half-x trunc(−5 / 2) + 316 = 314, which a fly at 598 (half-x 299 + 15)
+    /// meets. Unshifted (4995 / 2 + 316 = 2813 against 2799 + 15) it would miss.
+    #[test]
+    fn a_zapper_at_the_ring_end_is_solid_at_its_shifted_x() {
+        let mut rig = Rig::new(7);
+        let size = Size { w: 635, h: 131 };
+        rig.data
+            .outlines
+            .insert("tue_mouche".to_owned(), Outline::rect(size));
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 4995)], &mut rig);
+        w.traps.zappers[0].retry.arm(rig.at(1).now, ARC_RETRY_MS);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (598, 0, -300, 0);
+        (w.fly.prev_x, w.fly.prev_y) = (600, 0);
+        w.traps_step(&mut rig.at(1));
+        assert_eq!((w.fly.x, w.fly.vx), (600, 214));
+    }
+
+    /// answers.md "Zapper arc reach (O9)" step 7 with the fly target (1017, 131, 120): scale
+    /// 1 + (131 − 234) / 156, arc w 42.47, x = trunc(1077 − 21.23) = 1055 = L, inside
+    /// [1055, 1605]: frame R(4) + 1 = 18467 % 4 + 1 = 4, then R(80) = 14 (44 ms), R(800) = 100
+    /// (11125 Hz), and the retry is armed for 100 ms. The sparks start at (1055 + 21, 78 + 53);
+    /// the first takes rands 5..=12: R(5) 4, R(5) 4, frame 2, 8 ≥ 6 so +, 174 + 70, 4 ≥ 4 so +,
+    /// 94 + 70, life 5 + 100. Ten sparks use rands 5..=84; rand 85 is 18756.
+    #[test]
+    fn an_arc_inside_the_zapper_draws_its_frame_then_ten_sparks() {
+        let mut rig = Rig::new(7);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
+        let mut rig = Rig::new(1);
+        (w.fly.x, w.fly.y, w.fly.vy) = (1017, 86, 0);
+        (w.fly.prev_x, w.fly.prev_y) = (1017, 86);
+        let now = rig.at(1).now;
+        w.traps_step(&mut rig.at(1));
+        let z = w.traps.zappers[0];
+        assert!(z.arcing);
+        assert_eq!(z.arc_frame, 4);
+        assert_eq!(z.arc_timer.remaining_ms(now), 44);
+        assert_eq!(z.retry.remaining_ms(now), 100);
+        let freq = PlayParams {
+            freq_hz: Some(11_125),
+            ..PlayParams::default()
+        };
+        assert_eq!(sounds(&rig, SoundSlot::ZAPPER_ARC), [SoundOp::Play(freq)]);
+        let sparks: Vec<Effect> = rig
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Effect(s @ Effect::Spark { .. }) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sparks.len(), 10);
+        let first = Effect::Spark {
+            x: 1080,
+            y: 135,
+            frame: 2,
+            vx: 244,
+            vy: 164,
+            life_ms: 105,
+        };
+        assert_eq!(sparks[0], first);
+        assert_eq!(rig.rng.rand(), 18756);
+    }
+
+    /// The spark pool holds 30: with 25 slots still alive an arc throws only 5 sparks (40
+    /// draws, rands 5..=44, so rand 45 is next); with all 30 alive it throws none.
+    #[test]
+    fn an_arc_throws_only_as_many_sparks_as_the_pool_has_free_slots() {
+        for (alive, next) in [(25, 45), (30, 5)] {
+            let mut rig = Rig::new(7);
+            let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
+            let mut rig = Rig::new(1);
+            let now = rig.at(1).now;
+            for s in &mut w.traps.zappers[0].sparks[..alive] {
+                s.arm(now, 200);
+            }
+            (w.fly.x, w.fly.y, w.fly.vy) = (1017, 86, 0);
+            w.traps_step(&mut rig.at(1));
+            let thrown = rig
+                .events
+                .iter()
+                .filter(|e| matches!(e, Event::Effect(Effect::Spark { .. })))
+                .count();
+            assert_eq!(thrown, (30 - alive).min(10));
+            let mut probe = MsvcRand::new(1);
+            (1..next).for_each(|_| _ = probe.rand());
+            assert_eq!(rig.rng, probe);
+        }
+    }
+
+    /// Step 7's no-start case: at fly x 900 the arc (x 938, 42 wide) overhangs L = 1055 by more
+    /// than half its width and stays inside Rt. R(100) is drawn and nothing else, the retry is
+    /// not armed, so the next tick rolls R(100) again (rand 2), and rand 3 is next.
+    #[test]
+    fn an_arc_that_does_not_fit_starts_nothing_and_rolls_again() {
+        let mut rig = Rig::new(7);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
+        let mut rig = Rig::new(1);
+        (w.fly.x, w.fly.y) = (900, 86);
+        (w.fly.prev_x, w.fly.prev_y) = (900, 86);
+        w.traps_step(&mut rig.at(1));
+        let z = w.traps.zappers[0];
+        assert!(!z.arcing && z.retry.expired(rig.at(1).now));
+        w.traps_step(&mut rig.at(2));
+        assert_eq!(rig.rng.rand(), 6334);
     }
 
     /// An arc that takes the total past 100 runs the zapper burst, without sound 43.

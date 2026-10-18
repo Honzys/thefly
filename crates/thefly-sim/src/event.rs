@@ -207,6 +207,16 @@ pub enum Effect {
     Stomp { x: i32, y: i32 },
     /// Flying-goodie spawn puff.
     GoodieSpawn { x: i32, y: i32 },
+    /// One zapper-arc spark (`etincelle`, `FUN_00428ffc`, answers.md "Zapper arc on the fly"):
+    /// its drawn start x, y, frame, velocity in px/s and life in ms. Up to 10 per arc.
+    Spark {
+        x: i32,
+        y: i32,
+        frame: i32,
+        vx: i32,
+        vy: i32,
+        life_ms: i32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
