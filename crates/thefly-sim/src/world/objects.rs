@@ -834,7 +834,7 @@ fn outline_extent(o: &Outline) -> Size {
 
 /// §5.2 step 3 without the economy: up to [`MAX_PLACED`] objects, each a type draw then up to
 /// [`PLACEMENT_X_TRIES`] x draws in 0..5000, with landing sound 6 per placed object.
-/// `span_free` gets that screen-unit x (§5.2 step 3.3), not a layer x (open item O22).
+/// `span_free` gets that screen-unit x (§5.2 step 3.3), not a layer x (answers.md O22).
 pub fn place_on_table(
     types: &[ObjectType],
     eligible: &[bool],
