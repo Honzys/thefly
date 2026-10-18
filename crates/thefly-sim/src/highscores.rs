@@ -193,4 +193,43 @@ mod tests {
         assert_eq!((t.rows[1].name.as_str(), t.rows[2].score), ("new", 800));
         assert_eq!(t.rows[9].score, 100);
     }
+
+    /// GS §7.1: skip the reveal, type at most 11 characters, Backspace, Enter saves the row.
+    #[test]
+    fn a_typed_name_is_capped_and_saved_at_its_row() {
+        use crate::screen::rig::Rig;
+        let mut rig = Rig::new(1);
+        let mut t = table(&[900, 800, 700, 600, 500, 400, 300, 200, 100, 0]);
+        let mut hs = rig.cx(|cx| HighScoreScreen::new(Some((2, 750)), cx));
+        let tap = |rig: &mut Rig, hs: &mut HighScoreScreen, t: &mut HighScoreTable, k: u8| {
+            let out = rig.step(&[Scancode(k)], |keys, cx| hs.tick(keys, t, cx));
+            rig.step(&[], |keys, cx| hs.tick(keys, t, cx));
+            out
+        };
+        tap(&mut rig, &mut hs, &mut t, Scancode::RETURN.0);
+        assert_eq!(hs.revealed, 0);
+        // "abcdefghijkl": twelve letters, the twelfth is dropped.
+        for code in 4..16 {
+            tap(&mut rig, &mut hs, &mut t, code);
+        }
+        tap(&mut rig, &mut hs, &mut t, 42);
+        tap(&mut rig, &mut hs, &mut t, 39);
+        assert_eq!(
+            hs.entry.as_ref().map(|e| e.name.as_str()),
+            Some("abcdefghij0")
+        );
+        tap(&mut rig, &mut hs, &mut t, Scancode::RETURN.0);
+        assert_eq!(t.rows[2].name, "abcdefghij0");
+        assert_eq!(t.rows[2].score, 750);
+        assert_eq!(t.rows.len(), ROWS);
+        assert!(rig.events.iter().any(|e| matches!(
+            e,
+            Event::Save {
+                file: SaveFile::Scores,
+                ..
+            }
+        )));
+        let out = tap(&mut rig, &mut hs, &mut t, Scancode::RETURN.0);
+        assert!(matches!(out, Flow::Menu));
+    }
 }
