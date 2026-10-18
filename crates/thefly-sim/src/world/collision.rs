@@ -63,9 +63,9 @@ pub struct Shape<'a> {
 /// hit when an outline point of `a` coincides with one of `b` at half-x resolution in a shared
 /// row.
 ///
-/// shortcut: FW §4.3 step 3 says the contained-span case uses "the original y argument rather
-/// than the shifted one" but never defines the shift, so every case runs the plain row test
-/// (gaps §11.2); open in answers.md "Port decisions" (not read in round 2), revisit when read.
+/// answers.md "Outline collision: the shifted y quirk never changes a result": the plain row
+/// test is exact. The original's straddle is x + w ≥ wrap; `>` here differs only at
+/// x + w == wrap, where the strict box test rejects the shifted pair anyway.
 pub fn outlines_overlap(a: &Shape<'_>, b: &Shape<'_>, wrap_width: i32) -> bool {
     let straddles = |s: &Shape<'_>| s.x + s.size.w > wrap_width;
     let shift = straddles(a) || straddles(b);
