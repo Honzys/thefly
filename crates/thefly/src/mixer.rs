@@ -18,10 +18,6 @@ const WRAP: f64 = 5000.0;
 /// O14 (answers.md "Positional sound curve"): the off-screen pan peak and the volume loss behind.
 const OFF_PAN_CB: f64 = 3000.0;
 const BEHIND_CB: f64 = 1500.0;
-/// The buzz (`FUN_0040d005`, answers.md "Fly buzz: pitch, pan and volume"): pan ±2000 around
-/// the screen centre at volume −700.
-const BUZZ_PAN_CB: f64 = 2000.0;
-const BUZZ_CB: i32 = -700;
 
 /// DirectSound volume (hundredths of a dB, ≤ 0) as a linear gain.
 pub fn gain(cb: i32) -> f32 {
@@ -39,11 +35,10 @@ pub fn pan_gains(pan: i32) -> (f32, f32) {
 }
 
 /// `(left, right)` gains for a [`Pan`] on `slot`; a positional volume change is folded in.
-pub fn pan(slot: SoundSlot, p: Pan) -> (f32, f32) {
+pub fn pan(p: Pan) -> (f32, f32) {
     let (pan_cb, volume_cb) = match p {
         Pan::Centre => return (1.0, 1.0),
         Pan::Fixed(v) => return pan_gains(v),
-        Pan::ScreenX { x, w } if slot == SoundSlot::FLY_BUZZ => buzz(f64::from(x), f64::from(w)),
         Pan::ScreenX { x, w } => positional(f64::from(x), f64::from(w)),
     };
     let (l, r) = pan_gains(pan_cb);
@@ -76,21 +71,6 @@ fn positional(x: f64, w: f64) -> (i32, i32) {
         )
     };
     (-p as i32, offset as i32)
-}
-
-/// `FUN_0040d005`: the buzz pans around the screen centre and loses |x| or x − 800 off screen.
-fn buzz(x: f64, w: f64) -> (i32, i32) {
-    let centre = SCREEN_W / 2.0;
-    let p = if x <= centre - w {
-        -((1.0 - x / (centre - w)) * BUZZ_PAN_CB).trunc()
-    } else if x >= centre {
-        ((x - centre) / centre * BUZZ_PAN_CB).trunc()
-    } else {
-        0.0
-    };
-    let off = if x < 0.0 { -x } else { (x - SCREEN_W).max(0.0) };
-    // `as` saturates, so i32::MIN / MAX sources stay in range
-    (p as i32, BUZZ_CB.saturating_sub(off as i32))
 }
 
 /// The persistent settings of one slot's buffer.
@@ -161,8 +141,8 @@ impl Mixer {
             .ok_or_else(|| format!("no sound slot {}", slot.0))?;
         let s = self.slots.entry(slot).or_default();
         match op {
-            SoundOp::Play(p) => start(slot, s, file, p, false, audio)?,
-            SoundOp::Loop(p) => start(slot, s, file, p, true, audio)?,
+            SoundOp::Play(p) => start(s, file, p, false, audio)?,
+            SoundOp::Loop(p) => start(s, file, p, true, audio)?,
             SoundOp::Stop => {
                 if let Some(v) = s.voice.take() {
                     audio.stop(v);
@@ -183,7 +163,7 @@ impl Mixer {
                 }
             }
             SoundOp::Move(p) => {
-                s.pan = pan(slot, p);
+                s.pan = pan(p);
                 if let Some(v) = s.voice {
                     audio.set_pan(v, s.pan);
                 }
@@ -195,7 +175,6 @@ impl Mixer {
 
 /// Play restarts the slot's one buffer with the event's settings, which then persist.
 fn start(
-    slot: SoundSlot,
     s: &mut Slot,
     file: &str,
     p: PlayParams,
@@ -206,7 +185,7 @@ fn start(
         audio.stop(v);
     }
     s.volume_cb = p.volume_cb.min(0);
-    s.pan = pan(slot, p.pan);
+    s.pan = pan(p.pan);
     if p.freq_hz.is_some() {
         s.freq_hz = p.freq_hz;
     }
@@ -253,8 +232,6 @@ mod tests {
         assert!(close(l, gain(-500)) && close(r, 1.0));
     }
 
-    const OTHER: SoundSlot = SoundSlot(47);
-
     fn screen(x: i32, w: i32) -> Pan {
         Pan::ScreenX { x, w }
     }
@@ -279,57 +256,39 @@ mod tests {
     #[test]
     fn on_screen_and_past_the_wrap_edge_sources_are_centred_at_full_volume() {
         for (x, w) in [(0, 120), (400, 0), (800, 0), (4950, 100), (5000, 0)] {
-            assert_eq!(pan(OTHER, screen(x, w)), (1.0, 1.0), "x {x}");
+            assert_eq!(pan(screen(x, w)), (1.0, 1.0), "x {x}");
         }
     }
 
     #[test]
     fn a_source_right_of_the_screen_pans_right_up_to_3000_then_fades_behind() {
         // wrap 5000: half 2900. x 1617 (w 235): d 38, p −2280, SetPan(+2280).
-        assert_gains(pan(OTHER, screen(1617, 235)), expect(2280, 0));
+        assert_gains(pan(screen(1617, 235)), expect(2280, 0));
         // x 1850: d 50, p −3000, no volume change yet.
-        assert_gains(pan(OTHER, screen(1850, 0)), expect(3000, 0));
+        assert_gains(pan(screen(1850, 0)), expect(3000, 0));
         // x 2900 = half: d 100, pan back to 0, volume −1500.
-        assert_gains(pan(OTHER, screen(2900, 0)), expect(0, -1500));
+        assert_gains(pan(screen(2900, 0)), expect(0, -1500));
     }
 
     #[test]
     fn a_source_wrapped_left_of_the_screen_mirrors_with_a_left_pan() {
         // x 3400 (w 100): d = trunc((1 − 500 / 2000) × 100) = 75, p 1500, volume −750.
-        assert_gains(pan(OTHER, screen(3400, 100)), expect(-1500, -750));
+        assert_gains(pan(screen(3400, 100)), expect(-1500, -750));
         // x 4400 (w 100): d 25, p 1500, SetPan(−1500).
-        assert_gains(pan(OTHER, screen(4400, 100)), expect(-1500, 0));
+        assert_gains(pan(screen(4400, 100)), expect(-1500, 0));
         // shortcut wrap: a negative x is taken on the ring, −600 ≡ 4400
-        assert_eq!(pan(OTHER, screen(-600, 100)), pan(OTHER, screen(4400, 100)));
+        assert_eq!(pan(screen(-600, 100)), pan(screen(4400, 100)));
     }
 
     #[test]
     fn extreme_screen_x_stays_in_gain_range() {
-        for slot in [OTHER, SoundSlot::FLY_BUZZ] {
-            for x in [-1, i32::MIN, i32::MAX] {
-                let (l, r) = pan(slot, screen(x, 0));
-                assert!(
-                    (0.0..=1.0).contains(&l) && (0.0..=1.0).contains(&r),
-                    "x {x}: {l} {r}"
-                );
-            }
+        for x in [-1, i32::MIN, i32::MAX] {
+            let (l, r) = pan(screen(x, 0));
+            assert!(
+                (0.0..=1.0).contains(&l) && (0.0..=1.0).contains(&r),
+                "x {x}: {l} {r}"
+            );
         }
-        assert_eq!(
-            pan(OTHER, Pan::Fixed(-100_000)),
-            pan(OTHER, Pan::Fixed(-MAX_PAN))
-        );
-    }
-
-    #[test]
-    fn the_buzz_pans_around_the_screen_centre_at_minus_700() {
-        let buzz = |x, w| pan(SoundSlot::FLY_BUZZ, screen(x, w));
-        // 400 − w < x < 400: no pan
-        assert_gains(buzz(340, 120), expect(0, -700));
-        // x ≥ 400: trunc(340 / 400 × 2000) = 1700
-        assert_gains(buzz(740, 120), expect(1700, -700));
-        // x ≤ 400 − w: −trunc((1 − x / (400 − w)) × 2000); off screen loses |x|
-        assert_gains(buzz(0, 120), expect(-2000, -700));
-        assert_gains(buzz(-400, 0), expect(-4000, -1100));
-        assert_gains(buzz(1000, 0), expect(3000, -900));
+        assert_eq!(pan(Pan::Fixed(-100_000)), pan(Pan::Fixed(-MAX_PAN)));
     }
 }
