@@ -631,4 +631,24 @@ mod tests {
         assert!(passed);
         assert_eq!(m.credits.letterbox, 120);
     }
+
+    /// answers.md "Credits: the first hold is 7000 ms": the first pair, too, holds 7000 ms from
+    /// the slide-in, and each later pair 7000 ms more.
+    #[test]
+    fn every_credit_pair_holds_7000_ms_the_first_included() {
+        let mut rig = Rig::new(1);
+        let start = rig.now();
+        let (mut m, cfg) = in_credits(&mut rig);
+        let mut flips = Vec::new();
+        for _ in 0..1000 {
+            let (pair, now) = (m.credits.pair, rig.now());
+            tick(&mut rig, &mut m, &cfg);
+            if m.credits.pair != pair {
+                flips.push(now - start);
+            }
+        }
+        assert!(flips.len() >= 2, "{flips:?}");
+        // Due on the first tick strictly past the deadline: 7015 (tick 456), re-armed from there.
+        assert_eq!(flips[..2], [7015, 14_030]);
+    }
 }
