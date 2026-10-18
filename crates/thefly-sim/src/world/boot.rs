@@ -113,9 +113,9 @@ impl Boot {
         }
     }
 
-    /// `FUN_0043aabe`, from the farmer's Boot goodie: chasing from the start (+0x178 = 1).
-    // shortcut: answers.md "Boot: ... spawn x" gives a screen x; the layer x is taken back as
-    // trunc(x / 1.25), as objects.rs's set_screen_x does [I]. Revisit if the sprite setter is read.
+    /// `FUN_0043aabe`, from the farmer's Boot goodie: chasing from the start (+0x178 = 1). The
+    /// spawn x is a screen x below the wrap, so the setter sets the layer x to trunc(x / 1.25)
+    /// (answers.md "Screen-x setter").
     pub fn spawn(&mut self, cx: &mut Ctx) {
         self.x = cx.rng.r(BOOT_WRAP - SPAWN_X_SPAN) + SPAWN_X_MIN;
         self.layer_x = (f64::from(self.x) / OBJECT_PARALLAX) as i32;

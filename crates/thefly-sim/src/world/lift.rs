@@ -27,6 +27,8 @@ pub const IDLE_PERIOD: i32 = 102;
 /// The hook offset `off`, the original's constructor argument. Open item O8: the value is not in
 /// the docs (fly-and-world §5.6 only names the field); 0 is a placeholder.
 pub const HOOK_OFF: i32 = 0;
+/// The object layer's wrap (+0x2c): trunc(W × 1.25) = 5000.
+const LIFT_WRAP: i32 = (W as f64 * OBJECT_PARALLAX) as i32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LiftState {
@@ -131,15 +133,15 @@ impl Lift {
         lift
     }
 
-    /// `FUN_00430fe7`.
-    ///
-    /// shortcut: the anchor is a screen-ring x; the layer x is trunc(x / 1.25) as for objects
-    /// (`Object::set_screen_x`), so the first follow can move x by 1 px (1618 → 1617). Revisit
-    /// when the sprite x setter is read.
+    /// `FUN_00430fe7`. The anchor goes through the screen-x setter (answers.md "Screen-x
+    /// setter"): the layer x becomes trunc(x / 1.25) only for 0 ≤ x < wrap, and the next follow
+    /// sets x = trunc(layer x × 1.25), so x can move by 1 px (1618 → 1617).
     fn reset(&mut self, cx: &mut Ctx) {
         self.anchor = usize::try_from(cx.rng.r(3)).unwrap_or(0);
         self.x = self.anchors[self.anchor];
-        self.layer_x = (f64::from(self.x) / OBJECT_PARALLAX) as i32;
+        if (0..LIFT_WRAP).contains(&self.x) {
+            self.layer_x = (f64::from(self.x) / OBJECT_PARALLAX) as i32;
+        }
         self.y = -self.h;
         self.vy = cx.rng.r(150) + 50;
         (self.ring, self.read, self.write) = ([0; RING], 0, 0);
@@ -147,11 +149,9 @@ impl Lift {
         self.rope_y = self.y - self.max_y;
     }
 
-    /// `FUN_00431115` then follow (`FUN_00431931`), with the winch sound 47.
-    ///
-    /// shortcut: while hoisting, before delivery, the result is taken to be the hooked index
-    /// (§5.6 names only the hook tick's return), so the object stays still on the hook.
-    /// Revisit when `FUN_00431115`'s state 3 return is read.
+    /// `FUN_00431115` then follow (`FUN_00431931`), with the winch sound 47. Every hoisting tick
+    /// returns the hooked index until the winch is above the top (answers.md "Winch return while
+    /// hoisting").
     pub fn update(
         &mut self,
         objects: &mut Objects,
@@ -391,6 +391,22 @@ mod tests {
 
     const ANCHORS: [i32; 3] = [269, 1335, 1618];
 
+    /// answers.md "Screen-x setter": the layer x follows the screen x only for 0 ≤ x < wrap. An
+    /// anchor of 760 shop px is trunc(760 / 0.152) = 5000, the wrap, so the layer x is kept.
+    #[test]
+    fn an_anchor_at_the_wrap_keeps_the_layer_x() {
+        let (mut rng, data, mut events) = bench(1);
+        let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
+        let mut lift = Lift::new([5000; 3], &mut cx);
+        assert_eq!((lift.x, lift.layer_x), (5000, 0));
+        lift.layer_x = 700;
+        lift.reset(&mut cx);
+        assert_eq!((lift.x, lift.layer_x), (5000, 700));
+        lift.anchors = ANCHORS;
+        lift.reset(&mut cx);
+        assert_eq!(lift.layer_x, (f64::from(lift.x) / OBJECT_PARALLAX) as i32);
+    }
+
     /// Seed 1: anchor = 41 % 3 = 2, vy = 18467 % 150 + 50 = 67.
     #[test]
     fn reset_picks_an_anchor_and_a_drift_above_the_screen() {
@@ -418,7 +434,7 @@ mod tests {
         );
         let params = PlayParams {
             freq_hz: Some(18555),
-            // The anchor goes through the layer x (shortcut in `Object::set_screen_x`): 1617.
+            // The anchor goes through the layer x (answers.md "Screen-x setter"): 1617.
             pan: Pan::ScreenX { x: lift.x, w: 235 },
             ..PlayParams::default()
         };

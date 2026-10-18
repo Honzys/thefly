@@ -128,15 +128,15 @@ impl World {
     /// Builds the period: the loading work of `FUN_004015c8` (placement, respawn with 3000 tries,
     /// AI creation, trap entities from the shop layout, timers armed at `cx.now`).
     ///
-    /// shortcut: the docs name the calls of `FUN_004015c8` but not their order; this takes
-    /// traps, then placement (it needs the trap spans), then the fly's 3000-try respawn (it
-    /// needs the objects), then the AI [I]. The AI gets a view holding only the fly centre.
-    /// Revisit when `FUN_004015c8` is read in order.
+    /// Port decision (answers.md "Period load order"): the original reseeds from the clock in
+    /// its objects build, so no draw before placement is reproducible. The port runs traps,
+    /// placement, the fly's 3000-try respawn, the AI, then the ambient midges; from placement
+    /// on, that is the original's order. The AI gets a view holding only the fly centre.
     pub fn new(m: &mut MatchState, cx: &mut Ctx) -> Self {
         let mut world = Self::build(m, cx);
         world.traps = traps::Traps::from_layout(&m.traps, cx);
-        // shortcut: no meal before the first period is impossible after `advance`; breakfast
-        // keeps a hand-built match playable. Revisit if a caller builds without advancing.
+        // Port decision (answers.md): no meal is impossible after `advance`; breakfast keeps a
+        // hand-built match playable.
         let meal = m.progress.meal.unwrap_or(Meal::Breakfast);
         world.objects = objects::Objects::place(m, meal, &world.traps, cx);
         world.fly.request_respawn(cx);
@@ -149,8 +149,6 @@ impl World {
             };
             world.ai = Some(ai::FarmerAi::new(m.config.ai_level, &view, cx));
         }
-        // shortcut: answers.md (O2) draws R(15) ambient midges "at period load" without the slot
-        // in `FUN_004015c8`; the port draws them last. Revisit when its call order is read.
         world.ambient_midges = midges::AmbientMidges::spawn(cx);
         world
     }
