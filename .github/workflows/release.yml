@@ -1,0 +1,93 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # builds artifacts only; no GitHub Release
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x86_64, targets: "" }
+          - { os: windows-latest, name: windows-x86_64, targets: "" }
+          - { os: macos-latest, name: macos-universal, targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2.7.8
+      - name: SDL3 build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \
+            libxss-dev libxtst-dev libxcb1-dev libxkbcommon-dev libwayland-dev libwayland-bin \
+            wayland-protocols libdecor-0-dev libegl-dev libgl-dev libasound2-dev libpulse-dev
+      - name: Build
+        shell: bash
+        run: |
+          mkdir -p stage
+          if [ "$RUNNER_OS" = macOS ]; then
+            cargo build --release --bin thefly --target aarch64-apple-darwin
+            cargo build --release --bin thefly --target x86_64-apple-darwin
+            lipo -create -output stage/thefly \
+              target/aarch64-apple-darwin/release/thefly target/x86_64-apple-darwin/release/thefly
+          else
+            cargo build --release --bin thefly
+            cp target/release/thefly* stage/ 2>/dev/null || true
+            rm -f stage/*.d stage/*.pdb
+          fi
+      - name: Package
+        shell: bash
+        env:
+          NAME: thefly-${{ github.ref_name }}-${{ matrix.name }}
+        run: |
+          NAME="${NAME//\//-}"
+          cp LICENSE stage/LICENSE
+          cat > stage/README.txt <<'TXT'
+          The Fly engine (open-source reimplementation of The Fly 1.2).
+          This archive contains NO game data. Get the original game yourself, then run:
+
+            thefly --data "<path to the game's data folder>"
+
+          or set THEFLY_DATA, or put the data folder next to the executable as ./data.
+          Run `thefly --help` for all options; full instructions: see the project README.
+          License: GPL-3.0-or-later (see LICENSE). The game's assets are not covered.
+          TXT
+          sed 's/^          //' stage/README.txt > stage/README.out && mv stage/README.out stage/README.txt
+          mkdir "$NAME" && cp stage/* "$NAME"/
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a "$NAME.zip" "$NAME"
+            echo "ASSET=$NAME.zip" >> "$GITHUB_ENV"
+          else
+            chmod +x "$NAME/thefly"
+            tar czf "$NAME.tar.gz" "$NAME"
+            echo "ASSET=$NAME.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
