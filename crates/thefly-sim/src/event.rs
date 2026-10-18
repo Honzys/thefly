@@ -122,6 +122,12 @@ pub const SOUND_FILES: [&str; 59] = [
     "w_vibrofarmer2",
 ];
 
+/// Wrap of the object layers (4000 x 1.25): fans, zappers and the winch (answers.md "Positional
+/// sound: the wrap is per source").
+pub const PAN_WRAP_OBJECT: i32 = 5000;
+/// Wrap of the 1.0 layers: the farmer voices and the flying goodie.
+pub const PAN_WRAP_GAME: i32 = 4000;
+
 /// Where a sound sits. The original's positional helpers (`FUN_0040d005`, `FUN_0040d1b2`) pan
 /// and attenuate by screen x; their curve is not decoded (open item O14), so the frontend maps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -130,8 +136,8 @@ pub enum Pan {
     Centre,
     /// Raw DirectSound pan, −10000..=10000.
     Fixed(i32),
-    /// Positional, from the source's screen x (and the source width, centred on it).
-    ScreenX { x: i32, w: i32 },
+    /// Positional, from the source's screen x, its width and its layer wrap (`PAN_WRAP_*`).
+    ScreenX { x: i32, w: i32, wrap: i32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

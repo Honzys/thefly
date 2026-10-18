@@ -508,6 +508,7 @@ impl Farmer {
         Pan::ScreenX {
             x: self.x,
             w: SPRITE_W,
+            wrap: crate::event::PAN_WRAP_GAME,
         }
     }
 

@@ -11,10 +11,6 @@ const MIN_CB: i32 = -10_000;
 /// DirectSound's pan range, ±10000 hundredths of a dB of attenuation on the far side.
 const MAX_PAN: i32 = 10_000;
 const SCREEN_W: f64 = 800.0;
-/// shortcut: `FUN_0040d1b2` takes the source's wrap, which `Pan::ScreenX` does not carry; the
-/// object layer's 5000 (answers.md "Screen x") is used for every source, the farmer's 4000 ring
-/// included. Revisit when the sim's `Pan::ScreenX` gains a wrap.
-const WRAP: f64 = 5000.0;
 /// O14 (answers.md "Positional sound curve"): the off-screen pan peak and the volume loss behind.
 const OFF_PAN_CB: f64 = 3000.0;
 const BEHIND_CB: f64 = 1500.0;
@@ -39,23 +35,23 @@ pub fn pan(p: Pan) -> (f32, f32) {
     let (pan_cb, volume_cb) = match p {
         Pan::Centre => return (1.0, 1.0),
         Pan::Fixed(v) => return pan_gains(v),
-        Pan::ScreenX { x, w } => positional(f64::from(x), f64::from(w)),
+        Pan::ScreenX { x, w, wrap } => positional(f64::from(x), f64::from(w), f64::from(wrap)),
     };
     let (l, r) = pan_gains(pan_cb);
     let v = gain(volume_cb);
     (l * v, r * v)
 }
 
-/// O14, `FUN_0040d1b2` (answers.md "Positional sound curve"): `(pan, volume offset)` in cb. On
-/// screen, or past wrap − w, the source is centred at full volume.
-fn positional(x: f64, w: f64) -> (i32, i32) {
-    let x = x.rem_euclid(WRAP);
-    let half = (WRAP + SCREEN_W) / 2.0;
+/// O14, `FUN_0040d1b2` (answers.md "Positional sound curve", "Positional sound: the wrap is per
+/// source"): `(pan, volume offset)` in cb. On screen, past wrap − w, or at a negative x (the
+/// original never wraps x) the source is centred at full volume.
+fn positional(x: f64, w: f64, wrap: f64) -> (i32, i32) {
+    let half = (wrap + SCREEN_W) / 2.0;
     let (d, side) = if x > SCREEN_W && x <= half {
         (((x - SCREEN_W) / (half - SCREEN_W) * 100.0).trunc(), -1.0)
-    } else if x > half && x <= WRAP - w {
+    } else if x > half && x <= wrap - w {
         (
-            ((1.0 - (x - half) / ((WRAP - w) - half)) * 100.0).trunc(),
+            ((1.0 - (x - half) / ((wrap - w) - half)) * 100.0).trunc(),
             1.0,
         )
     } else {
@@ -232,8 +228,14 @@ mod tests {
         assert!(close(l, gain(-500)) && close(r, 1.0));
     }
 
+    /// An object-layer source (wrap 5000): fans, zappers, the winch.
     fn screen(x: i32, w: i32) -> Pan {
-        Pan::ScreenX { x, w }
+        Pan::ScreenX { x, w, wrap: 5000 }
+    }
+
+    /// A 1.0-layer source (wrap 4000): the farmer voices and the flying goodie.
+    fn game(x: i32, w: i32) -> Pan {
+        Pan::ScreenX { x, w, wrap: 4000 }
     }
 
     /// `(left, right)` for a DirectSound pan and volume offset, built independently of `pan`.
@@ -276,8 +278,35 @@ mod tests {
         assert_gains(pan(screen(3400, 100)), expect(-1500, -750));
         // x 4400 (w 100): d 25, p 1500, SetPan(−1500).
         assert_gains(pan(screen(4400, 100)), expect(-1500, 0));
-        // shortcut wrap: a negative x is taken on the ring, −600 ≡ 4400
-        assert_eq!(pan(screen(-600, 100)), pan(screen(4400, 100)));
+    }
+
+    #[test]
+    fn a_negative_x_is_centred_the_original_never_wraps_x() {
+        // answers.md "Positional sound: the wrap is per source": no rem_euclid.
+        assert_eq!(pan(screen(-600, 100)), (1.0, 1.0));
+        assert_eq!(pan(game(-1, 181)), (1.0, 1.0));
+    }
+
+    #[test]
+    fn the_farmer_and_goodie_wrap_is_4000_so_half_is_2400() {
+        // wrap 4000, w 181: half 2400, wrap - w 3819.
+        // x 1600: d = trunc(800 / 1600 x 100) = 50, p = -3000, SetPan(+3000), no volume change.
+        assert_gains(pan(game(1600, 181)), expect(3000, 0));
+        // x 2400 = half: d 100, pan 0, volume -1500.
+        assert_gains(pan(game(2400, 181)), expect(0, -1500));
+        // x 2754: d = trunc((1 - 354 / 1419) x 100) = 75, p = 1500 x +1, volume -750.
+        assert_gains(pan(game(2754, 181)), expect(-1500, -750));
+        // x 3819 = wrap - w: d 0, centred; x 3900 is past it, centred. x 0 (farmer 4000) too.
+        for x in [0, 800, 3819, 3900, 4000] {
+            assert_eq!(pan(game(x, 181)), (1.0, 1.0), "x {x}");
+        }
+    }
+
+    #[test]
+    fn the_same_x_pans_differently_per_wrap() {
+        // x 1600, w 181 at wrap 5000: half 2900, d = trunc(800 / 2100 x 100) = 38, p = 2280.
+        assert_gains(pan(screen(1600, 181)), expect(2280, 0));
+        assert_ne!(pan(screen(1600, 181)), pan(game(1600, 181)));
     }
 
     #[test]
