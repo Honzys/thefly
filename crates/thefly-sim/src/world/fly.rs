@@ -493,13 +493,16 @@ impl Fly {
         self.y = (f64::from(SCREEN_H - self.size.h) / 2.0 - 20.0) as i32;
     }
 
-    /// `FUN_00438643(appear)`: clear hit, stun, damage, splat, grab, carrying, Turbo, SuperFly.
+    /// `FUN_00438643(appear)`: clear hit, stun, damage, splat, grab, carrying, Turbo, SuperFly, and
+    /// the crash and respawn timers (a fan can splat a dying fly).
     ///
     /// shortcut: §3.7.3 says argument 0 is "alive immediately" without saying whether
     /// `FUN_004387d5` runs; it clears the dying and appearing state silently. Revisit if a caller
     /// with 0 turns up that needs sound 38 or the survival timer.
     pub fn reset(&mut self, appear: bool, cx: &mut Ctx) {
         self.hit_in_progress = false;
+        self.crash_timer.disarm();
+        self.respawn_timer.disarm();
         self.hit_frame = 0;
         self.stunned = false;
         self.ricochet = 0;
@@ -1745,6 +1748,28 @@ mod tests {
             b.with(|cx| w.place_fly(tries, cx));
             assert_eq!(b.draws_since(1, before), tries);
             assert!(w.fly.appearing && !w.fly.respawn_request);
+        }
+    }
+
+    /// A fan splats a dying fly (it skips only a splatted one, answers.md "Fan strength"): the
+    /// reset must not carry the crash or respawn timer into the next life.
+    #[test]
+    fn a_reset_disarms_the_crash_and_respawn_timers() {
+        for crash_over in [false, true] {
+            let mut b = Bench::new(1);
+            let (mut m, _) = world(&mut b);
+            let mut fly = centred(&mut b);
+            update(&mut b, &mut m, &mut fly, 120);
+            if crash_over {
+                b.now = CRASH_MS;
+                update(&mut b, &mut m, &mut fly, 0);
+            }
+            assert!(fly.crash_timer.is_armed() != fly.respawn_timer.is_armed());
+            b.with(|cx| {
+                fly.splat(1, cx);
+                fly.reset(true, cx);
+            });
+            assert!(!fly.crash_timer.is_armed() && !fly.respawn_timer.is_armed());
         }
     }
 
