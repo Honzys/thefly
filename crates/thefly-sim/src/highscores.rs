@@ -27,14 +27,13 @@ pub struct HighScoreTable {
 impl HighScoreTable {
     /// `FUN_0040abb0`: the first row whose score ≤ `score` (ties rank above older entries).
     pub fn qualifies(&self, score: i32) -> Option<usize> {
-        let _ = score;
-        todo!("W3 ai-and-rules §8.5")
+        self.rows.iter().take(ROWS).position(|r| r.score <= score)
     }
 
     /// `FUN_00410cbd`: shift down and insert at `row`.
     pub fn insert(&mut self, row: usize, entry: Row) {
-        let _ = (row, entry);
-        todo!("W3 game-spec §7.1")
+        self.rows.insert(row.min(self.rows.len()), entry);
+        self.rows.truncate(ROWS);
     }
 }
 
@@ -67,5 +66,46 @@ impl HighScoreScreen {
     pub fn tick(&mut self, keys: &KeyState, table: &mut HighScoreTable, cx: &mut Ctx) -> Flow {
         let _ = (keys, table, cx);
         todo!("W3 screens-and-rendering §5.3")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(scores: &[i32]) -> HighScoreTable {
+        let rows = scores
+            .iter()
+            .map(|&score| Row {
+                name: "x".into(),
+                score,
+            })
+            .collect();
+        HighScoreTable { rows }
+    }
+
+    /// AR §8.5: the first row whose score ≤ the new one; ties rank above.
+    #[test]
+    fn a_score_qualifies_at_the_first_row_not_above_it() {
+        let t = table(&[900, 800, 800, 500, 400, 300, 200, 100, 50, 10]);
+        assert_eq!(t.qualifies(800), Some(1));
+        assert_eq!(t.qualifies(9999), Some(0));
+        assert_eq!(t.qualifies(10), Some(9));
+        assert_eq!(t.qualifies(9), None);
+    }
+
+    #[test]
+    fn insert_shifts_down_and_drops_the_last_row() {
+        let mut t = table(&[900, 800, 700, 600, 500, 400, 300, 200, 100, 50]);
+        t.insert(
+            1,
+            Row {
+                name: "new".into(),
+                score: 850,
+            },
+        );
+        assert_eq!(t.rows.len(), ROWS);
+        assert_eq!((t.rows[1].name.as_str(), t.rows[2].score), ("new", 800));
+        assert_eq!(t.rows[9].score, 100);
     }
 }

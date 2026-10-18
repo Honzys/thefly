@@ -92,6 +92,31 @@ pub fn parse_scores(bytes: &[u8]) -> Result<Scores, Error> {
     Ok(Scores { entries, trailer })
 }
 
+/// Writes the table back. Bytes +0x10..+0x27 (the run statistics) are zero-filled, which
+/// docs/formats/btt.md allows. shortcut: statistics not written, revisit if anything reads them.
+pub fn write_scores(scores: &Scores) -> Vec<u8> {
+    let mut out = Vec::with_capacity(SCORES_FILE_LEN);
+    for e in &scores.entries {
+        let mut rec = [0u8; RECORD_LEN];
+        let name = e.name.as_bytes();
+        let len = name.len().min(NAME_LEN - 1);
+        rec[..len].copy_from_slice(&name[..len]);
+        rec[SCORE_AT..SCORE_AT + 4].copy_from_slice(&e.score.to_le_bytes());
+        rec[CHECKSUM_AT..].copy_from_slice(&e.checksum.to_le_bytes());
+        out.extend(rec);
+    }
+    out.extend(scores.trailer.to_le_bytes());
+    out
+}
+
+pub fn write_settings(settings: &Settings) -> Vec<u8> {
+    settings
+        .values
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect()
+}
+
 pub fn parse_settings(bytes: &[u8]) -> Result<Settings, Error> {
     check_len(bytes, SETTINGS_FILE_LEN)?;
     let word = |i: usize| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
@@ -118,6 +143,20 @@ mod tests {
         }
         v.extend(0.5f64.to_le_bytes());
         v
+    }
+
+    #[test]
+    fn the_writer_round_trips_and_zero_fills_the_statistics() {
+        let s = parse_scores(&scores_file(b"abcdefghijk", 7)).unwrap();
+        let bytes = write_scores(&s);
+        assert_eq!(bytes.len(), SCORES_FILE_LEN);
+        assert_eq!(parse_scores(&bytes).unwrap(), s);
+        assert!(bytes[0x10..CHECKSUM_AT].iter().all(|&b| b == 0));
+        let settings = Settings { values: [1, 0] };
+        assert_eq!(
+            parse_settings(&write_settings(&settings)).unwrap(),
+            settings
+        );
     }
 
     #[test]
