@@ -90,14 +90,19 @@ impl HighScoreScreen {
     }
 
     /// A key during the reveal skips it (slot 0x26); confirming a name saves (slot 0x33) and
-    /// emits [`crate::Event::Save`]; Enter/Esc → menu. Typing: gaps §1.3 (a-z, 1..0, Enter, Backspace); open item O17 for Space and Esc.
+    /// emits [`crate::Event::Save`]; Esc → menu. Typing: gaps §1.3 (a-z, 1..0, Enter, Backspace); open item O17 for Space and Esc.
     pub fn tick(&mut self, keys: &KeyState, table: &mut HighScoreTable, cx: &mut Ctx) -> Flow {
         if self.revealed > 0 {
             self.reveal(keys, cx);
             return Flow::Stay;
         }
+        // docs/re/observed.md: the table closes on Esc, not on Return.
         let Some(entry) = &mut self.entry else {
-            return if keys.skip() { Flow::Menu } else { Flow::Stay };
+            return if keys.pressed(Scancode::ESCAPE) {
+                Flow::Menu
+            } else {
+                Flow::Stay
+            };
         };
         if entry.cursor.expired_rearm(cx.now) {
             entry.cursor_on = !entry.cursor_on;
@@ -230,6 +235,8 @@ mod tests {
             }
         )));
         let out = tap(&mut rig, &mut hs, &mut t, Scancode::RETURN.0);
+        assert!(matches!(out, Flow::Stay));
+        let out = tap(&mut rig, &mut hs, &mut t, Scancode::ESCAPE.0);
         assert!(matches!(out, Flow::Menu));
     }
 }
