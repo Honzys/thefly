@@ -121,7 +121,7 @@ impl State {
                 }
             }
             Screen::HighScores(hs) => hs.tick(keys, &mut self.scores, cx),
-            Screen::Farewell(f) => f.tick(cx),
+            Screen::Farewell(f) => f.tick(keys, cx),
             Screen::Exit => Flow::Stay,
             Screen::Match(im) => im.tick(keys, &self.scores, cx),
         }

@@ -143,9 +143,6 @@ pub fn tutorial_page_tick(keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> 
     Gameplay::enter(m, cx)
 }
 
-/// Farewell length. shortcut: open item O5, the timing was not read; revisit with a capture.
-pub const FAREWELL_MS: u64 = 3000;
-
 /// The UI click on a selection move.
 pub const CLICK: Event = Event::Click {
     volume_cb: 0,
@@ -314,25 +311,77 @@ fn after_period(m: &mut MatchState, cx: &mut Ctx) -> MatchScreen {
     }
 }
 
-/// Farewell (0x82). Open item O5: timing and choreography.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Farewell (0x82), `FUN_00449fae` / `FUN_0044a641`: a logo zoom, then a key starts the exit
+/// fade. There is no timeout (answers.md "Farewell length").
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Farewell {
-    pub until: Timer,
+    /// The `logo` scale, 0.045 up to 1.0.
+    pub scale: f64,
+    /// The 1000 ms wait, then the zoom step timer.
+    pub step: Timer,
+    pub zooming: bool,
+    /// The second layer's 150 ms effect, started when the zoom ends.
+    pub effect: Timer,
+    /// The 700 ms exit fade (alpha 0 → 255).
+    pub fade: Option<Fade>,
 }
+
+pub const FAREWELL_WAIT_MS: u64 = 1000;
+pub const FAREWELL_FIRST_STEP_MS: u64 = 25;
+pub const FAREWELL_EFFECT_MS: u64 = 150;
+pub const FAREWELL_FADE_MS: u64 = 700;
+const FAREWELL_START_SCALE: f64 = 0.045;
+const FAREWELL_SCALE_STEP: f64 = 0.05;
 
 impl Farewell {
     pub fn new(cx: &mut Ctx) -> Self {
         Self {
-            until: Timer::armed(cx.now, FAREWELL_MS),
+            scale: FAREWELL_START_SCALE,
+            step: Timer::armed(cx.now, FAREWELL_WAIT_MS),
+            zooming: false,
+            effect: Timer::UNARMED,
+            fade: None,
         }
     }
 
-    pub fn tick(&mut self, cx: &mut Ctx) -> Flow {
-        if self.until.expired(cx.now) {
-            Flow::Go(Screen::Exit)
-        } else {
-            Flow::Stay
+    pub fn tick(&mut self, keys: &KeyState, cx: &mut Ctx) -> Flow {
+        if let Some(fade) = &mut self.fade {
+            return if fade.step() {
+                Flow::Go(Screen::Exit)
+            } else {
+                Flow::Stay
+            };
         }
+        if self.scale < 1.0 {
+            self.zoom(cx);
+            return Flow::Stay;
+        }
+        if self.effect.expired(cx.now) && keys.skip() {
+            self.fade = Some(Fade::new(true, FAREWELL_FADE_MS));
+            cx.emit(Event::play(SoundSlot::VOICE_LOSE));
+        }
+        Flow::Stay
+    }
+
+    fn zoom(&mut self, cx: &mut Ctx) {
+        if !self.step.expired(cx.now) {
+            return;
+        }
+        if !self.zooming {
+            self.zooming = true;
+            self.step.arm(cx.now, FAREWELL_FIRST_STEP_MS);
+            return;
+        }
+        // The next interval comes from the scale before the step.
+        let next = (40.0 - 40.0 * self.scale + 2.0) as u64;
+        self.step.arm(cx.now, next);
+        self.scale += FAREWELL_SCALE_STEP;
+        if self.scale < 1.0 {
+            return;
+        }
+        self.scale = 1.0;
+        self.effect.arm(cx.now, FAREWELL_EFFECT_MS);
+        cx.emit(Event::play(SoundSlot::SPLASH));
     }
 }
 
@@ -729,11 +778,49 @@ mod tests {
         tap(&mut rig, &mut s, Scancode::RETURN);
         assert_eq!(s.dialog, Some(QuitDialog::new(true)));
         tap(&mut rig, &mut s, Scancode::LEFT);
-        let left = rig.now();
         tap(&mut rig, &mut s, Scancode::RETURN);
         assert!(matches!(s.screen, Screen::Farewell(_)));
+    }
+
+    fn farewell(s: &State) -> Option<Farewell> {
+        match &s.screen {
+            Screen::Farewell(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// answers.md "Farewell length": a 1000 ms wait, then 20 zoom steps 25, 40, 38, …, 4 ms apart
+    /// (1443 ms in all, plus up to one tick of lateness per step), slot 46; a key before the zoom
+    /// and its 150 ms effect are done is ignored; then a key starts a 700 ms fade, slot 33, exit.
+    #[test]
+    fn the_farewell_waits_for_a_key_after_the_logo_zoom() {
+        let mut rig = Rig::new(1);
+        let mut s = State::new(Persisted::default());
+        s.screen = Screen::Farewell(rig.cx(Farewell::new));
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        idle_until(&mut rig, &mut s, |s| {
+            farewell(s).is_some_and(|f| f.scale >= 1.0)
+        });
+        let zoomed = rig.now();
+        assert!((1443..1443 + 20 * 16).contains(&zoomed), "{zoomed}");
+        assert_eq!(farewell(&s).map(|f| f.scale), Some(1.0));
+        assert!(rig.events.contains(&Event::play(SoundSlot(46))));
+        assert!(farewell(&s).is_some_and(|f| f.fade.is_none()));
+        while rig.now() < zoomed + 3000 {
+            rig.step(&[], |k, cx| s.tick(k, cx));
+        }
+        assert!(farewell(&s).is_some(), "no timeout");
+        rig.events.clear();
+        tap(&mut rig, &mut s, Scancode::ESCAPE);
+        assert!(rig.events.contains(&Event::play(SoundSlot(33))));
+        let pressed = rig.now();
         idle_until(&mut rig, &mut s, |s| matches!(s.screen, Screen::Exit));
-        assert!(rig.now() - left > FAREWELL_MS);
+        // 700 ms at 65 Hz is 45.5 ticks of alpha, so 46 ticks.
+        assert!(
+            (690..=720).contains(&(rig.now() - pressed)),
+            "{}",
+            rig.now() - pressed
+        );
     }
 
     fn menu_page(s: &State) -> Option<crate::menu::Page> {
