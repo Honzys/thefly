@@ -173,6 +173,19 @@ impl Gfx<'_, '_, '_> {
         self.r.draw_text(font, size, s, (x, y), c)
     }
 
+    /// `s` centred on `cx`.
+    pub fn text_centred(
+        &mut self,
+        font: &str,
+        size: u16,
+        s: &str,
+        (cx, y): (f32, f32),
+        c: Color,
+    ) -> Result<(), Error> {
+        let w = self.r.text_width(font, size, s)?;
+        self.text(font, size, s, cx - w / 2.0, y, c)
+    }
+
     /// `FUN_0044daa6`: four copies at (±d, ±d) in the outline colour, then the fill.
     pub fn text_outlined(
         &mut self,
