@@ -40,7 +40,7 @@ pub struct MatchConfig {
     pub ai_level: AiLevel,
     /// 2, 4 or 6; 3 in Highscore mode.
     pub days: u8,
-    /// Options toggle; makes periods 3 minutes and uses the tutorial inventories.
+    /// Options toggle; uses the tutorial inventories (the period stays [`PERIOD_MINUTES`]).
     pub tutorial: bool,
 }
 

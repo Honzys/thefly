@@ -427,9 +427,9 @@ impl Farmer {
         self.nuclear.timer.disarm();
     }
 
-    /// `FUN_0043cd23`: the midges slowdown pulse (AR §6.3 steps 1–3).
-    // shortcut: answers.md "Farmer pulse timer" [I], an unarmed timer reads as expired, so the
-    // first pulse fires at once; the farmer's own timer init was not checked. Revisit with it.
+    /// `FUN_0043cd23`: the midges slowdown pulse (AR §6.3 steps 1–3). The timer is built with its
+    /// deadline at the period build and never armed before the first pulse, so that pulse fires
+    /// at once, as the unarmed timer does (answers.md "Farmer pulse timer").
     pub fn midges_pulse(&mut self, stuck: i32, total: i32, cx: &mut Ctx) {
         let r = if total == 0 {
             0.0

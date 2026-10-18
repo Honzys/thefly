@@ -17,8 +17,8 @@ use thefly_sim::{GameData, KeyState, Scancode, Sim};
 
 /// The cheap default: one match per mode.
 const DEFAULT_MATCHES: u32 = MODES.len() as u32;
-/// Ticks one screen may hold before the soak calls it a stall: 15 minutes. A 3-minute tutorial
-/// period is 11 700 ticks; a random human walking a shop cursor onto Done has taken 20 073.
+/// Ticks one screen may hold before the soak calls it a stall: 15 minutes. A 2-minute period is
+/// 7 800 ticks; a random human walking a shop cursor onto Done has taken 20 073.
 const STALL_TICKS: u64 = 60_000;
 /// Ticks one whole match may take: 18 periods of a 6-day match plus every screen between.
 const MATCH_TICKS: u64 = 600_000;
