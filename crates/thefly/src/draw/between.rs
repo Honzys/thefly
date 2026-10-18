@@ -2,11 +2,13 @@
 
 use thefly_platform::{Color, Error};
 use thefly_sim::bonus::{BonusPhase, BonusRound, COIN_VALUE, HIT_VALUE, Piece};
-use thefly_sim::bourse::{Bourse, COLUMN_OBJECT, COLUMNS};
+use thefly_sim::bourse::{Bourse, COLUMN_OBJECT};
 use thefly_sim::economy::ITEMS;
 use thefly_sim::match_state::MatchState;
 use thefly_sim::screen::MatchScreen;
-use thefly_sim::shop::{GoodiesShop, ShopSide, TrapsShop};
+use thefly_sim::shop::{GoodiesShop, ShopSide, Tally, TrapsShop};
+use thefly_sim::world::objects::{EXTREME_TYPES, NORMAL_TYPES};
+use thefly_sim::world::traps::TrapKind;
 
 use super::View;
 use crate::assets::{ARIAL_BLACK, JOINT};
@@ -35,8 +37,9 @@ fn shop_fade(v: &View, cur: f64) -> f64 {
 /// SR §3.1, laid out as the original's captures show it: the price in red in the box right of
 /// each top icon, the side's panel and bottom bar (`g_barres_bas` frame 0 fly, 1 farmer) over the
 /// machine, owned counts as a coloured icon plus "xN" in the bottom boxes, and the money in the
-/// panel. shortcut: open item O4, the purchase animation, the cockroaches, the tally art and the
-/// level gauges are not decoded; revisit when `FUN_0042322f` is read.
+/// panel; the bought item drops from its button and the tally sprite slides in from the right.
+/// shortcut: open item O4, the cockroaches and the level gauges are not decoded; revisit when
+/// `FUN_0042322f` is read.
 pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> Result<(), Error> {
     g.spr("g_background", 0.0, 0.0, 0)?;
     let belt = if s.conveyor.is_some() {
@@ -54,10 +57,23 @@ pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> R
     let shake = |n: u64| ((v.now / 40 + n) % 5) as f32 - 2.0;
     let (mx, my) = (7.0 + shake(0), 143.0 + shake(2));
     g.spr("g_Machine", mx, my, 0)?;
+    let prev = match v.prev_screen() {
+        Some(MatchScreen::GoodiesShop(p)) if p.side == s.side => Some(p.as_ref()),
+        _ => None,
+    };
+    // the tally sprite falls into the hopper, behind its cover
+    if let Some(t) = &s.tally {
+        tally(g, v, m, t, prev.and_then(|p| p.tally.as_ref()))?;
+    }
     g.spr("g_Machine_cache", mx + 46.0, my + 156.0, 0)?;
-    let (_, can_h) = g.size("can1")?;
-    g.spr("can1", 805.0, 239.0 - can_h, 0)?;
     g.spr("g_barres_bas", 0.0, 369.0, u32::from(!fly))?;
+    if let Some(d) = &s.conveyor {
+        let pd = prev.and_then(|p| p.conveyor.as_ref());
+        let y = v.l.i(pd.map(|d| d.y), d.y);
+        // `Goodies` holds the fly's five icons, then the farmer's: item k is frame (k + 5) % 10
+        let frame = (d.item as u32 + 5) % 10;
+        g.spr("Goodies", d.x as f32, y, frame)?;
+    }
 
     let (icon0, item0) = if fly { (0, 5) } else { (5, 0) };
     if let Some(&x) = SHOP_SLOTS.get(s.cursor).filter(|_| s.cursor < 5) {
@@ -101,6 +117,39 @@ pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> R
     g.fade(shop_fade(v, s.fade.alpha))
 }
 
+/// `g_flymort` and the food sprites share the sim's 100 × 75 tally box, bottom-aligned on it.
+const TALLY_BOX_H: f32 = 75.0;
+
+/// The payout tally's moving sprite: a dead fly (farmer) or the saved food (fly), and the
+/// "x N" of a stopped food. shortcut: the label's place and font are not in the docs (O4); it
+/// is drawn right of the sprite in the bottom boxes' white. Revisit when `FUN_0042322f` is read.
+fn tally(g: &mut Gfx, v: &View, m: &MatchState, t: &Tally, p: Option<&Tally>) -> Result<(), Error> {
+    let Some(item) = t.pending.first() else {
+        return Ok(());
+    };
+    let (name, frame) = match t.side {
+        ShopSide::Farmer => ("g_flymort", item.label.saturating_sub(1) as u32),
+        ShopSide::Fly if m.config.extreme() => (EXTREME_TYPES[item.label % 3].name, 0),
+        ShopSide::Fly => (NORMAL_TYPES[item.label % NORMAL_TYPES.len()].name, 0),
+    };
+    let (w, h) = g.size(name)?;
+    let ps = p.map(|p| p.sprite);
+    let x = v.l.i(ps.map(|s| s.x), t.sprite.x);
+    let y = v.l.i(ps.map(|s| s.y), t.sprite.y) + TALLY_BOX_H - h;
+    g.spr(name, x, y, frame)?;
+    if !t.label.is_armed() || t.label.expired(v.now) {
+        return Ok(());
+    }
+    g.text(
+        JOINT,
+        30,
+        &format!("x {}", item.count),
+        x + w + 10.0,
+        y,
+        WHITE,
+    )
+}
+
 /// Traps-shop items; the last is the done button (SR §3.2).
 const TRAP_ITEMS: [(f32, f32); 4] = [
     (23.0, 281.0),
@@ -109,12 +158,35 @@ const TRAP_ITEMS: [(f32, f32); 4] = [
     (266.0, 530.0),
 ];
 
+/// The carried trap's top: a fan stands on y 486, the others at y 396 (answers.md "Traps shop:
+/// carrying a trap").
+const CARRY_FAN_BOTTOM: f32 = 486.0;
+const CARRY_Y: f32 = 396.0;
+
 /// SR §3.2. shortcut: open item O4, the icons, the cross and the token text positions were not
-/// read; only the backdrop and the cursor are drawn, with the token count bottom right.
+/// read; the backdrop, the cursor and the carried trap are drawn, with the token count bottom
+/// right.
 pub fn traps_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &TrapsShop) -> Result<(), Error> {
     g.spr("p_traps", 0.0, 0.0, 0)?;
     if let Some(&(x, y)) = TRAP_ITEMS.get(s.cursor) {
         g.spr("p_fleche", x, y, v.anim(30, 3))?;
+    }
+    if let Some((kind, x)) = s.carrying {
+        let prev = match v.prev_screen() {
+            Some(MatchScreen::TrapsShop(p)) => p.carrying.map(|c| c.1),
+            _ => None,
+        };
+        // the shop draws the small icons, whose widths are the sim's shop-px trap widths
+        let name = match kind {
+            TrapKind::Flypaper => "p_icone_colle_mouche",
+            TrapKind::FanLeft => "p_icone_ventilo_gauche",
+            TrapKind::FanRight => "p_icone_ventilo_droite",
+            TrapKind::Zapper => "p_icone_tue_mouche",
+        };
+        let (_, h) = g.size(name)?;
+        let fan = matches!(kind, TrapKind::FanLeft | TrapKind::FanRight);
+        let y = if fan { CARRY_FAN_BOTTOM - h } else { CARRY_Y };
+        g.spr(name, v.l.i(prev, x), y, 0)?;
     }
     let tokens = m.economy.farmer.tokens;
     g.text_fit(
@@ -163,10 +235,6 @@ pub fn bourse(g: &mut Gfx, _v: &View, m: &MatchState, b: &Bourse) -> Result<(), 
     g.spr("g_boursebg", 0.0, 0.0, 0)?;
     let e = &m.economy;
     let price = |obj: usize| e.food_prices.get(obj).map_or(0, |p| *p as i32);
-    let in_play = |obj: usize| e.present.get(obj).copied().unwrap_or(false);
-    let blinking = (0..COLUMNS)
-        .filter(|&i| in_play(COLUMN_OBJECT[i]))
-        .max_by_key(|&i| price(COLUMN_OBJECT[i]));
     for (i, &obj) in COLUMN_OBJECT.iter().enumerate() {
         let col = (i % 11) as f32;
         let (base, cover_y) = if i < 11 {
@@ -178,9 +246,9 @@ pub fn bourse(g: &mut Gfx, _v: &View, m: &MatchState, b: &Bourse) -> Result<(), 
         for (off, len, c) in bar_bands(b.bars[i]) {
             g.fill(x, base - (off + len) as f32, 9.0, len as f32, c)?;
         }
-        let hidden = b.blink_on && blinking == Some(i) && b.bars[i] >= price(obj);
+        let hidden = b.blink_on && b.leader == Some(i) && b.bars[i] >= price(obj);
         if !hidden {
-            let (frame, alpha) = if in_play(obj) { (1, 255.0) } else { (0, 150.0) };
+            let (frame, alpha) = if b.in_play[i] { (1, 255.0) } else { (0, 150.0) };
             g.spr_ex(
                 "g_bourse_cache",
                 27.0 + 69.0 * col,
@@ -210,21 +278,47 @@ pub fn bourse(g: &mut Gfx, _v: &View, m: &MatchState, b: &Bourse) -> Result<(), 
     Ok(())
 }
 
-fn pieces(
-    g: &mut Gfx,
-    v: &View,
-    (name, frames): (&str, u32),
-    cur: &[Piece],
-    prev: Option<&[Piece]>,
-) -> Result<(), Error> {
-    for (i, p) in cur.iter().enumerate().filter(|(_, p)| p.active) {
-        let pp = prev.and_then(|ps| ps.get(i)).filter(|p| p.active);
-        let x = v.l.f(pp.map(|p| p.x), p.x);
-        let y = v.l.f(pp.map(|p| p.y), p.y) + BONUS_Y;
-        if name == "piecetap" {
-            g.spr("ailesgoodies", x - 26.0, y - 8.0, v.anim(60, 3))?;
-        }
-        g.spr(name, x, y, (v.anim(50, frames) + i as u32) % frames)?;
+/// The interpolated screen positions of the active pieces, with their slot.
+fn piece_xy<'a>(
+    v: &'a View,
+    cur: &'a [Piece],
+    prev: Option<&'a [Piece]>,
+) -> impl Iterator<Item = (usize, &'a Piece, f32, f32)> + 'a {
+    cur.iter()
+        .enumerate()
+        .filter(|(_, p)| p.active)
+        .map(move |(i, p)| {
+            let pp = prev.and_then(|ps| ps.get(i)).filter(|p| p.active);
+            let x = v.l.f(pp.map(|p| p.x), p.x);
+            let y = v.l.f(pp.map(|p| p.y), p.y) + BONUS_Y;
+            (i, p, x, y)
+        })
+}
+
+/// `piece` frames; the sim's 16 is a port count the 15-frame sheet wraps.
+const COIN_SHEET_FRAMES: u64 = 15;
+/// `ailesgoodies` frames (a third of its 300 px sheet) and their offset from the target.
+const WING_FRAMES: u64 = 3;
+const WING_DX: f32 = -24.0;
+const WING_DY: f32 = -12.0;
+
+/// Coins spin from their own start frame at their own delay (gaps §7.3).
+fn coins(g: &mut Gfx, v: &View, b: &BonusRound, prev: Option<&BonusRound>) -> Result<(), Error> {
+    for (_, p, x, y) in piece_xy(v, &b.coins, prev.map(|p| p.coins.as_slice())) {
+        let steps = v.now / p.anim_ms.max(1) as u64;
+        let frame = (p.frame.max(0) as u64 + steps) % COIN_SHEET_FRAMES;
+        g.spr("piece", x, y, frame as u32)?;
+    }
+    Ok(())
+}
+
+/// The winged `piecetap` balloons; each slot flaps at its own setup delay.
+fn targets(g: &mut Gfx, v: &View, b: &BonusRound, prev: Option<&BonusRound>) -> Result<(), Error> {
+    for (i, _, x, y) in piece_xy(v, &b.targets, prev.map(|p| p.targets.as_slice())) {
+        let ms = b.wing_ms.get(i).map_or(1, |&ms| ms.max(1) as u64);
+        let frame = (v.now / ms) % WING_FRAMES;
+        g.spr("ailesgoodies", x + WING_DX, y + WING_DY, frame as u32)?;
+        g.spr("piecetap", x, y, 0)?;
     }
     Ok(())
 }
@@ -248,16 +342,24 @@ pub fn bonus(g: &mut Gfx, v: &View, b: &BonusRound) -> Result<(), Error> {
     g.spr("bckbonusfond", 0.0, BONUS_Y, 0)?;
     // the coins and the actors pass in front of the fence (65-bonus-*)
     g.spr("bckbonusbarre", 0.0, BARRE_Y, 0)?;
-    let coins = prev.map(|p| p.coins.as_slice());
-    pieces(g, v, ("piece", 15), &b.coins, coins)?;
+    coins(g, v, b, prev)?;
     let fx = v.l.f(prev.map(|p| p.fly.x), b.fly.x);
     let fy = v.l.f(prev.map(|p| p.fly.y), b.fly.y) + BONUS_Y;
     g.spr("Face", fx, fy, v.anim(50, 10))?;
-    let targets = prev.map(|p| p.targets.as_slice());
-    pieces(g, v, ("piecetap", 1), &b.targets, targets)?;
+    targets(g, v, b, prev)?;
     let sx = v.l.f(prev.map(|p| p.swatter.x), b.swatter.x);
     let sy = v.l.f(prev.map(|p| p.swatter.y), b.swatter.y) + BONUS_Y;
     g.spr("tapette-1", sx - 50.0, sy - 10.0, 0)?;
+    // the bars cut off whatever leaves the field (65-bonus-05: the hand ends at y 520)
+    let field_h = b.bg_h as f32;
+    g.fill(0.0, 0.0, 800.0, BONUS_Y, BLACK)?;
+    g.fill(
+        0.0,
+        BONUS_Y + field_h,
+        800.0,
+        600.0 - BONUS_Y - field_h,
+        BLACK,
+    )?;
     match b.phase {
         BonusPhase::Countdown { count, .. } => {
             let s = if count >= 1 {
