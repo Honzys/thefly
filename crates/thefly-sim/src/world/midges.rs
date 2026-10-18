@@ -14,20 +14,23 @@ pub const SWARM_SLOTS: usize = 300;
 pub const SWARM_SPAWN: usize = 100;
 /// A swatter strike kills at most this many touched midges.
 pub const SWAT_KILLS: usize = 20;
-/// Traps push a touching midge by this on each axis, keeping the sign.
+/// A fan pushes a touching midge by this on each axis: + above 0, − at or below it.
 pub const TRAP_PUSH: i32 = 180;
 /// Per-tick chance (%) to re-roll a midge's homing point.
 pub const RETARGET_PERCENT: i32 = 30;
 /// The retarget roll is R(10) < 3 (gaps §8.1).
 pub const RETARGET_ROLL: i32 = 10;
 pub const RETARGET_BELOW: i32 = RETARGET_PERCENT / 10;
-/// FW §8.1 spawn: mover R(150) ms, speeds 200/200, runs 5/3, acceleration 30.
+/// FW §8.1 spawn: mover R(150) ms, speeds 200/200, runs 5/3; acceleration 0 (answers.md
+/// "Midges: spawn x, homing gates, ambient update and constructor").
 pub const MOVER_REROLL_MS: i32 = 150;
 pub const MOVER_SPEED: i32 = 200;
 pub const MOVER_RUNS: (i32, i32) = (5, 3);
-pub const MOVER_ACCEL: (i32, i32) = (30, 30);
-/// answers.md "Midge spawn draw order": x = raw rand, wrapped; the sign is R(10) < 5 → −1;
+pub const MOVER_ACCEL: (i32, i32) = (0, 0);
+/// answers.md "Midges: spawn x, ...": x = R(W − 810) + 800; the sign is R(10) < 5 → −1;
 /// |vx| = R(200) + 200; size R(5) + 30; y = R(600); a timer R(500) + 500.
+pub const SPAWN_X_MARGIN: i32 = 810;
+pub const SPAWN_X_BASE: i32 = 800;
 pub const SIGN_ROLL: i32 = 10;
 pub const SIGN_BELOW: i32 = 5;
 pub const SPAWN_Y_RAND: i32 = 600;
@@ -36,6 +39,7 @@ pub const SPAWN_VX_BASE: i32 = 200;
 pub const SIZE_RAND: i32 = 5;
 pub const SIZE_BASE: i32 = 30;
 pub const SPAWN_TIMER_RAND: i32 = 500;
+pub const SPAWN_TIMER_BASE: u64 = 500;
 /// Homing offsets R(181) and R(farmerH − 60); tolerances R(30).
 pub const HOME_Y_MARGIN: i32 = 60;
 pub const TOLERANCE_RAND: i32 = 30;
@@ -53,14 +57,29 @@ pub const ARC_TEST_DY: i32 = 7;
 pub const RESPAWN_X_RAND: i32 = 500;
 pub const RESPAWN_X_BASE: i32 = 1000;
 pub const RESPAWN_Y_BASE: i32 = 20;
-/// answers.md "Ambient midge population (O2)": R(15) midges at period load; per tick a jitter
-/// (R(100) > 70, then m = R(15) and an R(10) sign: vx = sign × m − vx); the fan push decays by
-/// 40 per tick.
+/// answers.md "Midges: spawn x, ..., ambient update and constructor": slot 0 at x 900, vx +60;
+/// then count = R(15) and slots 1..count − 1 at x = R(W), |vx| = R(30) + 45; each with size
+/// R(5) + 30, y = R(600) and a timer R(500) + 800. Parameters 100 / 10 / 50 / 50 / 30 / 0 and
+/// bounds x −1000..9000, y 0..600.
+pub const AMBIENT_FIRST_X: i32 = 900;
+pub const AMBIENT_FIRST_VX: i32 = 60;
 pub const AMBIENT_COUNT_RAND: i32 = 15;
+pub const AMBIENT_VX_RAND: i32 = 30;
+pub const AMBIENT_VX_BASE: i32 = 45;
+pub const AMBIENT_TIMER_BASE: u64 = 800;
+pub const AMBIENT_REROLL_MS: i32 = 100;
+pub const AMBIENT_SPEED: (i32, i32) = (10, 50);
+pub const AMBIENT_RUNS: (i32, i32) = (50, 30);
+pub const AMBIENT_ACCEL: (i32, i32) = (0, 0);
+pub const AMBIENT_X_BOUNDS: (i32, i32) = (-1000, 9000);
+pub const AMBIENT_Y_BOUNDS: (i32, i32) = (0, 600);
+/// The jitter, once per expiry of the midge's timer: R(100) > 70, then m = R(15) and an R(10)
+/// sign, vx = sign × m − vx.
 pub const JITTER_ROLL: i32 = 100;
 pub const JITTER_ABOVE: i32 = 70;
 pub const JITTER_RAND: i32 = 15;
-pub const AMBIENT_PUSH_DECAY: i32 = 40;
+/// A pushed v steps this much per tick back toward the v saved at the push.
+pub const PUSH_DECAY: i32 = 40;
 /// The world is one 600 px screen tall (game-spec §3).
 pub const WORLD_H: i32 = 600;
 pub const MIDGE_SPRITE: &str = "moucheron";
@@ -77,7 +96,7 @@ pub struct Midge {
     pub size: i32,
     /// The velocity is `mover.v`.
     pub(crate) mover: Wander,
-    /// The spawn vx (v0) and the homing speeds it seeds.
+    /// The spawn vx (v0); the homing speeds are 0 until the first R(100) > 50 re-roll.
     pub v0: i32,
     pub speed_x: i32,
     pub speed_y: i32,
@@ -91,8 +110,11 @@ pub struct Midge {
     pub stun_timer: Timer,
     /// Zapped (+0x204): drops with y acceleration 30 until below the world.
     pub falling: bool,
-    /// Ambient midges: the fan push, on top of the jitter, decaying toward 0.
-    pub push: [i32; 2],
+    /// The v saved by the last fan push; the update steps v back toward it.
+    pub saved_v: Option<[i32; 2]>,
+    /// The constructor's timer (R(500) + 500, ambient R(500) + 800); ambient midges jitter on
+    /// each expiry.
+    pub timer: Timer,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,22 +154,18 @@ impl Default for Swarm {
 }
 
 impl Midge {
-    /// `FUN_00404caf`'s per-midge draws, in rand order (answers.md "Midge spawn draw order").
-    /// The x tolerance is the second R(30), the y tolerance the first.
-    // shortcut: answers.md says x is the raw rand "then wrapped" without the width; the port
-    // wraps at W like the fly layer. Revisit if midges spawn on the wrong side of the screen.
+    /// `FUN_00404caf`'s per-midge draws, in rand order (answers.md "Midge spawn draw order",
+    /// amended by "Midges: spawn x, ..."). The x tolerance is the second R(30), the y
+    /// tolerance the first.
+    // shortcut: answers.md "Midges: spawn x, ..." sets accel flag x, so x never re-rolls under
+    // Wander; `mover::Wander` has no such flag, so x still re-rolls (three draws per expiry).
+    // Revisit when the mover gains per-axis accel flags.
     fn spawn(cx: &mut Ctx) -> Self {
-        let x = cx.rng.rand().rem_euclid(W);
-        let sign = if cx.rng.r(SIGN_ROLL) < SIGN_BELOW {
-            -1
-        } else {
-            1
-        };
-        let vx = sign * (cx.rng.r(SPAWN_VX_RAND) + SPAWN_VX_BASE);
+        let x = cx.rng.r(W - SPAWN_X_MARGIN) + SPAWN_X_BASE;
+        let vx = sign_roll(cx) * (cx.rng.r(SPAWN_VX_RAND) + SPAWN_VX_BASE);
         let size = cx.rng.r(SIZE_RAND) + SIZE_BASE;
         let y = cx.rng.r(SPAWN_Y_RAND);
-        // The timer `FUN_00442806` arms; nothing documented reads it.
-        cx.rng.r(SPAWN_TIMER_RAND);
+        let timer = midge_timer(SPAWN_TIMER_BASE, cx);
         let tol_y = cx.rng.r(TOLERANCE_RAND);
         let tol_x = cx.rng.r(TOLERANCE_RAND);
         let home_dy = cx.rng.r(SPRITE_H - HOME_Y_MARGIN);
@@ -166,12 +184,35 @@ impl Midge {
             size,
             mover,
             v0: vx,
-            speed_x: vx.abs(),
-            speed_y: (vx - HOMING_Y_OFFSET).abs(),
             home_dx,
             home_dy,
             tol_x,
             tol_y,
+            timer,
+            ..Self::default()
+        }
+    }
+
+    /// One ambient midge of the constructor: size, y and timer after the caller's x and vx.
+    fn ambient(x: i32, vx: i32, cx: &mut Ctx) -> Self {
+        let size = cx.rng.r(SIZE_RAND) + SIZE_BASE;
+        let y = cx.rng.r(SPAWN_Y_RAND);
+        let timer = midge_timer(AMBIENT_TIMER_BASE, cx);
+        let mut mover = Wander::new(
+            AMBIENT_REROLL_MS,
+            AMBIENT_SPEED,
+            AMBIENT_RUNS,
+            AMBIENT_ACCEL,
+        );
+        mover.v[0] = vx;
+        Self {
+            active: true,
+            x,
+            y,
+            size,
+            mover,
+            v0: vx,
+            timer,
             ..Self::default()
         }
     }
@@ -190,20 +231,19 @@ impl Midge {
         }
     }
 
-    /// `FUN_00442f95`, after the contact step (answers.md "Midge homing"): maybe new speeds,
-    /// then x steers toward farmer x + home x and y toward farmer y + home y outside ±tol_y
-    /// (inside, y wanders). The x tolerance is not used.
-    // shortcut: answers.md does not define the "ring q" that gates the x steer (always on for
-    // q in [0, 4)), the speeds before the first re-roll (the port seeds R = 0 of the formula) or
-    // how homing meets the hit and fall states (the port draws, then leaves a stunned or falling
-    // midge's velocity alone). Revisit with FUN_00442f95.
+    /// `FUN_00442f95`, after the contact step (answers.md "Midges: spawn x, homing gates, ...").
+    /// A stunned or falling midge does nothing. Else maybe new speeds, then x steers toward
+    /// farmer x + home x and y toward farmer y + home y outside ±tol_y (inside, y wanders). The x
+    /// tolerance is not used.
+    // shortcut: answers.md gates the x steer by the "ring q as decoded in round 1", which no
+    // round defines beyond "q in [0, 4)"; the port always steers x. Revisit with FUN_00442f95.
     fn home(&mut self, farmer: &Farmer, cx: &mut Ctx) {
+        if self.stunned || self.falling {
+            return;
+        }
         if cx.rng.r(HOMING_ROLL) > HOMING_ABOVE {
             self.speed_x = cx.rng.r(HOMING_X_RAND) + self.v0.abs();
             self.speed_y = cx.rng.r(HOMING_Y_RAND) + (self.v0 - HOMING_Y_OFFSET).abs();
-        }
-        if self.stunned || self.falling {
-            return;
         }
         let dx = farmer.x + self.home_dx - self.x;
         self.mover.v[0] = dx.signum() * self.speed_x;
@@ -213,8 +253,8 @@ impl Midge {
         }
     }
 
-    /// The goodie midge's update: the wander mover; a stunned midge holds still, a zapped one
-    /// drops.
+    /// `FUN_00442960` for a goodie midge: a stunned midge holds still, a zapped one drops, else
+    /// the push decays and the wander mover moves it.
     fn update(&mut self, cx: &mut Ctx) {
         if self.stunned && !self.falling {
             return;
@@ -222,10 +262,24 @@ impl Midge {
         let (dx, dy) = if self.falling {
             self.fall()
         } else {
+            self.decay();
             self.mover.step(cx)
         };
         self.x += dx;
         self.y += dy;
+    }
+
+    /// One push decay step: v moves [`PUSH_DECAY`] toward the saved v, and the push ends there.
+    fn decay(&mut self) {
+        let Some(saved) = self.saved_v else {
+            return;
+        };
+        for (v, s) in self.mover.v.iter_mut().zip(saved) {
+            *v = s.clamp(*v - PUSH_DECAY, *v + PUSH_DECAY);
+        }
+        if self.mover.v == saved {
+            self.saved_v = None;
+        }
     }
 
     fn fall(&mut self) -> (i32, i32) {
@@ -233,35 +287,31 @@ impl Midge {
         self.mover.integrate()
     }
 
-    /// The ambient update (answers.md "Ambient midge population"): the jitter, then the fan push
-    /// decays by 40; the midge moves by jitter + push.
-    // shortcut: answers.md gives the jitter and the decay, not how the push combines with the
-    // jitter; the port keeps the push apart and moves by their sum through the FPS integrator.
-    // Revisit when the ambient update is read.
+    /// `FUN_00442960` for an ambient midge: the goodie update with the jitter first, and the
+    /// position kept inside the ambient bounds while flying.
+    // shortcut: answers.md "Midges: ..., ambient update and constructor" gives the parameters
+    // 100 / 10 / 50 / 50 / 30 / 0 without naming them; the port reads them as the wander mover's
+    // (re-roll, speeds, runs, accel) like FW §8.1's goodie midge. It also does not say where the
+    // jitter sits in the update or whether the timer re-arms at its period (the port: first, and
+    // yes). Revisit when FUN_00442960 is read.
     fn ambient_update(&mut self, cx: &mut Ctx) {
-        if self.stunned && !self.falling {
+        if self.stunned || self.falling {
+            self.update(cx);
             return;
         }
-        if self.falling {
-            let (dx, dy) = self.fall();
-            (self.x, self.y) = (self.x + dx, self.y + dy);
+        self.jitter(cx);
+        self.update(cx);
+        self.x = self.x.clamp(AMBIENT_X_BOUNDS.0, AMBIENT_X_BOUNDS.1);
+        self.y = self.y.clamp(AMBIENT_Y_BOUNDS.0, AMBIENT_Y_BOUNDS.1);
+    }
+
+    /// On each expiry of the midge's timer: R(100) > 70, then vx = sign × R(15) − vx.
+    fn jitter(&mut self, cx: &mut Ctx) {
+        if !self.timer.expired_rearm(cx.now) || cx.rng.r(JITTER_ROLL) <= JITTER_ABOVE {
             return;
         }
-        if cx.rng.r(JITTER_ROLL) > JITTER_ABOVE {
-            let m = cx.rng.r(JITTER_RAND);
-            let sign = if cx.rng.r(SIGN_ROLL) < SIGN_BELOW {
-                -1
-            } else {
-                1
-            };
-            self.mover.v[0] = sign * m - self.mover.v[0];
-        }
-        self.push = self.push.map(|p| toward_zero(p, AMBIENT_PUSH_DECAY));
-        let jitter = self.mover.v;
-        self.mover.v = [jitter[0] + self.push[0], jitter[1] + self.push[1]];
-        let (dx, dy) = self.mover.integrate();
-        self.mover.v = jitter;
-        (self.x, self.y) = (self.x + dx, self.y + dy);
+        let m = cx.rng.r(JITTER_RAND);
+        self.mover.v[0] = sign_roll(cx) * m - self.mover.v[0];
     }
 
     /// gaps §8.1 step 1: the respawn condition.
@@ -306,62 +356,55 @@ impl Midge {
         (self.tol_x, self.tol_y) = (b, a);
     }
 
-    /// FW §8.2 step 3: a midge in a fan gets each component pushed 180 further from zero.
+    /// `FUN_00427885` (FW §8.2 step 3): a midge in a fan is pushed.
     fn fan_push(&mut self, traps: &Traps, cx: &Ctx) {
         if traps.fan_touches(self.x, self.y, cx) {
-            self.mover.v = self.mover.v.map(|v| v + away_from_zero(v));
+            self.push();
         }
     }
 
-    /// The ambient fan push lands on the decaying push, away from the midge's velocity.
-    fn ambient_fan_push(&mut self, traps: &Traps, cx: &Ctx) {
-        if !traps.fan_touches(self.x, self.y, cx) {
-            return;
-        }
-        for a in 0..2 {
-            self.push[a] += away_from_zero(self.mover.v[a] + self.push[a]);
-        }
+    /// Save v, then add +180 to a component above 0 and −180 to the others.
+    fn push(&mut self) {
+        self.saved_v = Some(self.mover.v);
+        self.mover.v = self
+            .mover
+            .v
+            .map(|v| if v > 0 { v + TRAP_PUSH } else { v - TRAP_PUSH });
     }
 }
 
-/// +180 for a positive (or zero) component, −180 for a negative one.
-fn away_from_zero(v: i32) -> i32 {
-    if v < 0 { -TRAP_PUSH } else { TRAP_PUSH }
-}
-
-/// `v` moved `d` toward 0 without overshooting.
-fn toward_zero(v: i32, d: i32) -> i32 {
-    if v > 0 {
-        (v - d).max(0)
+/// R(10) < 5 → −1, else +1.
+fn sign_roll(cx: &mut Ctx) -> i32 {
+    if cx.rng.r(SIGN_ROLL) < SIGN_BELOW {
+        -1
     } else {
-        (v + d).min(0)
+        1
     }
+}
+
+/// A midge's constructor timer, R(500) + `base` ms.
+fn midge_timer(base: u64, cx: &mut Ctx) -> Timer {
+    let ms = u64::try_from(cx.rng.r(SPAWN_TIMER_RAND)).unwrap_or(0);
+    Timer::armed(cx.now, ms + base)
 }
 
 /// The cosmetic population at game+0x15a20 that reacts to the swatter and fans. It never homes
-/// and is never removed (answers.md "Ambient midge population").
+/// and is never removed (answers.md "Ambient midge population (O2)").
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AmbientMidges {
     pub slots: Vec<Midge>,
 }
 
 impl AmbientMidges {
-    /// Period load: R(15) midges.
-    // shortcut: answers.md gives the count, not the per-midge draws; each midge is placed by the
-    // contact routine's respawn draws (x = R(500) + 1000, y = R(H − h) + 20) and starts at rest.
-    // Revisit when the ambient constructor is read.
+    /// Period load: slot 0, then slots 1..R(15) − 1, so max(count, 1) midges, all moving.
     pub fn spawn(cx: &mut Ctx) -> Self {
-        let n = cx.rng.r(AMBIENT_COUNT_RAND);
-        let slots = (0..n)
-            .map(|_| {
-                let mut m = Midge {
-                    active: true,
-                    ..Midge::default()
-                };
-                m.respawn(cx);
-                m
-            })
-            .collect();
+        let mut slots = vec![Midge::ambient(AMBIENT_FIRST_X, AMBIENT_FIRST_VX, cx)];
+        let count = cx.rng.r(AMBIENT_COUNT_RAND);
+        for _ in 1..count {
+            let x = cx.rng.r(W);
+            let vx = sign_roll(cx) * (cx.rng.r(AMBIENT_VX_RAND) + AMBIENT_VX_BASE);
+            slots.push(Midge::ambient(x, vx, cx));
+        }
         Self { slots }
     }
 }
@@ -374,7 +417,7 @@ impl World {
             let zapped = self.traps.arcs_at(m.arc_target(cx), cx) > 0;
             m.contact(swatter, zapped, cx);
             m.ambient_update(cx);
-            m.ambient_fan_push(&self.traps, cx);
+            m.fan_push(&self.traps, cx);
         }
     }
 
@@ -442,12 +485,13 @@ mod tests {
         World::bare(&m, &mut rig.cx(0))
     }
 
-    /// Seed 1 in answers.md order. First midge: x 41, sign 18467 % 10 = 7 (+), |vx| 6334 % 200 +
-    /// 200 = 334, size 26500 % 5 + 30 = 30, y 19169 % 600 = 569, timer 15724, tolerances A
-    /// 11478 % 30 = 18 and B 29358 % 30 = 18, home y 26962 % 118 = 58, home x 24464 % 181 = 29.
-    /// Second: x 5705 % 4000 = 1705, sign 28145 % 10 = 5 (+), |vx| 23281 % 200 + 200 = 281, size
-    /// 16827 % 5 + 30 = 32, y 9961 % 600 = 361, timer 491, A 2995 % 30 = 25, B 11942 % 30 = 2
-    /// (x tolerance B, y tolerance A), home y 4827 % 118 = 107, home x 5436 % 181 = 6.
+    /// Seed 1 in answers.md order ("Midges: spawn x, ..."). First midge: x 41 % 3190 + 800 = 841,
+    /// sign 18467 % 10 = 7 (+), |vx| 6334 % 200 + 200 = 334, size 26500 % 5 + 30 = 30, y 19169 %
+    /// 600 = 569, timer 15724 % 500 + 500 = 724, tolerances A 11478 % 30 = 18 and B 29358 % 30 =
+    /// 18, home y 26962 % 118 = 58, home x 24464 % 181 = 29. Second: x 5705 % 3190 + 800 = 3315,
+    /// sign 28145 % 10 = 5 (+), |vx| 23281 % 200 + 200 = 281, size 16827 % 5 + 30 = 32, y 9961 %
+    /// 600 = 361, timer 491 + 500 = 991, A 2995 % 30 = 25, B 11942 % 30 = 2 (x tolerance B, y
+    /// tolerance A), home y 4827 % 118 = 107, home x 5436 % 181 = 6. No homing speed is seeded.
     #[test]
     fn a_use_adds_up_to_100_midges_and_caps_at_300() {
         let mut rig = Rig::new(1);
@@ -455,9 +499,11 @@ mod tests {
         s.spawn(&mut rig.cx(0));
         let (m, n) = (s.slots[0], s.slots[1]);
         assert!(s.on);
-        assert_eq!((m.x, m.y, m.mover.v[0], m.size), (41, 569, 334, 30));
+        assert_eq!((m.x, m.y, m.mover.v[0], m.size), (841, 569, 334, 30));
         assert_eq!((m.home_dx, m.home_dy, m.tol_x, m.tol_y), (29, 58, 18, 18));
-        assert_eq!((n.x, n.y, n.mover.v[0], n.size), (1705, 361, 281, 32));
+        assert_eq!((m.speed_x, m.speed_y), (0, 0));
+        assert!(!m.timer.expired(724) && m.timer.expired(725));
+        assert_eq!((n.x, n.y, n.mover.v[0], n.size), (3315, 361, 281, 32));
         assert_eq!((n.home_dx, n.home_dy, n.tol_x, n.tol_y), (6, 107, 2, 25));
         let active = |s: &Swarm| s.slots.iter().filter(|m| m.active).count();
         assert_eq!((active(&s), s.total), (100, 100));
@@ -545,36 +591,96 @@ mod tests {
         assert_eq!(m.mover.v, [-334, -60]);
     }
 
-    /// Seed 1: R(15) = 41 % 15 = 11 ambient midges; the first respawn-draws x 18467 % 500 + 1000
-    /// = 1467 and y 6334 % 573 + 20 = 51.
+    /// A stunned or falling midge makes no homing draws and keeps its velocity.
     #[test]
-    fn period_load_spawns_r15_ambient_midges() {
+    fn a_stunned_or_falling_midge_does_not_home() {
         let mut rig = Rig::new(1);
-        let a = AmbientMidges::spawn(&mut rig.cx(0));
-        assert_eq!(a.slots.len(), 11);
-        assert_eq!((a.slots[0].x, a.slots[0].y), (1467, 51));
+        let w = world(&mut rig);
+        for (stunned, falling) in [(true, false), (false, true)] {
+            let mut m = Midge {
+                active: true,
+                stunned,
+                falling,
+                ..Midge::default()
+            };
+            m.mover.v = [5, 7];
+            let before = rig.rng.clone();
+            m.home(&w.farmer, &mut rig.cx(0));
+            assert_eq!((m.mover.v, &rig.rng), ([5, 7], &before));
+        }
     }
 
-    /// One ambient midge at rest, seed 1, no traps: R(100) draws 41, 67, 34, 0, 69, 24 (≤ 70, no
-    /// jitter), then 78 > 70: m = 29358 % 15 = 3, sign 26962 % 10 = 2 (−), vx = −3 − 0. It never
-    /// homes on the farmer.
+    /// Seed 1, answers.md "Midges: ... ambient ... constructor": slot 0 at x 900, vx +60, size 41
+    /// % 5 + 30 = 31, y 18467 % 600 = 467, timer 6334 % 500 + 800 = 1134; count 26500 % 15 = 10;
+    /// slot 1 x 19169 % 4000 = 3169, sign 15724 % 10 = 4 (−), |vx| 11478 % 30 + 45 = 63, size
+    /// 29358 % 5 + 30 = 33, y 26962 % 600 = 562, timer 24464 % 500 + 800 = 1264. 3 + 1 + 9 × 6 =
+    /// 58 draws, so the next is draw 58 (27529).
     #[test]
-    fn an_ambient_midge_jitters_and_never_homes() {
+    fn period_load_builds_slot_0_then_r15_moving_ambient_midges() {
         let mut rig = Rig::new(1);
-        let mut w = world(&mut rig);
-        w.ambient_midges.slots = vec![Midge {
+        let a = AmbientMidges::spawn(&mut rig.cx(0));
+        let (m0, m1) = (a.slots[0], a.slots[1]);
+        assert_eq!(a.slots.len(), 10);
+        assert_eq!((m0.x, m0.y, m0.size, m0.mover.v), (900, 467, 31, [60, 0]));
+        assert!(!m0.timer.expired(1134) && m0.timer.expired(1135));
+        assert_eq!((m1.x, m1.y, m1.size, m1.mover.v), (3169, 562, 33, [-63, 0]));
+        assert!(!m1.timer.expired(1264) && m1.timer.expired(1265));
+        assert!(a.slots.iter().all(|m| m.active && m.mover.v[0] != 0));
+        assert_eq!(rig.rng.rand(), 27529);
+    }
+
+    /// A count of 0 or 1 still builds slot 0 alone, max(count, 1): the first seed whose fourth
+    /// draw (the count) is R(15) ≤ 1.
+    #[test]
+    fn an_r15_of_0_or_1_leaves_only_slot_0() {
+        let seed = (1..2000)
+            .find(|&s| {
+                let mut r = crate::rng::MsvcRand::new(s);
+                r.rand();
+                r.rand();
+                r.rand();
+                r.rand() % 15 <= 1
+            })
+            .expect("a seed in range");
+        let mut rig = Rig::new(seed);
+        assert_eq!(AmbientMidges::spawn(&mut rig.cx(0)).slots.len(), 1);
+    }
+
+    /// The jitter runs once per expiry of the midge's timer. Seed 12: R(100) = 77 > 70, m = 5628
+    /// % 15 = 3, sign 6232 % 10 = 2 (−): vx = −3 − 60 = −63. Before the next expiry, no draw.
+    #[test]
+    fn the_ambient_jitter_runs_once_per_timer_expiry() {
+        let mut rig = Rig::new(12);
+        let mut m = Midge {
             active: true,
-            x: 300,
-            y: 300,
+            timer: Timer::armed(0, 1134),
             ..Midge::default()
-        }];
-        let mut rig = Rig::new(1);
-        for tick in 1..=7 {
-            w.ambient_midges_step(&mut rig.at(tick));
+        };
+        m.mover.v = [60, 0];
+        let before = rig.rng.clone();
+        m.jitter(&mut rig.cx(1134));
+        assert_eq!((m.mover.v, &rig.rng), ([60, 0], &before));
+        m.jitter(&mut rig.cx(1135));
+        assert_eq!(m.mover.v, [-63, 0]);
+        let before = rig.rng.clone();
+        m.jitter(&mut rig.cx(1135 + 1134));
+        assert_eq!(&rig.rng, &before);
+    }
+
+    /// The fan push saves v and adds +180 when v > 0, else −180 (zero included); the update then
+    /// steps v 40 toward the saved v, so the push and the wander act on the same v.
+    #[test]
+    fn the_fan_push_saves_v_and_decays_back_by_40() {
+        let mut m = Midge::default();
+        m.mover.v = [0, 50];
+        m.push();
+        assert_eq!((m.mover.v, m.saved_v), ([-180, 230], Some([0, 50])));
+        for _ in 0..4 {
+            m.decay();
         }
-        let m = w.ambient_midges.slots[0];
-        assert_eq!((m.mover.v, m.y), ([-3, 0], 300));
-        assert_eq!(rig.rng.rand(), 24464);
+        assert_eq!(m.mover.v, [-20, 70]);
+        m.decay();
+        assert_eq!((m.mover.v, m.saved_v), ([0, 50], None));
     }
 
     /// Midges in the farmer's box (x, y, 181, 178; gaps §8.1 step 2.4) slow him: r = 30/30 caps the speed at 0 and stops vy.
