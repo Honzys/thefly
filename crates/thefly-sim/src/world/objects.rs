@@ -687,40 +687,54 @@ impl Objects {
     }
 
     /// `FUN_0042f3b1` (§5.5 step 8), the fan kick, then fly vy += weight.
-    ///
-    /// shortcut: on a collision the object goes back to its previous position before the fly
-    /// is placed on it (§5.5 step 8.5 does not say). Revisit when `FUN_0042f3b1` is read.
     fn carry(&mut self, fly: &mut Fly, traps: &Traps, cx: &mut Ctx) {
         let Some(i) = self.carried else {
             return;
         };
         let wrap = self.wrap_width;
         let o = &mut self.list[i];
-        (o.prev_x, o.prev_y) = (o.layer_x, o.y);
+        let prev = (o.layer_x, o.y);
         let centre = (f64::from(fly.size.w) / 2.0 + f64::from(fly.x)) as i32;
         let off = o.grip_y + 14;
         let sx = centre - o.grip_x;
         o.set_screen_x(if sx <= 0 { wrap - sx.abs() } else { sx });
+        // The port's setter also saves prev x; step 8.1 keeps the pre-move one.
+        (o.prev_x, o.prev_y) = prev;
         o.y = fly.y + fly.size.h - off;
         (o.vx, o.vy) = (fly.vx, fly.vy);
         let weight = o.weight;
         match self.hit_other(i, cx) {
             None => self.carry_on_table(i, fly, off),
-            Some(k) => {
-                if self.list[k].collectible {
-                    self.push(k, PushMode::Carried, fly.vx, fly.vy, weight, cx);
-                }
-                let o = &mut self.list[i];
-                o.restore();
-                let grip = self.screen_left(&self.list[i]) + self.list[i].grip_x;
-                fly.x = (f64::from(grip) - f64::from(fly.size.w) / 2.0) as i32;
-                fly.y = self.list[i].y - fly.size.h + off;
-                fly.vx = -(f64::from(fly.vx) / 1.4) as i32;
-                fly.vy = (-(f64::from(fly.vy) / 1.4) - f64::from(weight + 20)) as i32;
-            }
+            Some(k) => self.carry_blocked(i, k, fly, off, cx),
         }
         self.carried_fan_kick(i, fly, traps, cx);
         fly.vy += weight;
+    }
+
+    /// `FUN_0042ffc6` (answers.md "Carried object collision"): back to the previous position,
+    /// 1 px further against v when that still touches, push k (mode 3), then the fly on it.
+    ///
+    /// shortcut: the stuck counter and the v = 0 path (`FUN_004303e5`) are not read (answers.md
+    /// "Carried object collision", open); the port always retests once when v ≠ 0 and keeps
+    /// the restore for v = 0. Revisit when `FUN_004303e5` is read.
+    fn carry_blocked(&mut self, i: usize, k: usize, fly: &mut Fly, off: i32, cx: &mut Ctx) {
+        self.list[i].restore();
+        let (vx, vy, weight) = (self.list[i].vx, self.list[i].vy, self.list[i].weight);
+        let k = match (vx, vy) {
+            (0, 0) => k,
+            _ => self.hit_other(i, cx).map_or(k, |still| {
+                self.list[i].step_back();
+                still
+            }),
+        };
+        if self.list[k].collectible {
+            self.push(k, PushMode::Carried, vx, vy, weight, cx);
+        }
+        let grip = self.screen_left(&self.list[i]) + self.list[i].grip_x;
+        fly.x = (f64::from(grip) - f64::from(fly.size.w) / 2.0) as i32;
+        fly.y = self.list[i].y - fly.size.h + off;
+        fly.vx = -(f64::from(fly.vx) / 1.4) as i32;
+        fly.vy = (-(f64::from(fly.vy) / 1.4) - f64::from(weight + 20)) as i32;
     }
 
     /// `FUN_0042754d` mode 1 (answers.md "Object fan push"): a carried object on the blades
@@ -740,14 +754,14 @@ impl Objects {
         play_fan_hit(cx);
     }
 
-    /// §5.5 step 8.4: the carried object touches the table.
+    /// §5.5 step 8.4: the carried object touches the table. Its own y is not clamped
+    /// (answers.md "Carried object collision").
     fn carry_on_table(&mut self, i: usize, fly: &mut Fly, off: i32) {
         let o = &mut self.list[i];
         if o.y < o.rest_y {
             return;
         }
         o.landed |= (o.y - o.prev_y).abs() > 5;
-        o.y = o.rest_y;
         fly.y = o.rest_y - fly.size.h + off;
         fly.vy = (-(f64::from(fly.vy) / 1.7) - f64::from(o.weight + 20)) as i32;
     }
@@ -876,13 +890,22 @@ impl Object {
 
     /// Back to the previous position.
     ///
-    /// shortcut: answers.md "Object side test" does not say when the previous position is saved;
-    /// the port keeps the one saved at rest or by the carry (FW §5.4 step 4), so a sliding or
-    /// falling object that touches another jumps back to where it last rested. Revisit if the
-    /// original saves it per tick.
+    /// shortcut: the previous position is saved only at rest (FW §5.4 step 4) and by the carry
+    /// (§5.5 step 8.1), so a sliding or falling object that touches another jumps back to where
+    /// it last rested or was dropped; dropped onto another it comes to rest at the drop height
+    /// (test `a_dropped_object_comes_to_rest_where_it_was_dropped`). No answers.md entry covers
+    /// it; revisit if the original saves it elsewhere.
     fn restore(&mut self) {
         (self.layer_x, self.y) = (self.prev_x, self.prev_y);
         self.screen_x = self.screen_from_layer();
+    }
+
+    /// One px against v, as the new previous position (answers.md "Carried object collision").
+    fn step_back(&mut self) {
+        self.layer_x = (self.layer_x - self.vx.signum()).rem_euclid(W);
+        self.y -= self.vy.signum();
+        self.screen_x = self.screen_from_layer();
+        (self.prev_x, self.prev_y) = (self.layer_x, self.y);
     }
 
     /// The slide bounce (gaps §3, answers.md "Object side test"), w = trunc(weight / 3): vx < 0
@@ -1735,5 +1758,85 @@ mod tests {
         for _ in 0..n {
             rng.rand();
         }
+    }
+
+    /// can2 (222 × 100, grip 111, 20, weight 35) carried at screen 300, y 300 is placed at
+    /// (400, 420) under a fly at (451, 360), where its right side (half-x 310) meets chips2's
+    /// top row (y 480, 300..374). It goes back to screen 300 and y 300, which touch nothing, so
+    /// there is no step. The fly: x = 300 + 111 − 60 = 351, y = 300 − 94 + 34 = 240,
+    /// vx −trunc(100 / 1.4) = −71, vy trunc(−50 / 1.4 − 55) = −90, then + 35.
+    #[test]
+    fn a_carried_object_that_hits_another_goes_back_in_x_and_y() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut can = placed(b.object(1, 300), 300);
+        can.held = true;
+        objs.list.extend([can, b.object(4, 600)]);
+        (objs.carrying, objs.carried) = (true, Some(0));
+        let mut fly = fly_at(&mut b, 451, 360);
+        (fly.aspirating, fly.carrying, fly.vx, fly.vy) = (true, true, 100, 50);
+        b.with(|cx| objs.grab(&mut fly, &[], &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!((o.layer_x, o.screen_x, o.y), (240, 300, 300));
+        assert_eq!((fly.x, fly.y, fly.vx, fly.vy), (351, 240, -71, -55));
+    }
+
+    /// The restored can2 (300, 300) still touches chips2 at (500, 380): its right side (half-x
+    /// 260) is on chips2's top row (250..324). It steps 1 px against v (100, 50) to layer 239
+    /// (screen 298) and y 299, its new previous position, and the fly is placed on that: x =
+    /// 298 + 111 − 60 = 349, y = 299 − 60 = 239.
+    #[test]
+    fn a_carried_object_still_touching_after_the_restore_steps_back_one_px() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut can = placed(b.object(1, 300), 300);
+        can.held = true;
+        objs.list.extend([can, placed(b.object(4, 500), 380)]);
+        (objs.carrying, objs.carried) = (true, Some(0));
+        let mut fly = fly_at(&mut b, 371, 250);
+        (fly.aspirating, fly.carrying, fly.vx, fly.vy) = (true, true, 100, 50);
+        b.with(|cx| objs.grab(&mut fly, &[], &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!((o.layer_x, o.screen_x, o.y), (239, 298, 299));
+        assert_eq!((o.prev_x, o.prev_y), (239, 299));
+        assert_eq!((fly.x, fly.y), (349, 239));
+    }
+
+    /// answers.md "Carried object collision": on the table the fly is set on the rest y
+    /// (480 − 94 + 34 = 420), but the object keeps its placed y (430 + 60 = 490) this tick.
+    /// It moved 190 from its previous y 300, so it is landed.
+    #[test]
+    fn a_carried_object_on_the_table_is_not_clamped_to_its_rest_y() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut can = placed(b.object(1, 300), 300);
+        can.held = true;
+        objs.list.push(can);
+        (objs.carrying, objs.carried) = (true, Some(0));
+        let mut fly = fly_at(&mut b, 351, 430);
+        (fly.aspirating, fly.carrying, fly.vy) = (true, true, 0);
+        b.with(|cx| objs.grab(&mut fly, &[], &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!((o.y, o.landed), (490, true));
+        assert_eq!((fly.y, fly.vy), (420, -55 + 35));
+    }
+
+    /// FW §5.4 step 4 saves the previous position only in state 0, and the drop leaves the
+    /// carry's. chips1 dropped at y 200 over chips2 (y 480) falls into chips2's top row, goes
+    /// back to y 200, lands "below only" on chips2 there and comes to rest 180 px above it.
+    /// This pins the documented rule; it is reported as an open question, not a guess.
+    #[test]
+    fn a_dropped_object_comes_to_rest_where_it_was_dropped() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = placed(b.object(3, 300), 200);
+        o.state = ObjState::Falling;
+        objs.list.extend([o, b.object(4, 300)]);
+        for _ in 0..40 {
+            b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        }
+        let o = &objs.list[0];
+        assert_eq!((o.y, o.state), (200, ObjState::Rest));
+        assert_eq!(o.supported_by, [1]);
     }
 }
