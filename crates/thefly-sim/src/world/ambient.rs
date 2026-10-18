@@ -7,19 +7,18 @@ use crate::ctx::Ctx;
 use crate::event::{Event, SoundSlot};
 use crate::match_state::MatchState;
 
-/// Slots 14..=21 are the animal noises (GS §3, §8 audio map).
-pub const ANIMAL_FIRST_SLOT: u8 = 14;
-pub const ANIMAL_SLOTS: u8 = 8;
-/// Open item O11: a guessed interval.
-pub const ANIMAL_BASE_MS: i32 = 15_000;
-pub const ANIMAL_RAND_MS: i32 = 15_000;
+/// The animal noises, slots 14..=21 (GS §3, §8 audio map).
+pub const ANIMAL_SLOTS: [u8; 8] = [14, 15, 16, 17, 18, 19, 20, 21];
+/// A sound plays on ticks where rand % 150 == 0.
+pub const ANIMAL_CHANCE: i32 = 150;
+/// Below 71 on R(100) the pick is one of the first three slots, else any of the eight.
+pub const ANIMAL_COMMON_BELOW: i32 = 71;
+pub const ANIMAL_COMMON_SLOTS: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ambient {
-    /// Open item O11: the animal-sound interval and choice rule are not in the docs.
-    pub animal_timer: Timer,
-    /// Tutorial mode only: the bubble shown (fly or farmer side) and its timer. Open item O12: the
-    /// hint sequence and triggers are not decoded.
+    /// Tutorial mode only: the bubble shown (fly or farmer side) and its timer. The port never
+    /// sets it (see [`World::ambient_step`]).
     pub tutorial: Option<TutorialBubble>,
 }
 
@@ -32,45 +31,33 @@ pub struct TutorialBubble {
 }
 
 impl World {
-    /// Step 17.
-    // shortcut: O12, the tutorial bubbles are not decoded; the port shows none. Revisit with
-    // FUN_00443772 and FUN_00443488.
-    // shortcut: AR §1.5 "objects left on the table" is read literally (a collectible object is
-    // still active), so its rising edge is the period's first tick; "an object left the table"
-    // fits the slot's name (perdu) better. Revisit with FUN_0043c730's caller.
+    /// Step 17. Port decision (answers.md, O12): the tutorial bubbles are left out; they draw no
+    /// rand, play no sound and write no game state, so nothing desyncs.
     pub fn ambient_step(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let _ = m;
         self.ambient.animal_sound(cx);
-        let objects_left = self.objects.list.iter().any(|o| o.active && o.collectible);
-        let fly_dead = self.fly.dying || self.fly.splatted;
-        self.farmer.voices(objects_left, fly_dead, cx);
+        // shortcut: answers.md "Farmer voice 33" [I], a plain drop clears the port's carried
+        // index, while the original may keep +0x1a until delivery. Revisit with FUN_0042c888's
+        // drop path.
+        let holding = self.objects.carried.is_some();
+        self.farmer.voices(holding, !self.fly.alive(), cx);
     }
 }
 
 impl Ambient {
-    /// GS §3: animal noises (slots 14–21) at random intervals.
-    // shortcut: O11, the interval and choice rule are not documented; the port plays one of the
-    // eight slots, chosen by R(8), every ANIMAL_BASE_MS + R(ANIMAL_RAND_MS). Revisit with
-    // FUN_00441b3c.
+    /// `FUN_00441b3c` (answers.md "Animal sounds"): one draw every tick, a sound one time in 150.
     fn animal_sound(&mut self, cx: &mut Ctx) {
-        let due = !self.animal_timer.is_armed() || self.animal_timer.expired(cx.now);
-        if !due {
+        if cx.rng.r(ANIMAL_CHANCE) != 0 {
             return;
         }
-        let first_call = !self.animal_timer.is_armed();
-        let ms = ANIMAL_BASE_MS + cx.rng.r(ANIMAL_RAND_MS);
-        self.animal_timer
-            .arm(cx.now, u64::try_from(ms).unwrap_or(0));
-        if first_call {
-            return;
-        }
-        let slot = SoundSlot(ANIMAL_FIRST_SLOT + rand_u8(cx, ANIMAL_SLOTS));
-        cx.emit(Event::play(slot));
+        let i = if cx.rng.r(100) < ANIMAL_COMMON_BELOW {
+            cx.rng.r(ANIMAL_COMMON_SLOTS)
+        } else {
+            cx.rng.r(ANIMAL_SLOTS.len() as i32)
+        };
+        let slot = usize::try_from(i).map_or(ANIMAL_SLOTS[0], |i| ANIMAL_SLOTS[i]);
+        cx.emit(Event::play(SoundSlot(slot)));
     }
-}
-
-fn rand_u8(cx: &mut Ctx, n: u8) -> u8 {
-    u8::try_from(cx.rng.r(i32::from(n))).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -78,17 +65,57 @@ mod tests {
     use super::super::farmer::rig::Rig;
     use super::*;
 
-    /// The first call only arms the timer: seed 1 gives 15000 + 41 ms; the expiry plays slot
-    /// 14 + 6334 % 8 = 20 after re-arming with 18467.
+    /// answers.md "Animal sounds": seed 1 draws 41, and 41 % 150 != 0, so nothing plays and
+    /// only that one draw is spent (the next is 18467).
     #[test]
-    fn animal_sounds_play_one_of_eight_slots_on_a_timer() {
+    fn most_ticks_spend_one_draw_and_play_nothing() {
         let mut rig = Rig::new(1);
-        let mut a = Ambient::default();
-        a.animal_sound(&mut rig.cx(0));
-        assert_eq!(a.animal_timer.remaining_ms(0), 15_041);
-        a.animal_sound(&mut rig.cx(15_040));
+        Ambient::default().animal_sound(&mut rig.cx(0));
         assert!(rig.events.is_empty());
-        a.animal_sound(&mut rig.cx(15_041));
+        assert_eq!(rig.rng.rand(), 18467);
+    }
+
+    /// Seed 126: 450 % 150 = 0, 18530 % 100 = 30 < 71, 11131 % 3 = 1, so slot 15; next 19758.
+    #[test]
+    fn a_hit_below_71_picks_one_of_the_first_three_slots() {
+        let mut rig = Rig::new(126);
+        Ambient::default().animal_sound(&mut rig.cx(0));
+        assert_eq!(rig.events, [Event::play(SoundSlot(15))]);
+        assert_eq!(rig.rng.rand(), 19758);
+    }
+
+    /// Seed 2193: 7200 % 150 = 0, 18782 % 100 = 82 ≥ 71, 6838 % 8 = 6, so slot 20; next 16804.
+    #[test]
+    fn a_hit_from_71_picks_any_of_the_eight_slots() {
+        let mut rig = Rig::new(2193);
+        Ambient::default().animal_sound(&mut rig.cx(0));
         assert_eq!(rig.events, [Event::play(SoundSlot(20))]);
+        assert_eq!(rig.rng.rand(), 16804);
+    }
+
+    /// answers.md "Farmer voice 33": voice 33 plays on the tick the fly grabs an object. Seed 15
+    /// draws 87 (no animal), 5105 % 100 = 5 < 15 (voice 33); the next tick, still holding,
+    /// draws only 27056 for the animal roll, leaving 2938 next.
+    #[test]
+    fn voice_33_plays_when_the_fly_grabs_an_object() {
+        use crate::match_state::{MatchConfig, Players};
+        use crate::rng::MsvcRand;
+        let mut rig = Rig::new(1);
+        let config = MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        };
+        let mut m = MatchState::new(config, false, &mut rig.cx(0));
+        let mut w = World::bare(&m, &mut rig.cx(0));
+        assert!(w.fly.alive());
+        (rig.rng, rig.events) = (MsvcRand::new(15), Vec::new());
+        w.objects.carried = Some(0);
+        w.ambient_step(&mut m, &mut rig.cx(0));
+        let voice_33 =
+            |e: &Event| matches!(e, Event::Sound { slot, .. } if *slot == SoundSlot::VOICE_LOSE);
+        assert_eq!(rig.events.iter().filter(|e| voice_33(e)).count(), 1);
+        w.ambient_step(&mut m, &mut rig.cx(15));
+        assert_eq!(rig.events.iter().filter(|e| voice_33(e)).count(), 1);
+        assert_eq!(rig.rng.rand(), 2938);
     }
 }

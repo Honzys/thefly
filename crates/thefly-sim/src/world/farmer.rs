@@ -125,9 +125,10 @@ pub struct Farmer {
     pub nuclear: Nuclear,
     pub voice_timer: Timer,
     pub step_counter: i32,
-    /// Rising-edge memories for voices 33 and 30.
-    pub prev_objects_left: bool,
-    pub prev_fly_dead: bool,
+    /// Rising-edge memories for voices 33 (the fly holds an object) and 30 (the fly is not
+    /// alive).
+    pub prev_holding: bool,
+    pub prev_fly_down: bool,
 }
 
 impl Farmer {
@@ -153,8 +154,8 @@ impl Farmer {
             nuclear: Nuclear::default(),
             voice_timer: Timer::armed(cx.now, VOICE_FIRST_MS),
             step_counter: 0,
-            prev_objects_left: false,
-            prev_fly_dead: false,
+            prev_holding: false,
+            prev_fly_down: false,
         }
     }
 
@@ -453,8 +454,10 @@ impl Farmer {
         }
     }
 
-    /// `FUN_0043c730`: voices 31/32/33/30 and footsteps (AR §1.5).
-    pub fn voices(&mut self, objects_left: bool, fly_dead: bool, cx: &mut Ctx) {
+    /// `FUN_0043c730`: voices 31/32/33/30 and footsteps (AR §1.5, answers.md "Farmer voice 33").
+    /// `holding` is the object manager's grabbed index (+0x1a) being set; `fly_down` is the fly's
+    /// life state (`FUN_0043885d`) being non-zero.
+    pub fn voices(&mut self, holding: bool, fly_down: bool, cx: &mut Ctx) {
         if self.voice_timer.expired(cx.now) && cx.rng.r(100) < HATE_PERCENT {
             let ms = VOICE_BASE_MS + cx.rng.r(VOICE_RAND_MS);
             self.voice_timer.arm(cx.now, u64::try_from(ms).unwrap_or(0));
@@ -463,14 +466,14 @@ impl Farmer {
         if self.swing.miss_streak > MISS_STREAK_VOICE && cx.rng.r(MISS_ROLL) < MISS_BELOW {
             self.play(SoundSlot::VOICE_MISS, cx);
         }
-        if objects_left && !self.prev_objects_left && cx.rng.r(100) < LOSE_PERCENT {
+        if holding && !self.prev_holding && cx.rng.r(100) < LOSE_PERCENT {
             self.play(SoundSlot::VOICE_LOSE, cx);
         }
-        if fly_dead && !self.prev_fly_dead && cx.rng.r(100) < WIN_PERCENT {
+        if fly_down && !self.prev_fly_down && cx.rng.r(100) < WIN_PERCENT {
             self.play(SoundSlot::VOICE_WIN, cx);
         }
-        self.prev_objects_left = objects_left;
-        self.prev_fly_dead = fly_dead;
+        self.prev_holding = holding;
+        self.prev_fly_down = fly_down;
         if self.vx == 0 {
             if self.step_counter != 0 {
                 self.step_counter = STEP_COUNTER_RESTART;
