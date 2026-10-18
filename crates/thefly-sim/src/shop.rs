@@ -59,11 +59,12 @@ const FOOD_FIT: (i32, i32) = (200, 150);
 
 /// `g_Machine` rests at (7, 143); `g_Machine_cache`, the target the tally falls onto, sits at
 /// machine + (46, 156). Each landing shakes the machine for 4000 ms under the wander rule
-/// (reroll 20 ms, speeds 140 / 150, runs 2 / 4, accel 5) inside x 3..=11, y 139..=147.
+/// (reroll 20 ms, speeds 140 / 150, runs 2 / 4, accel 5) with x ≤ 11 and y in 139..=147; the
+/// left bound 3 is never applied (answers.md "Shop machine shake: only after a landing").
 pub const MACHINE_REST: (i32, i32) = (7, 143);
 pub const TARGET_OFFSET: (i32, i32) = (46, 156);
 pub const SHAKE_MS: u64 = 4000;
-const SHAKE_X: (i32, i32) = (3, 11);
+const SHAKE_RIGHT_X: i32 = 11;
 const SHAKE_Y: (i32, i32) = (139, 147);
 const SHAKE_REROLL_MS: i32 = 20;
 const SHAKE_SPEED: (i32, i32) = (140, 150);
@@ -114,7 +115,7 @@ impl Machine {
             return;
         }
         let (dx, dy) = self.wander.step(cx);
-        self.x = (self.x + dx).clamp(SHAKE_X.0, SHAKE_X.1);
+        self.x = (self.x + dx).min(SHAKE_RIGHT_X);
         self.y = (self.y + dy).clamp(SHAKE_Y.0, SHAKE_Y.1);
     }
 }
@@ -915,7 +916,7 @@ mod tests {
         assert_eq!(rig.rng, probe);
         for _ in 0..1000 {
             rig.step(&[], |_, cx| machine.step(cx));
-            assert!((3..=11).contains(&machine.x) && (295..=303).contains(&machine.target_y()));
+            assert!(machine.x <= 11 && (295..=303).contains(&machine.target_y()));
             if !machine.shake.is_armed() {
                 break;
             }
@@ -925,6 +926,25 @@ mod tests {
         let still = rig.rng.clone();
         rig.step(&[], |_, cx| machine.step(cx));
         assert_eq!(rig.rng, still);
+    }
+
+    /// answers.md "Shop machine shake": the left bound 3 is never applied. Seed 1 with 41 spent:
+    /// x timer 18467, d 6334 % 10 = 4 from v 0 (−1), 26500 % 140 + 65 = 105; y timer 19169, d 4
+    /// (−1), 11478 % 150 + 65 = 143; accel → (−110, −148), 1 and 2 px: x 3 → 2.
+    #[test]
+    fn the_machine_left_bound_is_never_applied() {
+        let mut rig = Rig::new(1);
+        rig.rng.rand();
+        let mut machine = Machine {
+            x: 3,
+            ..Machine::default()
+        };
+        machine.land(rig.now());
+        rig.cx(|cx| machine.step(cx));
+        assert_eq!(
+            (machine.x, machine.y, machine.wander.v),
+            (2, 141, [-110, -148])
+        );
     }
 
     /// answers.md "Shop tally: kill count drops one per cycle": through the shop, each landing
