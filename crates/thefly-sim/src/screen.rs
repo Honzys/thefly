@@ -462,3 +462,345 @@ impl InMatch {
         }
     }
 }
+
+/// A 65 Hz test driver: one call is one tick with the given keys held.
+#[cfg(test)]
+pub(crate) mod rig {
+    use crate::clock::Clock;
+    use crate::ctx::Ctx;
+    use crate::data::GameData;
+    use crate::event::Event;
+    use crate::input::{KeyState, Scancode};
+    use crate::rng::MsvcRand;
+
+    pub struct Rig {
+        pub clock: Clock,
+        pub rng: MsvcRand,
+        pub data: GameData,
+        pub events: Vec<Event>,
+        prev: KeyState,
+    }
+
+    impl Rig {
+        pub fn new(seed: u32) -> Self {
+            Self {
+                clock: Clock::default(),
+                rng: MsvcRand::new(seed),
+                data: GameData::synthetic(),
+                events: Vec::new(),
+                prev: KeyState::NONE,
+            }
+        }
+
+        pub fn now(&self) -> u64 {
+            self.clock.now_ms()
+        }
+
+        /// One tick with `held` down; returns what `f` returns.
+        pub fn step<T>(
+            &mut self,
+            held: &[Scancode],
+            f: impl FnOnce(&KeyState, &mut Ctx) -> T,
+        ) -> T {
+            let keys = KeyState::next(&self.prev, held.iter().copied());
+            self.prev = keys;
+            let now = self.clock.now_ms();
+            let out = f(
+                &keys,
+                &mut Ctx::new(now, &mut self.rng, &self.data, &mut self.events),
+            );
+            self.clock.advance();
+            out
+        }
+
+        /// A context at the current time, outside any tick.
+        pub fn cx<T>(&mut self, f: impl FnOnce(&mut Ctx) -> T) -> T {
+            let now = self.clock.now_ms();
+            f(&mut Ctx::new(
+                now,
+                &mut self.rng,
+                &self.data,
+                &mut self.events,
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rig::Rig;
+    use super::*;
+    use crate::event::{SoundOp, SoundSlot};
+    use crate::match_state::MatchConfig;
+    use crate::saves::{Options, Persisted};
+    use crate::sim::State;
+
+    const TICK_CAP: usize = 20_000;
+
+    fn two_player(rig: &mut Rig) -> MatchState {
+        let config = MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        };
+        rig.cx(|cx| {
+            let mut m = MatchState::new(config, true, cx);
+            m.advance(cx);
+            m
+        })
+    }
+
+    /// Ticks with no keys until `done` holds; panics past the cap.
+    fn idle_until(rig: &mut Rig, s: &mut State, done: impl Fn(&State) -> bool) {
+        for _ in 0..TICK_CAP {
+            if done(s) {
+                return;
+            }
+            rig.step(&[], |k, cx| s.tick(k, cx));
+        }
+        panic!("condition not reached in {TICK_CAP} ticks");
+    }
+
+    fn tap(rig: &mut Rig, s: &mut State, key: Scancode) {
+        rig.step(&[key], |k, cx| s.tick(k, cx));
+        rig.step(&[], |k, cx| s.tick(k, cx));
+    }
+
+    /// SR §1.4: 255 / (65 × 0.5) per tick, so 33 ticks.
+    #[test]
+    fn a_500_ms_fade_ends_on_tick_33() {
+        let mut f = Fade::new(true, FADE_MS);
+        let ended: Vec<usize> = (1..=40).filter(|_| f.step()).collect();
+        assert_eq!(ended, [33]);
+    }
+
+    /// observed.md: nine clicks 250 ms apart, slot 52 at 2750 ms, then 3, 2, 1, Go at 1000 ms.
+    #[test]
+    fn loading_clicks_nine_times_then_the_banner_counts_down() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig);
+        let world = rig.cx(|cx| World::bare(&m, cx));
+        let mut g = Gameplay::loading(world, false, rig.now());
+        let mut countdown_at = None;
+        let mut playing_at = None;
+        for _ in 0..TICK_CAP {
+            let before = rig.events.len();
+            let now = rig.now();
+            rig.step(&[], |k, cx| g.tick(k, &mut m, cx));
+            if rig.events[before..].contains(&Event::play(SoundSlot::COUNTDOWN)) {
+                countdown_at = Some(now);
+            }
+            if g.phase == GamePhase::Playing {
+                playing_at = Some(now);
+                break;
+            }
+        }
+        let clicks = rig
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Click {
+                        volume_cb: -1000,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(clicks, 9);
+        let countdown_at = countdown_at.unwrap();
+        assert!((2750..2800).contains(&countdown_at), "{countdown_at}");
+        let playing = playing_at.unwrap() - countdown_at;
+        assert!((4000..4100).contains(&playing), "{playing}");
+        assert_eq!(g.world.clock, PeriodClock::new(playing_at.unwrap(), 2));
+        assert!(
+            rig.events
+                .contains(&Event::Music(Music::Game(m.music_game2)))
+        );
+    }
+
+    /// AR §9.2: the period-over flag sends a no-bonus period to the goodies shop.
+    #[test]
+    fn a_finished_breakfast_goes_to_the_goodies_shop() {
+        let mut rig = Rig::new(1);
+        let m = two_player(&mut rig);
+        let mut g = rig.cx(|cx| Gameplay::loading(World::bare(&m, cx), false, cx.now));
+        g.phase = GamePhase::Playing;
+        g.world.period_over = true;
+        let mut im = InMatch {
+            m,
+            screen: MatchScreen::Gameplay(Box::new(g)),
+        };
+        let table = HighScoreTable::default();
+        rig.step(&[], |k, cx| im.tick(k, &table, cx));
+        assert!(matches!(im.screen, MatchScreen::GoodiesShop(_)));
+        assert!(rig.events.contains(&Event::Music(Music::Stop)));
+    }
+
+    #[test]
+    fn resume_blocks_the_action_keys_until_released() {
+        let mut rig = Rig::new(1);
+        let m = two_player(&mut rig);
+        let mut g = rig.cx(|cx| Gameplay::loading(World::bare(&m, cx), false, cx.now));
+        g.pause(100);
+        assert!(g.world.paused);
+        g.resume(200);
+        assert!(!g.world.paused);
+        assert_eq!(
+            (g.world.fly_action_memory, g.world.farmer_swing_memory),
+            (10, 10)
+        );
+    }
+
+    fn in_shop(rig: &mut Rig) -> State {
+        let mut m = two_player(rig);
+        let shop = rig.cx(|cx| GoodiesShop::new(&mut m, cx));
+        let mut s = State::new(Persisted::default());
+        s.screen = Screen::Match(Box::new(InMatch {
+            m,
+            screen: MatchScreen::GoodiesShop(Box::new(shop)),
+        }));
+        s
+    }
+
+    /// GS §2.2: the dialog defaults to NO; NO resumes the match, YES in a match → menu.
+    #[test]
+    fn the_quit_dialog_defaults_to_no_and_yes_in_a_match_goes_to_the_menu() {
+        let mut rig = Rig::new(1);
+        let mut s = in_shop(&mut rig);
+        tap(&mut rig, &mut s, Scancode::ESCAPE);
+        assert_eq!(s.dialog, Some(QuitDialog::new(false)));
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert!(s.dialog.is_none());
+        assert!(matches!(s.screen, Screen::Match(_)));
+        tap(&mut rig, &mut s, Scancode::ESCAPE);
+        tap(&mut rig, &mut s, Scancode::LEFT);
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert!(matches!(s.screen, Screen::Menu(_)));
+    }
+
+    /// Top grid: Down to Credits (2), Right to Quit (3); YES → farewell → exit.
+    #[test]
+    fn yes_from_the_menu_goes_to_the_farewell_then_exits() {
+        let mut rig = Rig::new(1);
+        let mut s = State::new(Persisted::default());
+        s.screen = Screen::Menu(Box::new(Menu::new(false)));
+        tap(&mut rig, &mut s, Scancode::DOWN);
+        tap(&mut rig, &mut s, Scancode::RIGHT);
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert_eq!(s.dialog, Some(QuitDialog::new(true)));
+        tap(&mut rig, &mut s, Scancode::LEFT);
+        let left = rig.now();
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert!(matches!(s.screen, Screen::Farewell(_)));
+        idle_until(&mut rig, &mut s, |s| matches!(s.screen, Screen::Exit));
+        assert!(rig.now() - left > FAREWELL_MS);
+    }
+
+    fn menu_page(s: &State) -> Option<crate::menu::Page> {
+        match &s.screen {
+            Screen::Menu(m) => Some(m.page),
+            _ => None,
+        }
+    }
+
+    fn input_open(s: &State) -> bool {
+        matches!(&s.screen, Screen::Menu(m) if m.boot.phase == crate::menu::SlidePhase::Kick)
+    }
+
+    /// GS §2.3: defaults 2 days, 1P, mode 1, AI 1; Highscore forces AI 1 and 3 days.
+    #[test]
+    fn highscore_mode_forces_normal_ai_and_three_days() {
+        use crate::match_state::Mode;
+        use crate::menu::Page;
+        use crate::world::ai::AiLevel;
+        let d = MatchConfig::default();
+        assert_eq!(
+            (d.days, d.players, d.mode, d.ai_level),
+            (2, Players::One, Mode::Normal, AiLevel::Normal)
+        );
+        let mut rig = Rig::new(1);
+        let persisted = Persisted {
+            options: Options {
+                tutorial: true,
+                ..Options::default()
+            },
+            ..Persisted::default()
+        };
+        let mut s = State::new(persisted);
+        s.config.ai_level = AiLevel::Easy;
+        s.config.days = 6;
+        s.screen = Screen::Menu(Box::new(Menu::new(false)));
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert_eq!(menu_page(&s), Some(Page::Play));
+        idle_until(&mut rig, &mut s, input_open);
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert_eq!(menu_page(&s), Some(Page::OnePlayerMode));
+        tap(&mut rig, &mut s, Scancode::DOWN);
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        let Screen::Match(im) = &s.screen else {
+            panic!("no match started");
+        };
+        let c = im.m.config;
+        assert_eq!(
+            (c.mode, c.ai_level, c.days),
+            (Mode::Special, AiLevel::Normal, 3)
+        );
+        assert!(matches!(im.screen, MatchScreen::KeysPage(_)));
+        assert!(rig.events.iter().any(|e| matches!(
+            e,
+            Event::Sound {
+                op: SoundOp::Play(_),
+                ..
+            }
+        )));
+    }
+
+    /// GS §2.2 end to end: boot → logo → menu → 2P match of 2 days → shops and bourse each
+    /// period → bonus → winner → stats → menu. Every period ends at once via `period_over`.
+    #[test]
+    #[ignore = "needs W1/W2: World::new and World::tick"]
+    fn a_two_day_match_runs_from_boot_back_to_the_menu() {
+        let mut rig = Rig::new(1);
+        let mut s = State::new(Persisted::default());
+        idle_until(&mut rig, &mut s, |s| matches!(s.screen, Screen::Logo(_)));
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        let menu = |s: &State| matches!(s.screen, Screen::Menu(_));
+        for _ in 0..TICK_CAP {
+            if menu(&s) {
+                break;
+            }
+            tap(&mut rig, &mut s, Scancode::RETURN);
+        }
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        idle_until(&mut rig, &mut s, input_open);
+        for key in [
+            Scancode::DOWN,
+            Scancode::RETURN,
+            Scancode::RETURN,
+            Scancode::RETURN,
+        ] {
+            tap(&mut rig, &mut s, key);
+        }
+        assert!(matches!(s.screen, Screen::Match(_)));
+        let cycle = [Scancode::F, Scancode::TAB, Scancode::LEFT, Scancode::RETURN];
+        let mut periods = 0;
+        for _ in 0..TICK_CAP {
+            if menu(&s) {
+                break;
+            }
+            if let Screen::Match(im) = &mut s.screen
+                && let MatchScreen::Gameplay(g) = &mut im.screen
+                && g.phase == GamePhase::Playing
+            {
+                g.world.period_over = true;
+                periods += 1;
+            }
+            for key in cycle {
+                tap(&mut rig, &mut s, key);
+            }
+        }
+        assert!(menu(&s));
+        assert_eq!(periods, 6);
+    }
+}

@@ -537,3 +537,80 @@ fn after_bonus(m: &mut MatchState, cx: &mut Ctx) -> MatchScreen {
         MatchScreen::GoodiesShop(Box::new(GoodiesShop::new(m, cx)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::match_state::MatchConfig;
+    use crate::screen::rig::Rig;
+
+    const TICK_CAP: usize = 10_000;
+
+    /// AR §8.3: countdown 3 s, a 35 s round, coins every 50 ms, targets every
+    /// trunc(0.5 × 300 + 200) = 350 ms at a tie, then the result sound 2 s after the end.
+    #[test]
+    fn the_round_runs_35_s_and_sounds_the_result_2_s_later() {
+        let mut rig = Rig::new(1);
+        let config = MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        };
+        let mut m = rig.cx(|cx| MatchState::new(config, false, cx));
+        let mut b = rig.cx(|cx| BonusRound::new(&m, cx));
+        assert_eq!((b.h_fly, b.h_farmer), (0.5, 0.5));
+        let mut play_at = None;
+        let mut end_at = None;
+        for _ in 0..TICK_CAP {
+            let now = rig.now();
+            rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+            match b.phase {
+                BonusPhase::Play { .. } if play_at.is_none() => play_at = Some(now),
+                BonusPhase::End { .. } if end_at.is_none() => end_at = Some(now),
+                BonusPhase::Result => break,
+                _ => {}
+            }
+        }
+        let (play, end) = (play_at.unwrap(), end_at.unwrap());
+        assert!((4000..4020).contains(&play), "{play}");
+        assert!((35_000..35_020).contains(&(end - play)), "{}", end - play);
+        // AR §0: a 50 ms timer re-arms from the tick it fires on, so every 4 ticks (61.5 ms).
+        assert!((560..=575).contains(&b.coin_spawns), "{}", b.coin_spawns);
+        assert!((90..=100).contains(&b.target_spawns), "{}", b.target_spawns);
+        let fly_ahead = 2 * b.coins_taken >= 10 * b.hits;
+        assert!(fly_ahead);
+        assert_eq!(rig.events.last(), Some(&Event::play(SoundSlot::CHEER_FLY)));
+        assert_eq!(
+            m.economy.fly.score,
+            2 * b.coins_taken + starting_score(&config)
+        );
+    }
+
+    fn starting_score(config: &MatchConfig) -> i32 {
+        let mut rig = Rig::new(1);
+        rig.cx(|cx| MatchState::new(*config, false, cx))
+            .economy
+            .fly
+            .score
+    }
+
+    #[test]
+    fn the_farmer_wins_the_result_when_hits_outweigh_coins() {
+        let mut rig = Rig::new(1);
+        let config = MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        };
+        let mut m = rig.cx(|cx| MatchState::new(config, false, cx));
+        let mut b = rig.cx(|cx| BonusRound::new(&m, cx));
+        b.coins_taken = 4;
+        b.hits = 1;
+        b.phase = BonusPhase::End {
+            sound: Timer::armed(rig.now(), 0),
+        };
+        rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+        assert_eq!(
+            rig.events.last(),
+            Some(&Event::play(SoundSlot::CHEER_FARMER))
+        );
+    }
+}

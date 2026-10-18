@@ -393,3 +393,105 @@ impl TrapsShop {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::match_state::MatchConfig;
+    use crate::screen::rig::Rig;
+
+    fn two_player(rig: &mut Rig, money: i32, kills: i32) -> MatchState {
+        let config = MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        };
+        let mut m = rig.cx(|cx| {
+            let mut m = MatchState::new(config, false, cx);
+            m.advance(cx);
+            m
+        });
+        m.economy.farmer.money = money;
+        m.economy.kills = kills;
+        m
+    }
+
+    /// GS §5.6: slot 11 on purchase; the level counts only once the conveyor has run.
+    #[test]
+    fn a_purchase_plays_slot_11_and_counts_when_the_conveyor_ends() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig, 1000, 0);
+        let mut shop = rig.cx(|cx| GoodiesShop::new(&mut m, cx));
+        let level = m.economy.owned(Item::FarmerLevel);
+        rig.step(&[Scancode::TAB], |k, cx| shop.tick(k, &mut m, cx));
+        assert!(rig.events.contains(&Event::play(SoundSlot::MONEY)));
+        assert_eq!(m.economy.farmer.money, 800);
+        assert_eq!(m.economy.owned(Item::FarmerLevel), level);
+        let bought = rig.now();
+        while rig.now() < bought + CONVEYOR_MS + 20 {
+            rig.step(&[], |k, cx| shop.tick(k, &mut m, cx));
+        }
+        assert_eq!(m.economy.owned(Item::FarmerLevel), level + 1);
+    }
+
+    #[test]
+    fn a_purchase_without_the_money_plays_slot_12() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig, 10, 0);
+        let mut shop = rig.cx(|cx| GoodiesShop::new(&mut m, cx));
+        rig.step(&[Scancode::TAB], |k, cx| shop.tick(k, &mut m, cx));
+        assert!(rig.events.contains(&Event::play(SoundSlot::ERROR)));
+        assert!(shop.conveyor.is_none());
+    }
+
+    /// AR §7.3: 3 kills pay 126 whether the tally runs or is skipped.
+    #[test]
+    fn the_animated_and_the_skipped_tally_give_the_same_total() {
+        let shown = |skip: bool| {
+            let mut rig = Rig::new(1);
+            let mut m = two_player(&mut rig, 0, 3);
+            let mut shop = rig.cx(|cx| GoodiesShop::new(&mut m, cx));
+            for i in 0..1000 {
+                let keys: &[Scancode] = if skip && i == 0 {
+                    &[Scancode::RETURN]
+                } else {
+                    &[]
+                };
+                rig.step(keys, |k, cx| shop.tick(k, &mut m, cx));
+                if shop.tally.is_none() {
+                    break;
+                }
+            }
+            (m.economy.farmer.money, m.economy.kills)
+        };
+        assert_eq!(shown(true).0, 126);
+        assert_eq!(shown(false).0, 126);
+        assert_eq!(shown(false).1, 0);
+    }
+
+    /// Farmer done, fly done → fade → bourse when the farmer has no tokens.
+    #[test]
+    fn both_sides_done_with_no_tokens_goes_to_the_bourse() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig, 0, 0);
+        m.economy.farmer.tokens = 0;
+        let mut shop = rig.cx(|cx| GoodiesShop::new(&mut m, cx));
+        for keys in [
+            [Scancode::F],
+            [Scancode::TAB],
+            [Scancode::LEFT],
+            [Scancode::RETURN],
+        ] {
+            rig.step(&keys, |k, cx| shop.tick(k, &mut m, cx));
+            rig.step(&[], |k, cx| shop.tick(k, &mut m, cx));
+        }
+        assert!(shop.leaving);
+        let mut next = None;
+        for _ in 0..100 {
+            if let MatchFlow::Next(s) = rig.step(&[], |k, cx| shop.tick(k, &mut m, cx)) {
+                next = Some(s);
+                break;
+            }
+        }
+        assert!(matches!(next, Some(MatchScreen::Bourse(_))));
+    }
+}

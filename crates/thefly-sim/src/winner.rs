@@ -185,3 +185,29 @@ fn play_at(freq: u32) -> SoundOp {
         ..PlayParams::default()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::match_state::{MatchConfig, Players};
+    use crate::screen::rig::Rig;
+
+    /// AR §8.4: after the top-up, a tie goes to the fly.
+    #[test]
+    fn a_tie_after_the_top_up_goes_to_the_fly() {
+        let mut rig = Rig::new(1);
+        let config = MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        };
+        let mut m = rig.cx(|cx| MatchState::new(config, false, cx));
+        m.economy.fly.score = 500;
+        m.economy.farmer.score = 458;
+        m.economy.kills = 1;
+        let w = rig.cx(|cx| Winner::new(&mut m, cx));
+        assert_eq!((m.economy.fly.score, m.economy.farmer.score), (500, 500));
+        assert!(w.fly_won);
+        m.economy.farmer.score = 501;
+        assert!(!rig.cx(|cx| Winner::new(&mut m, cx)).fly_won);
+    }
+}
