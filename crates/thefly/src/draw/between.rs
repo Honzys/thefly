@@ -1,7 +1,7 @@
 //! Between-period screens: goodies shop, traps shop, bourse (SR §3) and the bonus round (SR §6).
 
 use thefly_platform::{Color, Error};
-use thefly_sim::bonus::{BonusPhase, BonusRound, COIN_VALUE, HIT_VALUE, Piece, SWATTER_H};
+use thefly_sim::bonus::{self, BonusPhase, BonusRound, COIN_VALUE, HIT_VALUE, Piece, SWATTER_H};
 use thefly_sim::bourse::{Bourse, COLUMN_OBJECT};
 use thefly_sim::economy::ITEMS;
 use thefly_sim::match_state::MatchState;
@@ -341,9 +341,10 @@ fn targets(g: &mut Gfx, v: &View, b: &BonusRound, prev: Option<&BonusRound>) -> 
     Ok(())
 }
 
-/// The bonus field's screen y: `bckbonusfond` (800 × 440) between black bars, as the captures
-/// show; the sim works in field coordinates (gaps §7.3's bgY taken as 0).
-const BONUS_Y: f32 = 80.0;
+/// The bonus field's screen y: `bckbonusfond` (800 × 440) between black bars. The sim keeps the
+/// fly, coins and targets in field coordinates (y 0 at the top) and the swatter in screen y
+/// (answers.md "Bonus round coordinates").
+const BONUS_Y: f32 = bonus::FIELD_TOP as f32;
 /// `bckbonusbarre`'s y: its bottom on the field's bottom edge (observed).
 const BARRE_Y: f32 = BONUS_Y + 440.0 - 317.0;
 /// Both layers scroll at the bar's −600 layer px/s; `bckbonusfond` is on a 0.7 layer
