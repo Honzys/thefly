@@ -25,7 +25,7 @@ use crate::viewer::Viewer;
 
 const USAGE: &str = "usage: thefly [--data <dir>] [--soundfont <file.sf2>] [--linear] [--viewer]
               [--seed <n>] [--keys <tick[-tick]:Key,...>] [--shot <tick>:<file.png>]...
-              [--exit-after-shots]";
+              [--exit-after-shots] [--warp <tick>] [--window <w>x<h>]";
 
 #[derive(Default)]
 struct Args {
@@ -34,6 +34,7 @@ struct Args {
     linear: bool,
     viewer: bool,
     seed: Option<u32>,
+    window: Option<(u32, u32)>,
     script: Script,
 }
 
@@ -55,6 +56,8 @@ fn parse_args() -> Result<Args, String> {
             Some("--keys") => args.script.holds.extend(script::parse_keys(&value()?)?),
             Some("--shot") => args.script.shots.push(script::parse_shot(&value()?)?),
             Some("--exit-after-shots") => args.script.exit_after_shots = true,
+            Some("--warp") => args.script.warp_until = value()?.parse().map_err(|_| USAGE)?,
+            Some("--window") => args.window = Some(parse_size(&value()?).ok_or(USAGE)?),
             _ => {
                 return Err(format!(
                     "unknown argument {}\n{USAGE}",
@@ -111,12 +114,17 @@ fn run() -> Result<(), String> {
     if args.linear {
         config.filter = Filter::Linear;
     }
+    if let Some(size) = args.window {
+        config.window_size = size;
+    }
+    let mut script = args.script;
+    script.window_shots = args.window.is_some();
     if args.viewer {
         let v = viewer(&data)?;
         let platform = Platform::new(config).map_err(|e| e.to_string())?;
         return platform.run(v).map_err(|e| e.to_string());
     }
-    let g = game(&data, args.seed.unwrap_or_else(clock_seed), args.script)?;
+    let g = game(&data, args.seed.unwrap_or_else(clock_seed), script)?;
     let platform = Platform::new(config).map_err(|e| e.to_string())?;
     platform.run(g).map_err(|e| e.to_string())
 }
@@ -128,5 +136,25 @@ fn main() -> ExitCode {
             eprintln!("thefly: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `"1280x720"` as `(1280, 720)`; both sides at least 1.
+fn parse_size(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.split_once('x')?;
+    let size = (w.parse().ok()?, h.parse().ok()?);
+    (size.0 > 0 && size.1 > 0).then_some(size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_sizes_parse_as_w_x_h() {
+        assert_eq!(parse_size("1280x720"), Some((1280, 720)));
+        assert_eq!(parse_size("1280"), None);
+        assert_eq!(parse_size("0x720"), None);
+        assert_eq!(parse_size("ax720"), None);
     }
 }

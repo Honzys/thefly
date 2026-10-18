@@ -42,6 +42,8 @@ pub enum Filter {
 pub struct Config {
     pub title: String,
     pub logical_size: (u32, u32),
+    /// Initial window size in pixels; the frame is letterboxed into it.
+    pub window_size: (u32, u32),
     pub tick_hz: u32,
     pub filter: Filter,
     /// Resolved original `data/` dir, see [`data_dir::resolve`].
@@ -55,6 +57,7 @@ impl Config {
         Self {
             title: title.to_owned(),
             logical_size: (800, 600),
+            window_size: (800, 600),
             tick_hz: 65,
             filter: Filter::Nearest,
             data_dir,
@@ -69,6 +72,10 @@ pub trait Game {
     fn update(&mut self, input: &Input, audio: &mut Audio) -> ControlFlow<()>;
     /// `alpha` in `[0, 1)` is how far the clock is between the last tick and the next.
     fn render(&self, r: &mut Renderer<'_, '_>, alpha: f32) -> Result<(), Error>;
+    /// Called with the whole window (frame plus bars) drawn, just before it is shown.
+    fn presented(&self, _r: &mut Renderer<'_, '_>, _size: (u32, u32)) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// An open window with audio, ready to [`run`](Platform::run) a game.
@@ -85,7 +92,7 @@ impl Platform {
     pub fn new(config: Config) -> Result<Self, Error> {
         let sdl_ctx = sdl3::init().map_err(sdl)?;
         let video = sdl_ctx.video().map_err(sdl)?;
-        let (w, h) = config.logical_size;
+        let (w, h) = config.window_size;
         let window = video
             .window(&config.title, w, h)
             .resizable()
@@ -167,10 +174,16 @@ impl Platform {
             drawn?;
             self.canvas.set_draw_color(Color::BLACK);
             self.canvas.clear();
-            let v = Viewport::letterbox(self.canvas.output_size().map_err(sdl)?, logical);
+            let size = self.canvas.output_size().map_err(sdl)?;
+            let v = Viewport::letterbox(size, logical);
             self.canvas
                 .copy(&frame, None, FRect::new(v.x, v.y, v.w, v.h))
                 .map_err(sdl)?;
+            let mut r = Renderer {
+                canvas: &mut self.canvas,
+                assets: &mut assets,
+            };
+            game.presented(&mut r, size)?;
             self.canvas.present();
         }
     }
