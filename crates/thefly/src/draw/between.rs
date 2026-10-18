@@ -199,8 +199,7 @@ fn pieces(
 /// SR §6: the layout is open (open item O3). shortcut: the backdrop at the top with the bar
 /// under it, coins as `piece`, farmer targets as `moucheron1`, the bonus swatter as `piecetap`
 /// and the fly as `Face`; the countdown in Joint and the tally in `boitedlg`.
-pub fn bonus(g: &mut Gfx, v: &View, m: &MatchState, b: &BonusRound) -> Result<(), Error> {
-    let _ = m;
+pub fn bonus(g: &mut Gfx, v: &View, b: &BonusRound) -> Result<(), Error> {
     let prev = match v.prev_screen() {
         Some(MatchScreen::Bonus(p)) => Some(p.as_ref()),
         _ => None,

@@ -87,6 +87,7 @@ impl FlyGame {
             Event::Effect(fx) => self.fx.effect(fx),
             Event::ScreenChanged => {
                 self.fx.clear();
+                self.trophy_landed_ms = None;
                 self.pick_loading();
             }
             Event::Sound {

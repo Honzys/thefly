@@ -95,6 +95,35 @@ mod tests {
         assert_eq!(s.at(11, Scancode::DOWN), (false, false, false));
     }
 
+    /// Acceptance W4.2 in the sim: boot → menu → 2 Players → Normal → 2 days → keys page →
+    /// loading → the "3, 2, 1, Go!" banner, driven by the same script the headless run uses.
+    #[test]
+    #[ignore = "needs W3"]
+    fn a_scripted_two_player_run_reaches_the_banner() {
+        use thefly_sim::data::GameData;
+        use thefly_sim::input::KeyState;
+        use thefly_sim::saves::Persisted;
+        use thefly_sim::screen::{GamePhase, MatchScreen, Screen};
+        use thefly_sim::sim::Sim;
+        const MAX_TICKS: u64 = 65 * 60;
+        let keys = "200:Return,400:Return,460:Down,480:Return,540:Return,600:Return,700:Return";
+        let script = Script {
+            holds: parse_keys(keys).unwrap(),
+            ..Script::default()
+        };
+        let mut sim = Sim::new(1, GameData::synthetic(), Persisted::default());
+        let codes = [Scancode::RETURN, Scancode::DOWN];
+        let banner = (0..MAX_TICKS).any(|t| {
+            let held = codes.iter().copied().filter(|&k| script.at(t, k).0);
+            let pressed = codes.iter().copied().filter(|&k| script.at(t, k).1);
+            let released = codes.iter().copied().filter(|&k| script.at(t, k).2);
+            sim.tick(&KeyState::from_parts(held, pressed, released));
+            matches!(&sim.state().screen, Screen::Match(m)
+                if matches!(&m.screen, MatchScreen::Gameplay(g) if matches!(g.phase, GamePhase::Banner { .. })))
+        });
+        assert!(banner, "no banner within {MAX_TICKS} ticks");
+    }
+
     #[test]
     fn bad_input_is_rejected() {
         assert!(parse_keys("x:Return").is_err());

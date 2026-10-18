@@ -118,7 +118,8 @@ pub fn stats(g: &mut Gfx, _v: &View, m: &MatchState, s: &StatsScreen) -> Result<
     g.fill(203.0, 15.0, 383.0, 100.0, PANEL)?;
     g.fill(11.0, 119.0, 361.0, 471.0, PANEL)?;
     g.text_outlined(JOINT, 70, "Stats", (320.0, 30.0), (TITLE_RED, WHITE))?;
-    g.spr("transi-est", 100.0, 160.0, 5)?;
+    // SR frame numbers are 1-based (SR §1.1), sheet indices 0-based
+    g.spr("transi-est", 100.0, 160.0, 4)?;
     g.spr("tapette-8", 100.0, 340.0, 0)?;
     let p = &s.page;
     rows(
@@ -155,10 +156,10 @@ pub fn stats(g: &mut Gfx, _v: &View, m: &MatchState, s: &StatsScreen) -> Result<
         frame_box(g, (185.0, 315.0, 450.0, 210.0), 4)?;
         g.text_outlined(JOINT, 38, "Your Score", (317.0, 330.0), (TITLE_RED, WHITE))?;
         g.text(JOINT, 27, &b.points.to_string(), 240.0, 410.0, WHITE)?;
-        boxed(g, "piece", (313.0, 398.0), 15, 1.0)?;
+        boxed(g, "piece", (313.0, 398.0), 14, 1.0)?;
         g.text(JOINT, 27, "-", 400.0, 410.0, WHITE)?;
         g.text(JOINT, 27, &b.kills.to_string(), 448.0, 410.0, WHITE)?;
-        boxed(g, "g_flymort", (501.0, 394.0), 2, 0.8)?;
+        boxed(g, "g_flymort", (501.0, 394.0), 1, 0.8)?;
         let result = b.points - 10 * b.kills;
         g.text_outlined(
             JOINT,
