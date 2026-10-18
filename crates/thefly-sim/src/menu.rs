@@ -17,7 +17,20 @@ use crate::world::ai::AiLevel;
 pub const INTRO_SKIP_MS: u64 = 900;
 pub const INTRO_SCROLL_VY: f64 = -60.0;
 pub const INTRO_FLY_VX: f64 = 400.0;
+/// Step 2: once the fly's screen x reaches 801 a 3000 ms timer starts; the pig follows it (answers.md
+/// "Menu intro fly buzz and step-3 timing").
+pub const INTRO_FLY_REACHED_X: i32 = 801;
 pub const INTRO_FLY_MAX_MS: u64 = 3000;
+/// `FUN_0040d005(x, 400, 0, 120, −700)` for the intro fly (answers.md "Fly buzz: pitch, pan and
+/// volume"): frequency 10000 + R(1000) + |vx| × 2500 / 700, pan centred on 400, volume −700 less
+/// the px off screen.
+const BUZZ_W: i32 = 120;
+const BUZZ_PAN_MID: i32 = 400;
+const BUZZ_PAN_CB: f64 = 2000.0;
+const BUZZ_ROLL: i32 = 1000;
+const BUZZ_VOLUME_CB: i32 = -700;
+const BUZZ_SCREEN_W: i32 = 800;
+const BUZZ_BASE_HZ: i32 = 10_000 + INTRO_FLY_VX as i32 * 2500 / 700;
 /// The pig's gravity per tick and its bounce stop.
 pub const PIG_GRAVITY: f64 = 120.0;
 pub const PIG_BOUNCE_STOP: f64 = 370.0;
@@ -60,7 +73,10 @@ pub struct Intro {
     pub decor_vy: f64,
     pub fly_x: f64,
     pub fly_y: f64,
+    /// Armed when the fly first reaches `INTRO_FLY_REACHED_X`; the pig starts when it expires.
     pub fly_timer: Timer,
+    /// Slot 7 is looping; only the skip handler stops it.
+    pub buzzing: bool,
     pub pig_y: f64,
     pub pig_vy: f64,
 }
@@ -96,14 +112,24 @@ pub struct Credits {
     scene_run: FpsRun,
     /// Page 7's stop test passed in the render step; the next input step goes to page 9.
     slid_in: bool,
-    /// The slide-out has bounced once: its accel is −40 from then on.
-    pub bounced: bool,
+    pub out: SlideOut,
     pub letterbox: i32,
     pub pair: u8,
     pub hold: Timer,
     /// Top-left of `i_credit_seb` and `i_credit_gaga` in scene space; draw at y + `scene_y`.
     pub photos: [[i32; 2]; 2],
     pub movers: [Wander; 2],
+}
+
+/// Page 8's sub-states (`FUN_0041eb60`): Esc only enters the page; the entry runs one tick later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SlideOut {
+    #[default]
+    Esc,
+    Entry,
+    Falling,
+    /// After the first bounce: the accel is −40.
+    Bounced,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -132,9 +158,11 @@ const BOOT_REST_Y: f64 = 350.0;
 pub const CREDIT_PAIRS: u8 = 5;
 pub const CREDIT_HOLD_MS: u64 = 7000;
 /// Page 7: the scene slides down at 520 px/s, 5 px/s slower each tick, until layer 0's y ≥ −200
-/// or vy ≤ 0. Page 9: the letterbox grows 10 px a tick to 120. Page 8: vy −20, accel −5, then −40
-/// after the first bounce; once layer 0's y + h < 601 the scene snaps back, booms at volume 300,
-/// and stops if |vy| < 61, else bounces with −(vy / 2).
+/// or vy ≤ 0. Page 9: the letterbox grows 10 px a tick to 120. Page 8 (answers.md "Credits page 8:
+/// accel order and Esc tick"), from the tick after Esc: vy −20; each later tick tests the
+/// position the last move left: layer 0's y + h < 601 snaps the scene back, booms at volume 300
+/// and stops if |vy| < 61, else bounces with −(vy / 2) and no accel; otherwise the accel is −5,
+/// or −40 after the first bounce. The move comes last.
 const CREDIT_SLIDE_VY: i32 = 520;
 const CREDIT_SLIDE_DECEL: i32 = 5;
 const SLIDE_IN_STOP: f64 = 400.0;
@@ -290,27 +318,47 @@ impl Menu {
         i.step = Some(2);
         i.fly_x = FLY_START_X;
         i.fly_y = f64::from(cx.rng.r(300) + 100);
-        i.fly_timer = Timer::armed(cx.now, INTRO_FLY_MAX_MS);
-        cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Loop(PlayParams::default()));
+        i.fly_timer = Timer::UNARMED;
+        self.fly_buzz_and_move(cx);
     }
 
+    /// `FUN_0041d3cc` step 2: the 801 test arms the 3 s timer, its expiry starts the pig; the fly
+    /// itself flies on off screen.
     fn fly_cross(&mut self, cx: &mut Ctx) {
         let i = &mut self.intro;
-        i.fly_x += INTRO_FLY_VX * DT;
-        let pan = Pan::ScreenX {
-            x: i.fly_x as i32,
-            w: 120,
-            // shortcut: the intro fly's wrap is open in answers.md (positional sound, round 4); 5000, revisit when decoded
-            wrap: crate::event::PAN_WRAP_OBJECT,
-        };
-        cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Move(pan));
-        if i.fly_x <= 800.0 && !i.fly_timer.expired(cx.now) {
+        if !i.fly_timer.is_armed() && i.fly_x as i32 >= INTRO_FLY_REACHED_X {
+            i.fly_timer.arm(cx.now, INTRO_FLY_MAX_MS);
+        }
+        if i.fly_timer.is_armed() && i.fly_timer.expired(cx.now) {
+            i.step = Some(3);
+            i.pig_y = -50.0 - f64::from(pig_h(cx));
+            i.pig_vy = 50.0;
             return;
         }
-        cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Stop);
-        i.step = Some(3);
-        i.pig_y = -50.0 - f64::from(pig_h(cx));
-        i.pig_vy = 50.0;
+        self.fly_buzz_and_move(cx);
+    }
+
+    /// The buzz sees the pre-move x (the move is the render's); one R(1000) per call. The loop
+    /// starts when slot 7 is not playing and is not stopped when the pig starts.
+    fn fly_buzz_and_move(&mut self, cx: &mut Ctx) {
+        let i = &mut self.intro;
+        let x = i.fly_x as i32;
+        let freq_hz = (BUZZ_BASE_HZ + cx.rng.r(BUZZ_ROLL)) as u32;
+        let pan = Pan::Fixed(buzz_pan(x));
+        let volume_cb = BUZZ_VOLUME_CB - buzz_off_screen(x);
+        i.fly_x += INTRO_FLY_VX * DT;
+        if !std::mem::replace(&mut i.buzzing, true) {
+            let freq_hz = Some(freq_hz);
+            let params = PlayParams {
+                volume_cb,
+                freq_hz,
+                pan,
+            };
+            return cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Loop(params));
+        }
+        cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Move(pan));
+        cx.sound(SoundSlot::FLY_BUZZ, SoundOp::SetFrequency(freq_hz));
+        cx.sound(SoundSlot::FLY_BUZZ, SoundOp::SetVolume(volume_cb));
     }
 
     fn pig_drop(&mut self, cx: &mut Ctx) {
@@ -340,7 +388,7 @@ impl Menu {
 
     /// `FUN_0041e1be`: the end pose.
     fn intro_end(&mut self, cx: &mut Ctx) {
-        if self.intro.step == Some(2) {
+        if std::mem::take(&mut self.intro.buzzing) {
             cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Stop);
         }
         self.intro.step = None;
@@ -533,10 +581,6 @@ impl Menu {
             // Page 9 reads only the Esc edge; pages 7 and 8 read nothing.
             Page::Credits(9) if keys.pressed(Scancode::ESCAPE) => {
                 self.page = Page::Credits(8);
-                c.scene_vy = SLIDE_OUT_VY;
-                for mover in &mut c.movers {
-                    mover.set_accel(SLIDE_OUT_PHOTO_ACCEL);
-                }
             }
             _ => {}
         }
@@ -586,31 +630,49 @@ impl Credits {
     }
 
     /// Page 8; true once a bounce is slow enough to stop.
-    // shortcut: answers.md gives the page 8 steps but not whether the accel is added before or
-    // after the move; it follows page 7 (move first). Revisit with a capture of the bounce ticks.
     fn slide_out(&mut self, cx: &mut Ctx) -> bool {
-        self.letterbox = (self.letterbox - LETTERBOX_STEP).max(0);
-        self.move_scene();
-        if self.scene_y < SLIDE_OUT_SNAP_BELOW {
-            self.scene_y = 0.0;
-            let boom = PlayParams {
-                volume_cb: BOOM_VOLUME_CB,
-                ..PlayParams::default()
-            };
-            cx.sound(SoundSlot::BOOM, SoundOp::Play(boom));
-            if self.scene_vy.abs() < BOUNCE_STOP {
-                return true;
-            }
-            self.scene_vy = -(self.scene_vy / 2);
-            self.bounced = true;
+        if self.out == SlideOut::Esc {
+            self.out = SlideOut::Entry;
+            return false;
         }
-        self.scene_vy += SLIDE_OUT_ACCEL[usize::from(self.bounced)];
-        false
+        self.letterbox = (self.letterbox - LETTERBOX_STEP).max(0);
+        let mut stop = false;
+        if self.out == SlideOut::Entry {
+            self.enter_slide_out();
+        } else if self.scene_y < SLIDE_OUT_SNAP_BELOW {
+            stop = self.snap(cx);
+        } else {
+            self.scene_vy += SLIDE_OUT_ACCEL[usize::from(self.out == SlideOut::Bounced)];
+        }
+        self.move_scene();
+        stop
+    }
+
+    fn enter_slide_out(&mut self) {
+        self.out = SlideOut::Falling;
+        self.scene_vy = SLIDE_OUT_VY;
+        for mover in &mut self.movers {
+            mover.set_accel(SLIDE_OUT_PHOTO_ACCEL);
+        }
+    }
+
+    /// The scene is back at rest: boom, then stop or bounce (no accel this tick).
+    fn snap(&mut self, cx: &mut Ctx) -> bool {
+        self.scene_y = 0.0;
+        let boom = PlayParams {
+            volume_cb: BOOM_VOLUME_CB,
+            ..PlayParams::default()
+        };
+        cx.sound(SoundSlot::BOOM, SoundOp::Play(boom));
+        let stop = self.scene_vy.abs() < BOUNCE_STOP;
+        self.scene_vy = if stop { 0 } else { -(self.scene_vy / 2) };
+        self.out = SlideOut::Bounced;
+        stop
     }
 
     /// Each photo wanders on the scene (its camera delta is the layer step); in page 9 it is
-    /// clamped in screen space, the left bound never applied.
-    // shortcut: whether the page 9 bounds stay on in page 8 is not given; they are dropped there.
+    /// clamped in screen space, the left bound never applied; page 8 drops the bounds
+    /// (answers.md "Credits page 8: photo bounds").
     fn move_photos(&mut self, bounded: bool, cx: &mut Ctx) {
         let scene = self.scene_y as i32;
         let top = self.letterbox - PHOTO_TOP_SLACK;
@@ -644,6 +706,28 @@ fn toggle(item: usize, options: &mut Options, cx: &mut Ctx) {
         file: SaveFile::Options,
         bytes: encode_options(options),
     });
+}
+
+/// `FUN_0040d005`'s pan: left of 400 − w −trunc((1 − x / (400 − w)) × 2000), from 400
+/// trunc((x − 400) / 400 × 2000), else 0.
+fn buzz_pan(x: i32) -> i32 {
+    let left = BUZZ_PAN_MID - BUZZ_W;
+    if x <= left {
+        return -((1.0 - f64::from(x) / f64::from(left)) * BUZZ_PAN_CB) as i32;
+    }
+    if x < BUZZ_PAN_MID {
+        return 0;
+    }
+    (f64::from(x - BUZZ_PAN_MID) / f64::from(BUZZ_PAN_MID) * BUZZ_PAN_CB) as i32
+}
+
+/// The buzz volume's off-screen part: |x| left of 0, x − 800 right of the screen.
+fn buzz_off_screen(x: i32) -> i32 {
+    if x < 0 {
+        -x
+    } else {
+        (x - BUZZ_SCREEN_W).max(0)
+    }
 }
 
 fn pig_h(cx: &Ctx) -> i32 {
@@ -730,15 +814,23 @@ mod tests {
         }
     }
 
-    /// Esc in page 9 starts page 8 at vy −20, accel −5 (moving first, as in page 7): the scene
-    /// is back at rest on tick 101 at vy −520 (boom, bounce to 260, accel −40), again on 113 at
-    /// −220 (110) and 118 at −90 (45). 45 − 40 = 5 moves 0 px, so tick 119 snaps again at
-    /// |vy| 5 < 61: the last boom, and the top page.
+    /// answers.md "Credits page 8: accel order and Esc tick" (round 5), seed 1. The Esc tick only
+    /// changes the page; the entry (vy −20, letterbox shrinking) runs on Esc + 1 (tick 2). Each
+    /// later tick tests the position the last move left, then bounces with no accel or
+    /// accelerates, then moves. Σ of the FPS-integrator moves from 372 (vy −20, then −5 per tick)
+    /// leaves y 8 after tick 102 and 0 after tick 103's vy −520 move, so tick 103 is the first
+    /// snap (boom, bounce to +260 with no −40); the snaps then fall on 117 (vy −260 → 130), 125
+    /// (−150 → 75), 130 (−85 → 42) and 131, where 42 − 40 moves 0 px and |vy| 42 < 61 stops.
     #[test]
-    fn esc_slides_the_scene_out_with_bounces() {
+    fn esc_slides_the_scene_out_one_tick_later_with_bounces_that_skip_the_accel() {
         let mut rig = Rig::new(1);
         let (mut m, cfg) = shown(&mut rig);
+        for _ in 0..12 {
+            tick(&mut rig, &mut m, &cfg);
+        }
+        assert_eq!((m.credits.letterbox, m.credits.scene_y), (120, 372.0));
         let mut booms = Vec::new();
+        let mut bounce_vy = Vec::new();
         for t in 1..=200 {
             let esc: &[Scancode] = if t == 1 { &[Scancode::ESCAPE] } else { &[] };
             let before = rig.events.len();
@@ -747,15 +839,28 @@ mod tests {
                 |e: &Event| matches!(e, Event::Sound { slot, .. } if *slot == SoundSlot::BOOM);
             if rig.events[before..].iter().any(boom) {
                 booms.push(t);
+                bounce_vy.push(m.credits.scene_vy);
             }
-            if t == 12 {
-                assert_eq!((m.page, m.credits.letterbox), (Page::Credits(8), 0));
+            match t {
+                1 => assert_eq!(
+                    (
+                        m.page,
+                        m.credits.scene_vy,
+                        m.credits.scene_y,
+                        m.credits.letterbox
+                    ),
+                    (Page::Credits(8), 0, 372.0, 120)
+                ),
+                2 => assert_eq!((m.credits.scene_vy, m.credits.letterbox), (-20, 110)),
+                13 => assert_eq!(m.credits.letterbox, 0),
+                _ => {}
             }
             if m.page == Page::Top {
                 break;
             }
         }
-        assert_eq!(booms, [101, 113, 118, 119]);
+        assert_eq!(booms, [103, 117, 125, 130, 131]);
+        assert_eq!(bounce_vy, [260, 130, 75, 42, 0]);
         assert_eq!((m.page, m.credits.scene_y), (Page::Top, 0.0));
     }
 
@@ -777,5 +882,133 @@ mod tests {
         }
         assert!(gaps.len() >= 2, "{gaps:?}");
         assert!(gaps.iter().all(|g| (7000..7032).contains(g)), "{gaps:?}");
+    }
+
+    fn intro_menu() -> (Rig, Menu, MatchConfig, Options) {
+        (
+            Rig::new(1),
+            Menu::new(true),
+            MatchConfig::default(),
+            Options::default(),
+        )
+    }
+
+    fn intro_tick(
+        (rig, m, cfg, options): &mut (Rig, Menu, MatchConfig, Options),
+        held: &[Scancode],
+    ) -> Vec<Event> {
+        let before = rig.events.len();
+        rig.step(held, |k, cx| m.tick(k, cfg, options, cx));
+        rig.events[before..].to_vec()
+    }
+
+    fn buzz_ops(events: &[Event]) -> Vec<SoundOp> {
+        let slot = SoundSlot::FLY_BUZZ;
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Sound { slot: s, op } if *s == slot => Some(*op),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// answers.md "Menu intro fly buzz" (round 5), seed 1: step 2 starts with y = 41 % 300 + 100 =
+    /// 141 and x −120. The buzz draws R(1000) = 18467 % 1000 = 467 on that tick: frequency 10000 +
+    /// 467 + 0 + 400 × 2500 / 700 (1428) = 11895; pan −trunc((1 + 120 / 280) × 2000) = −2857;
+    /// volume −700 − 120. The next tick (x trunc(−120 + 400 / 65) = −113, R = 6334 % 1000 = 334)
+    /// moves the loop: 11762 Hz, pan −2807, volume −813.
+    #[test]
+    fn the_intro_fly_buzzes_by_the_400_centred_rule_one_rand_per_tick() {
+        let mut rig = intro_menu();
+        let mut first = Vec::new();
+        for _ in 0..TICK_CAP * 5 {
+            first = intro_tick(&mut rig, &[]);
+            if rig.1.intro.step == Some(2) {
+                break;
+            }
+        }
+        assert_eq!(rig.1.intro.fly_y, 141.0);
+        let loop_params = PlayParams {
+            volume_cb: -820,
+            freq_hz: Some(11_895),
+            pan: Pan::Fixed(-2857),
+        };
+        assert_eq!(buzz_ops(&first), [SoundOp::Loop(loop_params)]);
+        let second = intro_tick(&mut rig, &[]);
+        assert_eq!(
+            buzz_ops(&second),
+            [
+                SoundOp::Move(Pan::Fixed(-2807)),
+                SoundOp::SetFrequency(11_762),
+                SoundOp::SetVolume(-813),
+            ]
+        );
+    }
+
+    /// The pig comes 3000 ms after the fly's screen x first reaches 801 (strictly past, on the
+    /// first tick whose ms is above it), the buzz keeps drawing one R(1000) per tick until then
+    /// and is not stopped at the step change; its volume fades with x − 800.
+    #[test]
+    fn the_pig_starts_3000_ms_after_the_fly_reaches_801_and_the_buzz_runs_on() {
+        let mut rig = intro_menu();
+        let (mut reached_at, mut pig_at, mut buzz_calls) = (None, None, 0);
+        let mut last_volume = 0;
+        for _ in 0..TICK_CAP * 5 {
+            let (now, x, step) = (rig.0.now(), rig.1.intro.fly_x, rig.1.intro.step);
+            if step == Some(2) && reached_at.is_none() && x as i32 >= 801 {
+                reached_at = Some(now);
+            }
+            let ops = buzz_ops(&intro_tick(&mut rig, &[]));
+            assert!(!ops.contains(&SoundOp::Stop));
+            buzz_calls += ops
+                .iter()
+                .filter(|o| matches!(o, SoundOp::Loop(_) | SoundOp::Move(_)))
+                .count();
+            for op in ops {
+                if let SoundOp::SetVolume(v) = op {
+                    last_volume = v;
+                }
+            }
+            if rig.1.intro.step == Some(3) {
+                pig_at = Some(now);
+                break;
+            }
+        }
+        let (reached, pig) = (
+            reached_at.expect("fly reaches 801"),
+            pig_at.expect("pig starts"),
+        );
+        assert!(
+            pig > reached + 3000 && pig <= reached + 3000 + 16,
+            "{reached} {pig}"
+        );
+        assert!(last_volume < -700 - 1000, "{last_volume}");
+        let mut probe = MsvcRand::new(1);
+        (0..=buzz_calls).for_each(|_| {
+            probe.rand();
+        });
+        assert_eq!(rig.0.rng, probe);
+        // 3000 ms at 400 px/s: the fly is near x 2000 when the pig starts.
+        assert!(
+            (1900.0..2100.0).contains(&rig.1.intro.fly_x),
+            "{}",
+            rig.1.intro.fly_x
+        );
+    }
+
+    /// The skip handler (`FUN_0041e1be`) stops the looping buzz, also after step 2.
+    #[test]
+    fn skipping_during_the_pig_stops_the_buzz() {
+        let mut rig = intro_menu();
+        for _ in 0..TICK_CAP * 5 {
+            intro_tick(&mut rig, &[]);
+            if rig.1.intro.step == Some(3) {
+                break;
+            }
+        }
+        let events = intro_tick(&mut rig, &[Scancode::RETURN]);
+        assert_eq!(buzz_ops(&events), [SoundOp::Stop]);
+        assert_eq!(rig.1.intro.step, None);
     }
 }
