@@ -21,12 +21,20 @@ const SUPERFLY_SPARKLE_MS: u64 = 40;
 const SUPERFLY_SPARKLES: u32 = 5;
 /// reset(0)'s forced burst, `FUN_00439450(0, 45)`.
 const RESET_SPARKLES: u32 = 45;
-/// The sparkle store's slots.
-const SPARKLE_SLOTS: u32 = 90;
-/// A sparkle's rolls: delay R(60) + 20 (drawn only), position inside the fly less 20 px, speed
-/// R(160) per axis, each with an R(10) sign roll.
+/// The sparkle pool's slots (+0x18f0) and the cap on one request (answers.md "SuperFly
+/// sparkles: call site, lifetime and pool").
+pub const SPARKLE_SLOTS: usize = 90;
+const SPARKLE_REQUEST_CAP: u32 = 89;
+/// A sparkle's alpha starts at 255 and falls by trunc(255 / (fps × 200 / 1000.0)) per render
+/// (`FUN_0041787c`); below 1 the slot is free again.
+const SPARKLE_ALPHA: i32 = 255;
+const SPARKLE_FADE: i32 = (SPARKLE_ALPHA as f64 / (FPS as f64 * 200.0 / 1000.0)) as i32;
+/// A sparkle's rolls: animation delay R(60) + 20, position inside the fly less 20 px, speed
+/// R(160) per axis, each with an R(10) sign roll (−1 below 5).
 const SPARKLE_DELAY_ROLL: i32 = 60;
+const SPARKLE_DELAY_BASE: i32 = 20;
 const SPARKLE_SIGN_ROLL: i32 = 10;
+const SPARKLE_SIGN_BELOW: i32 = 5;
 const SPARKLE_INSET: i32 = 20;
 const SPARKLE_SPEED_ROLL: i32 = 160;
 /// Dying: crash animation done → this timer → kill recorded and respawn requested (§3.6 D).
@@ -173,6 +181,10 @@ pub struct Fly {
     pub superfly: bool,
     pub superfly_timer: Timer,
     pub superfly_sparkle_timer: Timer,
+    /// The sparkle pool's alphas, 0 for a free slot.
+    pub sparkle_alpha: [i32; SPARKLE_SLOTS],
+    /// +0x18e8: the render fades the sparkles only while this is set.
+    pub sparkles_visible: bool,
     /// 0.2 × strength level, a float.
     pub strength_f: f32,
     pub dying: bool,
@@ -249,6 +261,8 @@ impl Fly {
             superfly: false,
             superfly_timer: Timer::UNARMED,
             superfly_sparkle_timer: Timer::UNARMED,
+            sparkle_alpha: [0; SPARKLE_SLOTS],
+            sparkles_visible: false,
             strength_f: strength as f32 * 0.2,
             dying: false,
             stunned: false,
@@ -356,6 +370,7 @@ impl Fly {
     /// `FUN_0043728f`: 5 sparkles, looping slot 36, 8000 ms and the 40 ms sparkle timer
     /// (answers.md "Fly reset(0) and SuperFly sparkles").
     pub fn start_superfly(&mut self, cx: &mut Ctx) {
+        self.sparkles_visible = true;
         self.sparkles(SUPERFLY_SPARKLES, cx);
         self.superfly = true;
         self.superfly_timer.arm(cx.now, SUPERFLY_MS);
@@ -363,28 +378,44 @@ impl Fly {
         cx.sound(SoundSlot::SUPERFLY, SoundOp::Loop(PlayParams::default()));
     }
 
-    /// `FUN_00437302`: 5 sparkles per firing of the 40 ms timer while SuperFly lasts.
-    fn superfly_sparkle(&mut self, cx: &mut Ctx) {
-        if self.superfly && self.superfly_sparkle_timer.expired_rearm(cx.now) {
+    /// `FUN_00437302`, while SuperFly is on: the 8000 ms expiry ends it with no sparkles that
+    /// tick; otherwise 5 sparkles per firing of the 40 ms timer (answers.md "SuperFly sparkles:
+    /// call site, lifetime and pool").
+    fn superfly_tick(&mut self, cx: &mut Ctx) {
+        if self.superfly_timer.expired(cx.now) {
+            self.end_superfly(cx);
+            return;
+        }
+        if self.superfly_sparkle_timer.expired_rearm(cx.now) {
             self.sparkles(SUPERFLY_SPARKLES, cx);
         }
     }
 
-    /// `FUN_00439450`: each sparkle's 7 draws.
-    ///
-    /// shortcut: the sparkles are presentation and the event API has no sparkle effect, so the
-    /// rolls are drawn for the stream and dropped; the 90-slot cap is taken as never full (the
-    /// sparkle lifetime is undocumented). Revisit when an `Effect::Sparkles` lands.
-    fn sparkles(&self, count: u32, cx: &mut Ctx) {
-        for _ in 0..count.min(SPARKLE_SLOTS) {
-            cx.rng.r(SPARKLE_DELAY_ROLL);
-            cx.rng.r(SPARKLE_SIGN_ROLL);
-            cx.rng.r(self.size.w - SPARKLE_INSET);
-            cx.rng.r(self.size.h - SPARKLE_INSET);
-            cx.rng.r(SPARKLE_SPEED_ROLL);
-            cx.rng.r(SPARKLE_SIGN_ROLL);
-            cx.rng.r(SPARKLE_SPEED_ROLL);
+    /// `FUN_00439450`: up to `count` (at most 89) sparkles into free slots; busy slots are
+    /// skipped without a draw, so a full pool draws nothing.
+    fn sparkles(&mut self, count: u32, cx: &mut Ctx) {
+        let (x, y, size) = (self.x, self.y, self.size);
+        let free = self.sparkle_alpha.iter_mut().filter(|a| **a == 0);
+        for alpha in free.take(count.min(SPARKLE_REQUEST_CAP) as usize) {
+            *alpha = SPARKLE_ALPHA;
+            let effect = sparkle(x, y, size, cx);
+            cx.emit(Event::Effect(effect));
         }
+    }
+
+    /// `FUN_0043964c`, from the fly render while +0x18e8 is set: each sparkle fades, and with
+    /// none left the flag clears. The render draws no rand.
+    // shortcut: the quit-dialog pause skips the world tick (screen.rs), so the sparkles do not
+    // fade through it and answers.md's stuck-slot case after a pause cannot arise. Revisit if the
+    // paused match gets a render step.
+    fn render_sparkles(&mut self) {
+        if !self.sparkles_visible {
+            return;
+        }
+        for alpha in self.sparkle_alpha.iter_mut() {
+            *alpha = (*alpha - SPARKLE_FADE).max(0);
+        }
+        self.sparkles_visible = self.sparkle_alpha.iter().any(|&a| a > 0);
     }
 
     fn end_superfly(&mut self, cx: &mut Ctx) {
@@ -555,8 +586,7 @@ impl Fly {
 
     /// `FUN_00438643(appear)`: clear hit, stun, damage, splat, grab, carrying, Turbo, SuperFly, and
     /// the crash and respawn timers (a fan can splat a dying fly). Argument 0 is the period start:
-    /// `FUN_004387d5` (sound 38, survival started), then a forced 45-sparkle burst (answers.md
-    /// "Fly reset(0) and SuperFly sparkles").
+    /// `FUN_004387d5` at once.
     pub fn reset(&mut self, appear: bool, cx: &mut Ctx) {
         self.hit_in_progress = false;
         self.crash_timer.disarm();
@@ -572,16 +602,13 @@ impl Fly {
         if self.superfly {
             self.end_superfly(cx);
         }
-        let (x, y) = self.centre();
         if !appear {
             self.become_alive(cx);
-            self.sparkles(RESET_SPARKLES, cx);
-            // shortcut: Stardust stands in for the sparkle burst until an `Effect::Sparkles` exists.
-            cx.emit(Event::Effect(Effect::Stardust { x, y }));
             return;
         }
         self.appearing = true;
         self.appear_ticks = 0;
+        let (x, y) = self.centre();
         cx.emit(Event::Effect(Effect::Stardust { x, y }));
     }
 
@@ -613,14 +640,44 @@ impl Fly {
         m.stats.damage += self.stat_damage;
     }
 
-    /// `FUN_004387d5`: alive, sound 38, survival timer started (§3.7.4).
+    /// `FUN_004387d5`, at reset(0) and the appear end: the flags cleared, the render flag set, 45
+    /// sparkles, sound 38, the survival start (answers.md "SuperFly sparkles: call site, lifetime
+    /// and pool", reset(0) order corrected).
     fn become_alive(&mut self, cx: &mut Ctx) {
         self.phase = 0;
         self.dying = false;
         self.splatted = false;
         self.appearing = false;
+        self.sparkles_visible = true;
+        self.sparkles(RESET_SPARKLES, cx);
         cx.emit(Event::play(SoundSlot::GOODIE_FLY));
         self.life_started_ms = Some(cx.now);
+    }
+}
+
+/// One sparkle's 7 draws (`FUN_00439450`, answers.md "Fly reset(0) and SuperFly sparkles").
+fn sparkle(x: i32, y: i32, size: Size, cx: &mut Ctx) -> Effect {
+    let delay_ms = cx.rng.r(SPARKLE_DELAY_ROLL) + SPARKLE_DELAY_BASE;
+    let sign_x = sparkle_sign(cx);
+    let x = cx.rng.r(size.w - SPARKLE_INSET) + x;
+    let y = cx.rng.r(size.h - SPARKLE_INSET) + y;
+    let vx = cx.rng.r(SPARKLE_SPEED_ROLL) * sign_x;
+    let sign_y = sparkle_sign(cx);
+    let vy = cx.rng.r(SPARKLE_SPEED_ROLL) * sign_y;
+    Effect::Sparkles {
+        x,
+        y,
+        vx,
+        vy,
+        delay_ms,
+    }
+}
+
+fn sparkle_sign(cx: &mut Ctx) -> i32 {
+    if cx.rng.r(SPARKLE_SIGN_ROLL) < SPARKLE_SIGN_BELOW {
+        -1
+    } else {
+        1
     }
 }
 
@@ -628,12 +685,9 @@ impl Fly {
 impl Fly {
     /// §3.4 steps 1–11; returns the camera delta of step 11.
     fn physics(&mut self, pad: &FlyPad, cx: &mut Ctx) -> f64 {
-        if self.superfly && self.superfly_timer.expired(cx.now) {
-            self.end_superfly(cx);
+        if self.superfly {
+            self.superfly_tick(cx);
         }
-        // shortcut: answers.md names `FUN_00437302` but not its call site; it runs with the
-        // SuperFly expiry. Revisit if the sparkle draws prove out of order.
-        self.superfly_sparkle(cx);
         self.turbo_tick(cx.now);
         let mx = self.max_x + i32::from(self.turbo.boost_x);
         let my = self.max_y + i32::from(self.turbo.boost_y);
@@ -1307,6 +1361,9 @@ impl World {
     /// survival timer); splat done → kill recorded and respawn requested.
     pub fn fly_render_driven(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let fly = &mut self.fly;
+        // shortcut: the sparkle fade's place in the fly render `FUN_004388ca` relative to the
+        // appear end is not in answers.md; first here. It shifts a slot's release by one tick only.
+        fly.render_sparkles();
         fly.count_hit(m);
         if fly.appearing {
             if fly.appear_ticks >= APPEAR_TICKS {
@@ -1392,6 +1449,18 @@ mod tests {
             }
             panic!("rng not reached within 10000 draws");
         }
+    }
+
+    /// How many rand() calls `after` is past `before`.
+    fn draws_between(before: &MsvcRand, after: &MsvcRand) -> u32 {
+        let mut r = before.clone();
+        for n in 0..10_000 {
+            if r == *after {
+                return n;
+            }
+            r.rand();
+        }
+        panic!("rng not reached within 10000 draws");
     }
 
     #[test]
@@ -1619,10 +1688,10 @@ mod tests {
         );
     }
 
-    /// answers.md "Fly reset(0) and SuperFly sparkles": argument 0 is alive at once with sound
-    /// 38, the survival stat started and a 45-sparkle burst of 7 draws each.
+    /// answers.md "SuperFly sparkles: call site, lifetime and pool": argument 0 is alive at once,
+    /// then the 45 sparkles of 7 draws, then sound 38 and the survival start.
     #[test]
-    fn reset_without_appear_plays_38_starts_survival_and_bursts_45_sparkles() {
+    fn reset_without_appear_bursts_45_sparkles_then_plays_38_and_starts_survival() {
         let mut b = Bench::new(1);
         let mut fly = b.fly();
         (fly.appearing, fly.dying, fly.phase) = (true, true, 1);
@@ -1634,6 +1703,98 @@ mod tests {
         assert!(fly.alive() && fly.phase == 0);
         assert_eq!(fly.life_started_ms, Some(700));
         assert_eq!(b.sounds(SoundSlot::GOODIE_FLY).len(), 1);
+        let kinds: Vec<bool> = b
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Effect(Effect::Sparkles { .. }) => Some(true),
+                Event::Sound { slot, .. } if *slot == SoundSlot::GOODIE_FLY => Some(false),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds.len(), 46);
+        assert!(kinds[..45].iter().all(|&k| k) && !kinds[45], "sparkles before 38");
+    }
+
+    /// The first sparkle after `Fly::new` (draw 0 = 41, so x = 161, y = 253; Face 120 × 94):
+    /// delay 18467 % 60 + 20 = 67; sign 6334 % 10 = 4 < 5 → −; x 26500 % 100 + 161 = 161;
+    /// y 19169 % 74 + 253 = 256; |vx| 15724 % 160 = 44; sign 11478 % 10 = 8 → +; vy 29358 % 160
+    /// = 78.
+    #[test]
+    fn a_sparkle_rolls_delay_sign_x_y_vx_sign_vy() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        b.with(|cx| fly.reset(false, cx));
+        let first = b
+            .events
+            .iter()
+            .find(|e| matches!(e, Event::Effect(Effect::Sparkles { .. })));
+        let expected = Event::Effect(Effect::Sparkles {
+            x: 161,
+            y: 256,
+            vx: -44,
+            vy: 78,
+            delay_ms: 67,
+        });
+        assert_eq!(first, Some(&expected));
+    }
+
+    /// The pool: 90 slots, busy ones skipped without a draw, a request capped at 89. Alpha 255
+    /// falls by trunc(255 / (65 × 200 / 1000)) = 19 per render, so a slot frees on the 14th
+    /// (255 − 13 × 19 = 8 ≥ 1, 255 − 14 × 19 < 1).
+    #[test]
+    fn a_full_sparkle_pool_draws_nothing_until_the_renders_fade_it() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        let burst = |b: &mut Bench, fly: &mut Fly| {
+            let before = b.draws_since(1, 0);
+            b.with(|cx| fly.reset(false, cx));
+            b.draws_since(1, before)
+        };
+        assert_eq!(burst(&mut b, &mut fly), 315);
+        assert_eq!(burst(&mut b, &mut fly), 315);
+        assert_eq!(burst(&mut b, &mut fly), 0, "90 busy slots");
+        for _ in 0..13 {
+            fly.render_sparkles();
+        }
+        assert_eq!(burst(&mut b, &mut fly), 0, "alpha 8 still shows");
+        fly.render_sparkles();
+        assert!(!fly.sparkles_visible, "no sparkle left clears the render flag");
+        assert_eq!(burst(&mut b, &mut fly), 315);
+        for _ in 0..14 {
+            fly.render_sparkles();
+        }
+        let before = b.draws_since(1, 0);
+        b.with(|cx| fly.sparkles(100, cx));
+        assert_eq!(b.draws_since(1, before), 89 * 7, "a request is capped at 89");
+    }
+
+    /// The render flag: only the SuperFly start and `FUN_004387d5` set it, so sparkles emitted
+    /// once it is clear never fade and hold their slots.
+    #[test]
+    fn sparkles_emitted_while_the_render_flag_is_clear_never_fade() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        b.with(|cx| fly.sparkles(5, cx));
+        for _ in 0..20 {
+            fly.render_sparkles();
+        }
+        assert_eq!(fly.sparkle_alpha.iter().filter(|&&a| a > 0).count(), 5);
+    }
+
+    /// The 8000 ms expiry wins: on that tick SuperFly ends with no sparkles, though the 40 ms
+    /// timer has fired too. Only the buzz's R(1000) is drawn.
+    #[test]
+    fn the_superfly_expiry_tick_ends_it_without_sparkles() {
+        let mut b = Bench::new(1);
+        let mut fly = centred(&mut b);
+        b.with(|cx| fly.start_superfly(cx));
+        b.now = 8001;
+        let before = b.draws_since(1, 0);
+        b.with(|cx| fly.physics(&NONE, cx));
+        assert_eq!(b.draws_since(1, before), 1);
+        assert!(!fly.superfly);
+        assert_eq!(b.sounds(SoundSlot::SUPERFLY).last(), Some(&SoundOp::Stop));
     }
 
     /// SuperFly: 5 sparkles at the start, then 5 per firing of the 40 ms timer while it lasts.
@@ -1750,7 +1911,11 @@ mod tests {
         for tick in 0..=33 {
             b.now = crate::clock::ms_at(tick);
             assert!(!w.fly.alive(), "alive too early, tick {tick}");
+            let before = b.rng.clone();
             b.with(|cx| w.fly_render_driven(&mut m, cx));
+            // answers.md "SuperFly sparkles": the appear end bursts 45 sparkles of 7 draws.
+            let draws = if tick == 33 { 45 * 7 } else { 0 };
+            assert_eq!(draws_between(&before, &b.rng), draws, "tick {tick}");
         }
         assert!(w.fly.alive());
         assert_eq!(w.fly.life_started_ms, Some(crate::clock::ms_at(33)));
