@@ -926,7 +926,9 @@ For each zapper, only while fly +0x2a4, +0x2a8 and +0x288 are all 0 at entry:
    - Inside, if fly y ≤ zapper y + zapper h − 80: the burst `FUN_00439f29(50, 80, 50, 100, 1,
      1, 1, 13)`, then sound 43. There is no return.
 2. The arc test for this same zapper still runs on the same tick, with target (fly x, fly y + 45,
-   fly w).
+   fly w). The entry gate is not tested again after the burst (checked in the disassembly: no
+   flag compare between the burst call and the arc-test call). So a grilled fly can still take
+   an arc, its sparks and a second burst on that tick.
 3. If an arc starts:
    1. fly vy −= 180
    2. 10 sparks (`FUN_00428ffc`) at (trunc(arc x + arc w / 2), arc y + arc h). Each takes up to
