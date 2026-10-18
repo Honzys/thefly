@@ -29,6 +29,20 @@ const USAGE: &str = "usage: thefly [--data <dir>] [--soundfont <file.sf2>] [--li
               [--seed <n>] [--keys <tick[-tick]:Key,...>] [--shot <tick>:<file.png>]...
               [--exit-after-shots] [--warp <tick>] [--window <w>x<h>]";
 
+const HELP: &str = "\
+Options:
+  --data <dir>          game data dir (default: $THEFLY_DATA, then ./data next to the executable)
+  --soundfont <file>    .sf2 SoundFont for the MIDI music (default: $THEFLY_SOUNDFONT)
+  --linear              smooth scaling instead of sharp pixels
+  --window <w>x<h>      initial window size, e.g. 1280x720
+  --viewer              browse the game's images and sounds instead of playing
+  --seed <n>            fixed random seed
+  --keys <spec>         scripted key holds, e.g. 200:Return,400-420:Up (testing)
+  --shot <tick>:<file>  save a PNG at a tick, repeatable (testing)
+  --exit-after-shots    quit once all --shot files are written (testing)
+  --warp <tick>         run faster than real time until this tick (testing)
+  -h, --help            show this help";
+
 #[derive(Default)]
 struct Args {
     data: Option<PathBuf>,
@@ -102,6 +116,10 @@ fn game(data: &Path, seed: u32, script: Script) -> Result<FlyGame, String> {
 }
 
 fn run() -> Result<(), String> {
+    if std::env::args_os().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}\n\n{HELP}");
+        return Ok(());
+    }
     let args = parse_args()?;
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate executable: {e}"))?;
     let exe_dir = exe.parent().unwrap_or(Path::new("."));
