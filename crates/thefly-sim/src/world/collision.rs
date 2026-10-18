@@ -65,7 +65,7 @@ pub struct Shape<'a> {
 ///
 /// shortcut: FW §4.3 step 3 says the contained-span case uses "the original y argument rather
 /// than the shifted one" but never defines the shift, so every case runs the plain row test
-/// (gaps §11.2); revisit if the quirk is re-read in the binary.
+/// (gaps §11.2); open in answers.md "Port decisions" (not read in round 2), revisit when read.
 pub fn outlines_overlap(a: &Shape<'_>, b: &Shape<'_>, wrap_width: i32) -> bool {
     let straddles = |s: &Shape<'_>| s.x + s.size.w > wrap_width;
     let shift = straddles(a) || straddles(b);
