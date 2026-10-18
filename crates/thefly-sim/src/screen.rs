@@ -353,24 +353,18 @@ impl QuitDialog {
         }
     }
 
-    /// Left/Right toggle, Enter answers. Some(true) is YES.
+    /// `FUN_00411b8f`: Left −1 and Right +1, wrapping over YES/NO, so each toggles; Enter
+    /// answers; Esc is not read. Some(true) is YES.
     pub fn tick(&mut self, keys: &KeyState, cx: &mut Ctx) -> Option<bool> {
-        // shortcut: open item O15, Esc answers No (dialogs read only arrows and Enter, gaps
-        // §1.3); revisit if a capture shows Esc ignored.
-        if keys.pressed(Scancode::ESCAPE) {
-            return Some(false);
-        }
         if keys.pressed(Scancode::RETURN) {
             return Some(self.yes);
         }
-        let yes = if keys.pressed(Scancode::LEFT) {
-            true
-        } else if keys.pressed(Scancode::RIGHT) {
-            false
-        } else {
+        let moves =
+            usize::from(keys.pressed(Scancode::LEFT)) + usize::from(keys.pressed(Scancode::RIGHT));
+        if moves == 0 {
             return None;
-        };
-        self.yes = yes;
+        }
+        self.yes ^= moves % 2 == 1;
         cx.emit(CLICK);
         None
     }
@@ -702,6 +696,26 @@ mod tests {
         tap(&mut rig, &mut s, Scancode::LEFT);
         tap(&mut rig, &mut s, Scancode::RETURN);
         assert!(matches!(s.screen, Screen::Menu(_)));
+    }
+
+    /// answers.md "Quit dialog: Esc": Esc is never read; Left and Right each step one item and
+    /// wrap over the two, so either key toggles.
+    #[test]
+    fn the_quit_dialog_ignores_esc_and_either_arrow_toggles() {
+        let mut rig = Rig::new(1);
+        let mut s = in_shop(&mut rig);
+        tap(&mut rig, &mut s, Scancode::ESCAPE);
+        tap(&mut rig, &mut s, Scancode::ESCAPE);
+        assert_eq!(s.dialog, Some(QuitDialog::new(false)));
+        tap(&mut rig, &mut s, Scancode::LEFT);
+        tap(&mut rig, &mut s, Scancode::LEFT);
+        assert_eq!(s.dialog.map(|d| d.yes), Some(false));
+        tap(&mut rig, &mut s, Scancode::RIGHT);
+        assert_eq!(s.dialog.map(|d| d.yes), Some(true));
+        tap(&mut rig, &mut s, Scancode::RIGHT);
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert!(s.dialog.is_none());
+        assert!(matches!(s.screen, Screen::Match(_)));
     }
 
     /// Top grid: Down to Credits (2), Right to Quit (3); YES → farewell → exit.
