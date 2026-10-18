@@ -782,6 +782,29 @@ mod tests {
         assert!(matches!(s.screen, Screen::Farewell(_)));
     }
 
+    /// answers.md "Credits: end and rand": the five pairs loop, Enter does nothing, Esc leaves.
+    #[test]
+    fn the_credits_loop_until_esc() {
+        let mut rig = Rig::new(1);
+        let mut s = State::new(Persisted::default());
+        s.screen = Screen::Menu(Box::new(Menu::new(false)));
+        tap(&mut rig, &mut s, Scancode::DOWN);
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert!(matches!(menu_page(&s), Some(crate::menu::Page::Credits(_))));
+        let entered = rig.now();
+        while rig.now() < entered + 6 * 7000 + 100 {
+            rig.step(&[], |k, cx| s.tick(k, cx));
+        }
+        tap(&mut rig, &mut s, Scancode::RETURN);
+        assert!(matches!(menu_page(&s), Some(crate::menu::Page::Credits(_))));
+        let Screen::Menu(m) = &s.screen else {
+            panic!("left the menu");
+        };
+        assert_eq!(m.credits.pair, 1);
+        tap(&mut rig, &mut s, Scancode::ESCAPE);
+        assert_eq!(menu_page(&s), Some(crate::menu::Page::Top));
+    }
+
     fn farewell(s: &State) -> Option<Farewell> {
         match &s.screen {
             Screen::Farewell(f) => Some(*f),
