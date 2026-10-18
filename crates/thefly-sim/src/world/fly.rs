@@ -52,10 +52,9 @@ pub const APPEAR_MS: u64 = 500;
 /// [`APPEAR_MS`] in ticks: 33. The tween steps once per tick, so the port counts ticks.
 pub const APPEAR_TICKS: u32 = first_tick_at(APPEAR_MS) as u32;
 /// The crash sprite's scale tween 0.3 → 1.0 (answers.md "Crash animation length"). It steps in
-/// the render pass and ends on the frame the scale passes 1.0.
-/// shortcut: the exact end tick is [I] (answers.md "Crash animation length"); the port ends it on
-/// the first fly update after 200 ms. Revisit if a capture times the respawn.
-pub const CRASH_MS: u64 = 200;
+/// the render pass for 13 frames at 65 fps (200 ms), so a hit on update T ends on update T + 13
+/// (answers.md "Crash end tick (round 5)"); the port counts the renders, as for [`APPEAR_TICKS`].
+pub const CRASH_TICKS: u32 = 13;
 /// The splat's blood particles and body pieces (gaps §2.1).
 pub const SPLAT_BLOOD: usize = 60;
 pub const SPLAT_PIECES: usize = 11;
@@ -185,6 +184,9 @@ pub struct Fly {
     pub sparkle_alpha: [i32; SPARKLE_SLOTS],
     /// +0x18e8: the render fades the sparkles only while this is set.
     pub sparkles_visible: bool,
+    /// +0x18ec: set by the SuperFly start, cleared by the appear end; while clear, a splatted
+    /// fly's sparkles do not fade.
+    pub superfly_sparkles: bool,
     /// 0.2 × strength level, a float.
     pub strength_f: f32,
     pub dying: bool,
@@ -226,8 +228,8 @@ pub struct Fly {
     pub respawn_request: bool,
     pub appearing: bool,
     pub respawn_timer: Timer,
-    /// Port: the crash animation's end, which the original detected in render.
-    pub crash_timer: Timer,
+    /// Crash tween frames rendered so far (the original detected the end in render).
+    pub crash_ticks: u32,
     /// Port: ticks of the appear tween so far (render-driven in the original, §2).
     pub appear_ticks: u32,
     /// The splat's 11 body pieces; the splat ends when all are at y ≥ 600 (gaps §2.2).
@@ -263,6 +265,7 @@ impl Fly {
             superfly_sparkle_timer: Timer::UNARMED,
             sparkle_alpha: [0; SPARKLE_SLOTS],
             sparkles_visible: false,
+            superfly_sparkles: false,
             strength_f: strength as f32 * 0.2,
             dying: false,
             stunned: false,
@@ -294,7 +297,7 @@ impl Fly {
             respawn_request: false,
             appearing: false,
             respawn_timer: Timer::UNARMED,
-            crash_timer: Timer::UNARMED,
+            crash_ticks: 0,
             appear_ticks: 0,
             pieces: [SplatPiece::default(); SPLAT_PIECES],
             splat_gravity: 0,
@@ -371,6 +374,7 @@ impl Fly {
     /// (answers.md "Fly reset(0) and SuperFly sparkles").
     pub fn start_superfly(&mut self, cx: &mut Ctx) {
         self.sparkles_visible = true;
+        self.superfly_sparkles = true;
         self.sparkles(SUPERFLY_SPARKLES, cx);
         self.superfly = true;
         self.superfly_timer.arm(cx.now, SUPERFLY_MS);
@@ -403,13 +407,20 @@ impl Fly {
         }
     }
 
+    /// One crash tween frame while dying, up to [`CRASH_TICKS`]; the fly update ends the crash.
+    fn render_crash(&mut self) {
+        if self.dying && self.phase == 0 && self.crash_ticks < CRASH_TICKS {
+            self.crash_ticks += 1;
+        }
+    }
+
     /// `FUN_0043964c`, from the fly render while +0x18e8 is set: each sparkle fades, and with
-    /// none left the flag clears. The render draws no rand.
-    // shortcut: the quit-dialog pause skips the world tick (screen.rs), so the sparkles do not
-    // fade through it and answers.md's stuck-slot case after a pause cannot arise. Revisit if the
-    // paused match gets a render step.
+    /// none left the flag clears. The render draws no rand. It also runs under the banner and the
+    /// quit dialog, which tick the whole world (answers.md "Quit dialog: the paused match keeps
+    /// updating (round 5)"). Sparkles from the appear end (+0x18ec == 0) do not fade while the
+    /// fly is splatted (answers.md "Sparkle fade vs the appear end (round 5)").
     fn render_sparkles(&mut self) {
-        if !self.sparkles_visible {
+        if !self.sparkles_visible || (self.splatted && !self.superfly_sparkles) {
             return;
         }
         for alpha in self.sparkle_alpha.iter_mut() {
@@ -589,7 +600,7 @@ impl Fly {
     /// `FUN_004387d5` at once.
     pub fn reset(&mut self, appear: bool, cx: &mut Ctx) {
         self.hit_in_progress = false;
-        self.crash_timer.disarm();
+        self.crash_ticks = 0;
         self.respawn_timer.disarm();
         self.hit_frame = 0;
         self.stunned = false;
@@ -648,6 +659,7 @@ impl Fly {
         self.dying = false;
         self.splatted = false;
         self.appearing = false;
+        self.superfly_sparkles = false;
         self.sparkles_visible = true;
         self.sparkles(RESET_SPARKLES, cx);
         cx.emit(Event::play(SoundSlot::GOODIE_FLY));
@@ -903,12 +915,11 @@ impl Fly {
             self.stun_in(cx);
         } else if self.stunned {
             self.stun_out();
-        } else if self.dying && self.phase == 0 && self.crash_timer.expired(cx.now) {
+        } else if self.dying && self.phase == 0 && self.crash_ticks >= CRASH_TICKS {
             self.hit_frame = HIT_FRAME_TOP;
             (self.vx, self.vy) = (0, 0);
             self.phase = 1;
             self.respawn_timer.arm(cx.now, RESPAWN_DELAY_MS);
-            self.crash_timer.disarm();
         }
     }
 
@@ -952,7 +963,7 @@ impl Fly {
         }
         cx.sound(SoundSlot::FLY_CRASH, SoundOp::SetVolume(CRASH_VOLUME));
         cx.emit(Event::play(SoundSlot::FLY_CRASH));
-        self.crash_timer.arm(cx.now, CRASH_MS);
+        self.crash_ticks = 0;
     }
 
     /// §3.6 B: the frame climbs to 3, then the kick unless SuperFly is on.
@@ -1361,10 +1372,11 @@ impl World {
     /// survival timer); splat done → kill recorded and respawn requested.
     pub fn fly_render_driven(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let fly = &mut self.fly;
-        // shortcut: the sparkle fade's place in the fly render `FUN_004388ca` relative to the
-        // appear end is not in answers.md; first here. It shifts a slot's release by one tick only.
+        // `FUN_004388ca` fades the sparkles before the appear end (answers.md "Sparkle fade vs the
+        // appear end (round 5)").
         fly.render_sparkles();
         fly.count_hit(m);
+        fly.render_crash();
         if fly.appearing {
             if fly.appear_ticks >= APPEAR_TICKS {
                 fly.become_alive(cx);
@@ -1792,6 +1804,28 @@ mod tests {
         assert_eq!(fly.sparkle_alpha.iter().filter(|&&a| a > 0).count(), 5);
     }
 
+    /// answers.md "Sparkle fade vs the appear end (round 5)": the appear end's sparkles
+    /// (+0x18ec == 0) hold while the fly is splatted; after a SuperFly start they fade.
+    #[test]
+    fn appear_end_sparkles_do_not_fade_while_splatted() {
+        for (superfly, faded) in [(false, false), (true, true)] {
+            let mut b = Bench::new(1);
+            let mut fly = b.fly();
+            b.with(|cx| fly.reset(false, cx));
+            if superfly {
+                b.with(|cx| fly.start_superfly(cx));
+            }
+            fly.splatted = true;
+            fly.render_sparkles();
+            let full = fly
+                .sparkle_alpha
+                .iter()
+                .filter(|&&a| a == SPARKLE_ALPHA)
+                .count();
+            assert_eq!(full == 0, faded, "superfly {superfly}");
+        }
+    }
+
     /// The 8000 ms expiry wins: on that tick SuperFly ends with no sparkles, though the 40 ms
     /// timer has fired too. Only the buzz's R(1000) is drawn.
     #[test]
@@ -2187,7 +2221,7 @@ mod tests {
         update(&mut b, &mut m, &mut fly, 101);
         // answers.md "Crash animation length": the 60-particle spray, 8 draws each.
         assert_eq!(b.draws_since(1, before), 60 * 8);
-        assert_eq!(CRASH_MS, 200);
+        assert_eq!(CRASH_TICKS, 13);
         assert!(fly.dying && !fly.stunned && !fly.carrying && !fly.aspirating);
         assert_eq!(fly.life(), Life::DyingOrAppearing);
         assert!(
@@ -2202,18 +2236,27 @@ mod tests {
                 SoundOp::Play(PlayParams::default())
             ]
         );
-        b.now = CRASH_MS;
-        update(&mut b, &mut m, &mut fly, 0);
+        // answers.md "Crash end tick (round 5)": hit on T, renders T..T + 12 run the 13 tween
+        // frames, and the end step is update T + 13.
+        crash_until_end(&mut b, &mut m, &mut fly);
         assert!(!fly.respawn_timer.is_armed());
-        b.now = CRASH_MS + 1;
+        b.now = 200;
         fly.vx = 100;
         update(&mut b, &mut m, &mut fly, 0);
         assert_eq!((fly.phase, fly.hit_frame, fly.vx), (1, 3, 0));
-        assert!(
-            fly.respawn_timer
-                .expired(CRASH_MS + 1 + RESPAWN_DELAY_MS + 1)
-        );
-        assert!(!fly.respawn_timer.expired(CRASH_MS + 1 + RESPAWN_DELAY_MS));
+        assert!(fly.respawn_timer.expired(200 + RESPAWN_DELAY_MS + 1));
+        assert!(!fly.respawn_timer.expired(200 + RESPAWN_DELAY_MS));
+    }
+
+    /// From the hit tick T: the render of T, then updates and renders T + 1..T + 12, each update
+    /// still in the crash. The next update is T + 13.
+    fn crash_until_end(b: &mut Bench, m: &mut MatchState, fly: &mut Fly) {
+        fly.render_crash();
+        for _ in 1..CRASH_TICKS {
+            update(b, m, fly, 0);
+            assert_eq!(fly.phase, 0);
+            fly.render_crash();
+        }
     }
 
     /// Acceptance W1 5: with an object covering the whole table every re-roll fails, so the
@@ -2236,24 +2279,26 @@ mod tests {
     }
 
     /// A fan splats a dying fly (it skips only a splatted one, answers.md "Fan strength"): the
-    /// reset must not carry the crash or respawn timer into the next life.
+    /// reset must not carry the crash count or respawn timer into the next life.
     #[test]
-    fn a_reset_disarms_the_crash_and_respawn_timers() {
+    fn a_reset_clears_the_crash_count_and_the_respawn_timer() {
         for crash_over in [false, true] {
             let mut b = Bench::new(1);
             let (mut m, _) = world(&mut b);
             let mut fly = centred(&mut b);
             update(&mut b, &mut m, &mut fly, 120);
             if crash_over {
-                b.now = CRASH_MS + 1;
+                crash_until_end(&mut b, &mut m, &mut fly);
                 update(&mut b, &mut m, &mut fly, 0);
+            } else {
+                fly.render_crash();
             }
-            assert!(fly.crash_timer.is_armed() != fly.respawn_timer.is_armed());
+            assert_eq!(fly.respawn_timer.is_armed(), crash_over);
             b.with(|cx| {
                 fly.splat(1, cx);
                 fly.reset(true, cx);
             });
-            assert!(!fly.crash_timer.is_armed() && !fly.respawn_timer.is_armed());
+            assert!(fly.crash_ticks == 0 && !fly.respawn_timer.is_armed());
         }
     }
 
@@ -2263,9 +2308,9 @@ mod tests {
         let (mut m, _) = world(&mut b);
         let mut fly = centred(&mut b);
         update(&mut b, &mut m, &mut fly, 120);
-        b.now = CRASH_MS + 1;
+        crash_until_end(&mut b, &mut m, &mut fly);
         update(&mut b, &mut m, &mut fly, 0);
-        b.now = CRASH_MS + 1 + RESPAWN_DELAY_MS + 1;
+        b.now = RESPAWN_DELAY_MS + 1;
         let before = b.draws_since(1, 0);
         update(&mut b, &mut m, &mut fly, 0);
         // The respawn x, then the 60 common fades re-rolled (answers.md "Zapper arc on the fly").
