@@ -258,6 +258,8 @@ impl Fx {
             } => self.shockwave(x, y, scale, sparks),
             Effect::Crash { x, y } => self.crash(x, y),
             Effect::Splat { x, y, dir } => self.splat(x as f32, y as f32, dir),
+            // Drawn by the frontend owner; the sim emits it from the zapper arc.
+            Effect::Spark { .. } => {}
         }
     }
 
