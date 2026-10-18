@@ -4,7 +4,7 @@
 use super::collision::Rect;
 use super::farmer::{Farmer, SPRITE_H, SPRITE_W};
 use super::traps::Traps;
-use super::{W, World};
+use super::{OBJECT_PARALLAX, W, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::mover::Wander;
@@ -28,7 +28,7 @@ pub const MOVER_SPEED: i32 = 200;
 pub const MOVER_RUNS: (i32, i32) = (5, 3);
 pub const MOVER_ACCEL: (i32, i32) = (0, 0);
 /// answers.md "Midges: spawn x, ...": x = R(W − 810) + 800; the sign is R(10) < 5 → −1;
-/// |vx| = R(200) + 200; size R(5) + 30; y = R(600); a timer R(500) + 500.
+/// |vx| = R(200) + 200; frame period R(5) + 30 ms; y = R(600); a timer R(500) + 500.
 pub const SPAWN_X_MARGIN: i32 = 810;
 pub const SPAWN_X_BASE: i32 = 800;
 pub const SIGN_ROLL: i32 = 10;
@@ -36,8 +36,10 @@ pub const SIGN_BELOW: i32 = 5;
 pub const SPAWN_Y_RAND: i32 = 600;
 pub const SPAWN_VX_RAND: i32 = 200;
 pub const SPAWN_VX_BASE: i32 = 200;
-pub const SIZE_RAND: i32 = 5;
-pub const SIZE_BASE: i32 = 30;
+/// R(5) + 30 is the animation frame period in ms, not a size (answers.md "Midge wrap, bounds and
+/// frame period (round 5)").
+pub const FRAME_MS_RAND: i32 = 5;
+pub const FRAME_MS_BASE: i32 = 30;
 pub const SPAWN_TIMER_RAND: i32 = 500;
 pub const SPAWN_TIMER_BASE: u64 = 500;
 /// Homing offsets R(181) and R(farmerH − 60); tolerances R(30).
@@ -50,9 +52,8 @@ pub const HOMING_X_RAND: i32 = 200;
 pub const HOMING_Y_RAND: i32 = 60;
 pub const HOMING_Y_OFFSET: i32 = 180;
 /// answers.md "Midge homing: ring bands (round 4)": the ring is the midge's wrap (+0x2c); a band
-/// is half of it.
-/// shortcut: answers.md does not give the midge's +0x2c; the port takes [`W`], the 4000 px ring
-/// its midge and farmer x share. Revisit if a midge wrap value is documented.
+/// is half of it. Only goodie midges home, and their 1.0 layer gives +0x2c = 4000 (answers.md
+/// "Midge wrap, bounds and frame period (round 5)").
 pub const HOMING_RING: i32 = W;
 pub const HOMING_BAND: i32 = HOMING_RING / 2;
 /// gaps §8.1 contact routine: a 700 ms stun; a zapped midge falls with y acceleration 30; the
@@ -64,9 +65,10 @@ pub const RESPAWN_X_RAND: i32 = 500;
 pub const RESPAWN_X_BASE: i32 = 1000;
 pub const RESPAWN_Y_BASE: i32 = 20;
 /// answers.md "Midges: spawn x, ..., ambient update and constructor": slot 0 at x 900, vx +60;
-/// then count = R(15) and slots 1..count − 1 at x = R(W), |vx| = R(30) + 45; each with size
-/// R(5) + 30, y = R(600) and a timer R(500) + 800. Parameters 100 / 10 / 50 / 50 / 30 / 0 and
-/// bounds x −1000..9000, y 0..600.
+/// then count = R(15) and slots 1..count − 1 at x = R(W), |vx| = R(30) + 45; each with frame
+/// period R(5) + 30, y = R(600) and a timer R(500) + 800. Parameters 100 / 10 / 50 / 50 / 30 / 0:
+/// re-roll R(100) ms, speeds R(10) + 65 and R(50) + 65, runs 50 and 30, accel 0 (answers.md
+/// "Ambient midge update `FUN_00442960` (round 5)").
 pub const AMBIENT_FIRST_X: i32 = 900;
 pub const AMBIENT_FIRST_VX: i32 = 60;
 pub const AMBIENT_COUNT_RAND: i32 = 15;
@@ -77,14 +79,19 @@ pub const AMBIENT_REROLL_MS: i32 = 100;
 pub const AMBIENT_SPEED: (i32, i32) = (10, 50);
 pub const AMBIENT_RUNS: (i32, i32) = (50, 30);
 pub const AMBIENT_ACCEL: (i32, i32) = (0, 0);
-pub const AMBIENT_X_BOUNDS: (i32, i32) = (-1000, 9000);
-pub const AMBIENT_Y_BOUNDS: (i32, i32) = (0, 600);
+/// Ambient midges sit on the 1.25 layer: x is a screen x, the motion runs in layer px.
+pub const AMBIENT_LAYER: f64 = OBJECT_PARALLAX;
+/// The 27 × 27 frame (`FUN_00413ce0(0x1b, 0x1b)`).
+pub const MIDGE_FRAME: i32 = 27;
+/// `FUN_004171bd(-1000, 9000, 0, 600)` as coded bounds y to 0..600 − 27 and never x (answers.md
+/// "Midge wrap, bounds and frame period (round 5)").
+pub const AMBIENT_Y_BOUNDS: (i32, i32) = (0, WORLD_H - MIDGE_FRAME);
 /// The jitter, once per expiry of the midge's timer: R(100) > 70, then m = R(15) and an R(10)
 /// sign, vx = sign × m − vx.
 pub const JITTER_ROLL: i32 = 100;
 pub const JITTER_ABOVE: i32 = 70;
 pub const JITTER_RAND: i32 = 15;
-/// A pushed v steps this much per tick back toward the v saved at the push.
+/// A pushed v steps this much per tick toward zero, then snaps to the saved v once inside it.
 pub const PUSH_DECAY: i32 = 40;
 /// The world is one 600 px screen tall (game-spec §3).
 pub const WORLD_H: i32 = 600;
@@ -96,10 +103,16 @@ pub struct Midge {
     /// Caught this tick: it runs the rest of the tick and is dropped at the next tick's
     /// compaction (answers.md "Goodie-midge removal").
     pub dead: bool,
+    /// Screen x (+0xc), in [0, trunc(4000 × f)) once the mover has run; the collision tests and
+    /// the frontend read it.
     pub x: i32,
+    /// Layer x, wrapped into [0, 4000); the motion and the camera delta move it.
+    pub layer_x: i32,
     pub y: i32,
-    /// R(5) + 30 px.
+    /// The animation frame period, R(5) + 30 ms (named `size` for the frontend).
     pub size: i32,
+    /// The facing frame set: +0x186 (left) when the jitter leaves vx < 0, else +0x184.
+    pub facing_left: bool,
     /// The velocity is `mover.v`.
     pub(crate) mover: Wander,
     /// The spawn vx (v0), the base of the homing speeds.
@@ -114,7 +127,7 @@ pub struct Midge {
     pub stun_timer: Timer,
     /// Zapped (+0x204): drops with y acceleration 30 until below the world.
     pub falling: bool,
-    /// The v saved by the last fan push; the update steps v back toward it.
+    /// The v saved by the last fan push; the decay snaps v back to it.
     pub saved_v: Option<[i32; 2]>,
     /// The constructor's timer (R(500) + 500, ambient R(500) + 800); ambient midges jitter on
     /// each expiry.
@@ -164,7 +177,7 @@ impl Midge {
     fn spawn(cx: &mut Ctx) -> Self {
         let x = cx.rng.r(W - SPAWN_X_MARGIN) + SPAWN_X_BASE;
         let vx = sign_roll(cx) * (cx.rng.r(SPAWN_VX_RAND) + SPAWN_VX_BASE);
-        let size = cx.rng.r(SIZE_RAND) + SIZE_BASE;
+        let size = cx.rng.r(FRAME_MS_RAND) + FRAME_MS_BASE;
         let y = cx.rng.r(SPAWN_Y_RAND);
         let timer = midge_timer(SPAWN_TIMER_BASE, cx);
         let tol_y = cx.rng.r(TOLERANCE_RAND);
@@ -182,6 +195,7 @@ impl Midge {
         Self {
             active: true,
             x,
+            layer_x: x,
             y,
             size,
             mover,
@@ -195,9 +209,10 @@ impl Midge {
         }
     }
 
-    /// One ambient midge of the constructor: size, y and timer after the caller's x and vx.
+    /// One ambient midge of the constructor: frame period, y and timer after the caller's x and
+    /// vx. x is a screen x, set through the screen-x setter (answers.md "Midge wrap, ...").
     fn ambient(x: i32, vx: i32, cx: &mut Ctx) -> Self {
-        let size = cx.rng.r(SIZE_RAND) + SIZE_BASE;
+        let size = cx.rng.r(FRAME_MS_RAND) + FRAME_MS_BASE;
         let y = cx.rng.r(SPAWN_Y_RAND);
         let timer = midge_timer(AMBIENT_TIMER_BASE, cx);
         let mut mover = Wander::new(
@@ -210,6 +225,7 @@ impl Midge {
         Self {
             active: true,
             x,
+            layer_x: layer_of(x, AMBIENT_LAYER),
             y,
             size,
             mover,
@@ -277,29 +293,42 @@ impl Midge {
             .with_accel_flags(x_dir.is_some(), y_dir.is_some());
     }
 
-    /// `FUN_00442960` for a goodie midge: a stunned midge holds still, a zapped one drops, else
-    /// the push decays and the wander mover moves it.
-    fn update(&mut self, cx: &mut Ctx) {
-        if self.stunned && !self.falling {
-            return;
-        }
-        let (dx, dy) = if self.falling {
-            self.fall()
-        } else {
-            self.decay();
-            self.mover.step(cx)
-        };
-        self.x += dx;
+    /// `FUN_00442960` steps 3–4 on a layer of parallax `factor`: a stunned midge holds still, a
+    /// zapped one drops, else the push decays and the wander mover moves it. The mover
+    /// (`FUN_004180af`) adds the camera delta to the layer x and wraps it into [0, 4000); screen
+    /// x = trunc(layer x × factor) (answers.md "Screen-x setter", "Midge wrap, ... (round 5)").
+    // shortcut: answers.md does not say whether a stunned or falling midge's layer mover runs;
+    // the port scrolls it with the camera like every layer sprite. Revisit if that is decoded.
+    fn update(&mut self, factor: f64, camera_delta: f64, cx: &mut Ctx) {
+        let (dx, dy) = self.motion(cx);
+        self.layer_x = (self.layer_x + dx + (-camera_delta) as i32).rem_euclid(W);
+        self.x = (f64::from(self.layer_x) * factor) as i32;
         self.y += dy;
     }
 
-    /// One push decay step: v moves [`PUSH_DECAY`] toward the saved v, and the push ends there.
+    fn motion(&mut self, cx: &mut Ctx) -> (i32, i32) {
+        if self.falling {
+            return self.fall();
+        }
+        if self.stunned {
+            return (0, 0);
+        }
+        self.decay();
+        self.mover.step(cx)
+    }
+
+    /// `FUN_00442960` step 3, per axis: v steps [`PUSH_DECAY`] toward zero, then snaps to the
+    /// saved v once |v| ≤ |saved|. The push ends when both axes are back; with a saved 0 it can
+    /// oscillate until the jitter ends it.
     fn decay(&mut self) {
         let Some(saved) = self.saved_v else {
             return;
         };
         for (v, s) in self.mover.v.iter_mut().zip(saved) {
-            *v = s.clamp(*v - PUSH_DECAY, *v + PUSH_DECAY);
+            *v += if *v < 0 { PUSH_DECAY } else { -PUSH_DECAY };
+            if v.abs() <= s.abs() {
+                *v = s;
+            }
         }
         if self.mover.v == saved {
             self.saved_v = None;
@@ -311,31 +340,33 @@ impl Midge {
         self.mover.integrate()
     }
 
-    /// `FUN_00442960` for an ambient midge: the goodie update with the jitter first, and the
-    /// position kept inside the ambient bounds while flying.
-    // shortcut: answers.md "Midges: ..., ambient update and constructor" gives the parameters
-    // 100 / 10 / 50 / 50 / 30 / 0 without naming them; the port reads them as the wander mover's
-    // (re-roll, speeds, runs, accel) like FW §8.1's goodie midge. It also does not say where the
-    // jitter sits in the update or whether the timer re-arms at its period (the port: first, and
-    // yes). Revisit when FUN_00442960 is read.
-    fn ambient_update(&mut self, cx: &mut Ctx) {
-        if self.stunned || self.falling {
-            self.update(cx);
-            return;
+    /// `FUN_00442960` for an ambient midge (answers.md "Ambient midge update `FUN_00442960`
+    /// (round 5)"): the jitter timer, then the goodie update on the 1.25 layer, then the y bound
+    /// while not falling.
+    fn ambient_update(&mut self, camera_delta: f64, cx: &mut Ctx) {
+        self.jitter_tick(cx);
+        self.update(AMBIENT_LAYER, camera_delta, cx);
+        if !self.falling {
+            self.y = self.y.clamp(AMBIENT_Y_BOUNDS.0, AMBIENT_Y_BOUNDS.1);
         }
-        self.jitter(cx);
-        self.update(cx);
-        self.x = self.x.clamp(AMBIENT_X_BOUNDS.0, AMBIENT_X_BOUNDS.1);
-        self.y = self.y.clamp(AMBIENT_Y_BOUNDS.0, AMBIENT_Y_BOUNDS.1);
     }
 
-    /// On each expiry of the midge's timer: R(100) > 70, then vx = sign × R(15) − vx.
-    fn jitter(&mut self, cx: &mut Ctx) {
-        if !self.timer.expired_rearm(cx.now) || cx.rng.r(JITTER_ROLL) <= JITTER_ABOVE {
+    /// Steps 1–2: the timer is checked and re-armed on every tick; only on an expiry while free
+    /// R(100) > 70 ends an active push, then vx = sign × R(15) − vx and the facing follows vx.
+    fn jitter_tick(&mut self, cx: &mut Ctx) {
+        let fired = self.timer.expired_rearm(cx.now);
+        if !fired || self.stunned || self.falling {
             return;
+        }
+        if cx.rng.r(JITTER_ROLL) <= JITTER_ABOVE {
+            return;
+        }
+        if let Some(saved) = self.saved_v.take() {
+            self.mover.v = saved;
         }
         let m = cx.rng.r(JITTER_RAND);
         self.mover.v[0] = sign_roll(cx) * m - self.mover.v[0];
+        self.facing_left = self.mover.v[0] < 0;
     }
 
     /// gaps §8.1 step 1: the respawn condition.
@@ -345,19 +376,28 @@ impl Midge {
     }
 
     /// gaps §8.1 step 1: back to flight at a fresh spot.
-    fn respawn(&mut self, cx: &mut Ctx) {
+    // shortcut: answers.md names the screen-x setter for the spawn x, not the respawn's; the port
+    // sets the respawn x the same way. Revisit if FUN_00442bb3's setter call is documented.
+    fn respawn(&mut self, factor: f64, cx: &mut Ctx) {
         let h = cx.data.size(MIDGE_SPRITE).h;
         (self.stunned, self.falling) = (false, false);
         self.stun_timer.disarm();
         self.x = cx.rng.r(RESPAWN_X_RAND) + RESPAWN_X_BASE;
+        self.layer_x = layer_of(self.x, factor);
         self.y = cx.rng.r(WORLD_H - h) + RESPAWN_Y_BASE;
     }
 
     /// gaps §8.1 `FUN_00442bb3`: respawn, else swatted, else zapped. Returns the hit-state flag
     /// (0 after a respawn) and whether the midge respawned.
-    fn contact(&mut self, swatter: Option<Rect>, zapped: bool, cx: &mut Ctx) -> (bool, bool) {
+    fn contact(
+        &mut self,
+        swatter: Option<Rect>,
+        zapped: bool,
+        factor: f64,
+        cx: &mut Ctx,
+    ) -> (bool, bool) {
         if self.due_respawn(cx) {
-            self.respawn(cx);
+            self.respawn(factor, cx);
             return (false, true);
         }
         let rect = self.rect(cx);
@@ -406,6 +446,11 @@ fn sign_roll(cx: &mut Ctx) -> i32 {
     }
 }
 
+/// The screen-x setter `FUN_00417fab`: layer x = trunc(screen x / factor) for 0 ≤ x < wrap.
+fn layer_of(x: i32, factor: f64) -> i32 {
+    (f64::from(x) / factor) as i32
+}
+
 /// A midge's constructor timer, R(500) + `base` ms.
 fn midge_timer(base: u64, cx: &mut Ctx) -> Timer {
     let ms = u64::try_from(cx.rng.r(SPAWN_TIMER_RAND)).unwrap_or(0);
@@ -436,11 +481,11 @@ impl AmbientMidges {
 impl World {
     /// Step 14, per ambient midge: arc test, contact, update, fan push.
     pub fn ambient_midges_step(&mut self, cx: &mut Ctx) {
-        let swatter = self.swatter_gate();
+        let (swatter, delta) = (self.swatter_gate(), self.camera.delta);
         for m in &mut self.ambient_midges.slots {
             let zapped = self.traps.arcs_at(m.arc_target(cx), cx) > 0;
-            m.contact(swatter, zapped, cx);
-            m.ambient_update(cx);
+            m.contact(swatter, zapped, AMBIENT_LAYER, cx);
+            m.ambient_update(delta, cx);
             m.fan_push(&self.traps, cx);
         }
     }
@@ -457,14 +502,14 @@ impl World {
             (m.active, m.dead) = (false, false);
         }
         let retarget = cx.rng.r(RETARGET_ROLL) < RETARGET_BELOW;
-        let swatter = self.swatter_gate();
+        let (swatter, delta) = (self.swatter_gate(), self.camera.delta);
         let f = &self.farmer;
         let slow_box = Rect::new(f.x, f.y, SPRITE_W, SPRITE_H);
         let (mut k, mut in_box) = (0, 0);
         for m in self.midges.slots.iter_mut().filter(|m| m.active) {
             if k < SWAT_KILLS {
                 let zapped = self.traps.arcs_at(m.arc_target(cx), cx) > 0;
-                let (hit, respawned) = m.contact(swatter, zapped, cx);
+                let (hit, respawned) = m.contact(swatter, zapped, 1.0, cx);
                 k += usize::from(zapped) + usize::from(hit);
                 m.dead |= respawned;
             }
@@ -474,7 +519,7 @@ impl World {
             }
             in_box += i32::from(slow_box.catches(&m.rect(cx)));
             m.fan_push(&self.traps, cx);
-            m.update(cx);
+            m.update(1.0, delta, cx);
         }
         let total = self.midges.total;
         self.farmer.midges_pulse(in_box, total, cx);
@@ -524,7 +569,10 @@ mod tests {
         s.spawn(&mut rig.cx(0));
         let (m, n) = (s.slots[0], s.slots[1]);
         assert!(s.on);
-        assert_eq!((m.x, m.y, m.mover.v[0], m.size), (841, 569, 334, 30));
+        assert_eq!(
+            (m.x, m.layer_x, m.y, m.mover.v[0], m.size),
+            (841, 841, 569, 334, 30)
+        );
         assert_eq!((m.home_dx, m.home_dy, m.tol_x, m.tol_y), (29, 58, 18, 18));
         // Accel flag x is set at the spawn, so a step re-rolls only y: R(150), R(10), R(200).
         let (mut moved, before) = (m, rig.rng.clone());
@@ -712,6 +760,8 @@ mod tests {
         let (m0, m1) = (a.slots[0], a.slots[1]);
         assert_eq!(a.slots.len(), 10);
         assert_eq!((m0.x, m0.y, m0.size, m0.mover.v), (900, 467, 31, [60, 0]));
+        // Screen x as set; layer x trunc(900 / 1.25) = 720 and trunc(3169 / 1.25) = 2535.
+        assert_eq!((m0.layer_x, a.slots[1].layer_x), (720, 2535));
         assert!(!m0.timer.expired(1134) && m0.timer.expired(1135));
         assert_eq!((m1.x, m1.y, m1.size, m1.mover.v), (3169, 562, 33, [-63, 0]));
         assert!(!m1.timer.expired(1264) && m1.timer.expired(1265));
@@ -748,17 +798,17 @@ mod tests {
         };
         m.mover.v = [60, 0];
         let before = rig.rng.clone();
-        m.jitter(&mut rig.cx(1134));
+        m.jitter_tick(&mut rig.cx(1134));
         assert_eq!((m.mover.v, &rig.rng), ([60, 0], &before));
-        m.jitter(&mut rig.cx(1135));
+        m.jitter_tick(&mut rig.cx(1135));
         assert_eq!(m.mover.v, [-63, 0]);
         let before = rig.rng.clone();
-        m.jitter(&mut rig.cx(1135 + 1134));
+        m.jitter_tick(&mut rig.cx(1135 + 1134));
         assert_eq!(&rig.rng, &before);
     }
 
     /// The fan push saves v and adds +180 when v > 0, else −180 (zero included); the update then
-    /// steps v 40 toward the saved v, so the push and the wander act on the same v.
+    /// steps v 40 toward zero, so the push and the wander act on the same v.
     #[test]
     fn the_fan_push_saves_v_and_decays_back_by_40() {
         let mut m = Midge::default();
@@ -769,8 +819,134 @@ mod tests {
             m.decay();
         }
         assert_eq!(m.mover.v, [-20, 70]);
+        // x: −20 + 40 = 20, |20| > 0 so no snap; y: 70 − 40 = 30 ≤ 50 snaps to 50.
         m.decay();
-        assert_eq!((m.mover.v, m.saved_v), ([0, 50], None));
+        assert_eq!((m.mover.v, m.saved_v), ([20, 50], Some([0, 50])));
+        let mut m = Midge::default();
+        m.mover.v = [-100, 230];
+        m.saved_v = Some([-80, 50]);
+        // x: −60 ≤ 80 snaps to −80; y: 190, 150, 110, 70, then 30 → 50, and the push ends.
+        for _ in 0..5 {
+            m.decay();
+        }
+        assert_eq!((m.mover.v, m.saved_v), ([-80, 50], None));
+    }
+
+    /// A midge at rest: both accel flags set, so a mover step neither re-rolls nor moves it.
+    fn still(layer_x: i32, x: i32, y: i32) -> Midge {
+        Midge {
+            active: true,
+            layer_x,
+            x,
+            y,
+            mover: Wander::new(100, (10, 50), (50, 30), (0, 0)).with_accel_flags(true, true),
+            ..Midge::default()
+        }
+    }
+
+    /// answers.md "Midge wrap, bounds and frame period (round 5)": layer x wraps into [0, 4000)
+    /// with the camera delta added (answers.md "Screen-x setter"); screen x = trunc(layer x × f).
+    /// 10 − 20 → 3990: goodie screen 3990, ambient trunc(3990 × 1.25) = 4987.
+    #[test]
+    fn midge_layer_x_wraps_with_the_camera() {
+        let mut rig = Rig::new(1);
+        let mut g = still(10, 10, 100);
+        g.update(1.0, 20.0, &mut rig.cx(0));
+        assert_eq!((g.layer_x, g.x), (3990, 3990));
+        let mut a = still(10, 12, 100);
+        a.update(AMBIENT_LAYER, 20.0, &mut rig.cx(0));
+        assert_eq!((a.layer_x, a.x), (3990, 4987));
+        let mut g = still(3995, 3995, 100);
+        g.update(1.0, -10.0, &mut rig.cx(0));
+        assert_eq!((g.layer_x, g.x), (5, 5));
+    }
+
+    /// 650 px/s is 10 layer px a tick at 65 Hz: a goodie moves 10 on screen, an ambient midge
+    /// trunc(10 × 1.25) = 12.
+    #[test]
+    fn an_ambient_midge_moves_1_25_times_on_screen() {
+        let mut rig = Rig::new(1);
+        for (factor, x) in [(1.0, 10), (AMBIENT_LAYER, 12)] {
+            let mut m = still(0, 0, 100);
+            m.mover.v = [650, 0];
+            m.update(factor, 0.0, &mut rig.cx(0));
+            assert_eq!((m.layer_x, m.x), (10, x), "factor {factor}");
+        }
+    }
+
+    /// Ambient bounds: y 0..573 (600 − the 27 px frame), no x bound; a falling midge is not
+    /// bounded (the contact routine clears +0x138).
+    #[test]
+    fn ambient_midges_are_bounded_only_in_y() {
+        let mut rig = Rig::new(1);
+        for (y, want) in [(590, 573), (-5, 0), (300, 300)] {
+            let mut m = still(3990, 4987, y);
+            m.timer = Timer::armed(0, 10_000);
+            m.ambient_update(0.0, &mut rig.cx(0));
+            assert_eq!((m.x, m.y), (4987, want), "y {y}");
+        }
+        let mut m = still(0, 0, 590);
+        (m.falling, m.timer, m.mover.v) = (true, Timer::armed(0, 10_000), [0, 650]);
+        m.ambient_update(0.0, &mut rig.cx(0));
+        assert!(m.y > 590);
+    }
+
+    /// The respawn's x (seed 1: 41 + 1000 = 1041) is a screen x: on the 1.25 layer the layer x
+    /// is trunc(1041 / 1.25) = 832.
+    #[test]
+    fn a_respawn_sets_the_screen_x() {
+        for (factor, layer_x) in [(1.0, 1041), (AMBIENT_LAYER, 832)] {
+            let mut rig = Rig::new(1);
+            let mut m = still(0, 0, 0);
+            (m.stunned, m.stun_timer) = (true, Timer::armed(0, 0));
+            let (_, respawned) = m.contact(None, false, factor, &mut rig.cx(1));
+            assert!(respawned);
+            assert_eq!((m.x, m.layer_x), (1041, layer_x));
+        }
+    }
+
+    /// The timer is checked every tick: one expiring during a stun re-arms on its grid, so the
+    /// first free tick draws nothing (answers.md "Ambient midge update (round 5)" step 1).
+    #[test]
+    fn the_jitter_timer_rearms_while_stunned() {
+        let mut rig = Rig::new(12);
+        let mut m = still(0, 0, 0);
+        (m.stunned, m.timer) = (true, Timer::armed(0, 1134));
+        let before = rig.rng.clone();
+        m.jitter_tick(&mut rig.cx(1135));
+        m.stunned = false;
+        m.jitter_tick(&mut rig.cx(1136));
+        assert_eq!(&rig.rng, &before);
+        assert!(!m.timer.expired(1135 + 1134) && m.timer.expired(1135 + 1135));
+    }
+
+    /// The jitter ends an active push first (v = saved v), then vx = sign × m − vx and the
+    /// facing frame follows vx's sign. Seed 12: 77 > 70, m 3, sign − → −3 − 60 = −63.
+    #[test]
+    fn the_jitter_ends_a_push_and_sets_the_facing() {
+        let mut rig = Rig::new(12);
+        let mut m = still(0, 0, 0);
+        m.timer = Timer::armed(0, 1134);
+        m.mover.v = [240, 185];
+        m.saved_v = Some([60, 5]);
+        m.jitter_tick(&mut rig.cx(1135));
+        assert_eq!(
+            (m.mover.v, m.saved_v, m.facing_left),
+            ([-63, 5], None, true)
+        );
+    }
+
+    /// The decay steps toward zero and snaps to the saved v once |v| ≤ |saved|; with saved 0 it
+    /// oscillates (30 → −10 → 30) and the push never ends.
+    #[test]
+    fn the_push_decay_steps_toward_zero_and_can_oscillate() {
+        let mut m = Midge::default();
+        m.mover.v = [30, 50];
+        m.saved_v = Some([0, 50]);
+        m.decay();
+        assert_eq!((m.mover.v, m.saved_v), ([-10, 50], Some([0, 50])));
+        m.decay();
+        assert_eq!((m.mover.v, m.saved_v), ([30, 50], Some([0, 50])));
     }
 
     /// Midges in the farmer's box (x, y, 181, 178; gaps §8.1 step 2.4) slow him: r = 30/30 caps the speed at 0 and stops vy.
