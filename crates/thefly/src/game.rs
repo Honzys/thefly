@@ -129,13 +129,51 @@ impl FlyGame {
 
 impl thefly_platform::Game for FlyGame {
     fn update(&mut self, input: &Input, audio: &mut Audio) -> ControlFlow<()> {
-        if self.exit_after_shots && self.shots_done() {
-            return ControlFlow::Break(());
+        let steps = if self.tick < self.script.warp_until {
+            WARP_TICKS
+        } else {
+            1
+        };
+        for _ in 0..steps {
+            if self.exit_after_shots && self.shots_done() {
+                return ControlFlow::Break(());
+            }
+            // hold the sim until a due screenshot is rendered, so shots land on their exact tick
+            if self.shots.borrow().iter().any(|(t, _)| *t <= self.tick) {
+                return ControlFlow::Continue(());
+            }
+            self.step(input, audio)?;
         }
-        // hold the sim until a due screenshot is rendered, so shots land on their exact tick
-        if self.shots.borrow().iter().any(|(t, _)| *t <= self.tick) {
-            return ControlFlow::Continue(());
+        ControlFlow::Continue(())
+    }
+
+    fn render(&self, r: &mut Renderer<'_, '_>, alpha: f32) -> Result<(), Error> {
+        let view = View {
+            cur: self.sim.state(),
+            prev: self.prev.as_ref(),
+            l: Lerp { alpha },
+            now: self.sim.clock().now_ms(),
+            fx: &self.fx,
+            trophy_landed_ms: self.trophy_landed_ms,
+        };
+        let mut g = Gfx { r };
+        draw::frame(&mut g, &view)?;
+        if self.script.window_shots {
+            return Ok(());
         }
+        self.take_shots(g.r, SHOT_SIZE)
+    }
+
+    fn presented(&self, r: &mut Renderer<'_, '_>, size: (u32, u32)) -> Result<(), Error> {
+        if !self.script.window_shots {
+            return Ok(());
+        }
+        self.take_shots(r, size)
+    }
+}
+
+impl FlyGame {
+    fn step(&mut self, input: &Input, audio: &mut Audio) -> ControlFlow<()> {
         let keys = self.keys(input);
         let before = self.sim.state().clone();
         let events = self.sim.tick(&keys);
@@ -153,23 +191,7 @@ impl thefly_platform::Game for FlyGame {
         ControlFlow::Continue(())
     }
 
-    fn render(&self, r: &mut Renderer<'_, '_>, alpha: f32) -> Result<(), Error> {
-        let view = View {
-            cur: self.sim.state(),
-            prev: self.prev.as_ref(),
-            l: Lerp { alpha },
-            now: self.sim.clock().now_ms(),
-            fx: &self.fx,
-            trophy_landed_ms: self.trophy_landed_ms,
-        };
-        let mut g = Gfx { r };
-        draw::frame(&mut g, &view)?;
-        self.take_shots(g.r)
-    }
-}
-
-impl FlyGame {
-    fn take_shots(&self, r: &mut Renderer<'_, '_>) -> Result<(), Error> {
+    fn take_shots(&self, r: &mut Renderer<'_, '_>, size: (u32, u32)) -> Result<(), Error> {
         let due: Vec<PathBuf> = {
             let mut shots = self.shots.borrow_mut();
             let (due, later) = shots.drain(..).partition(|(t, _)| *t <= self.tick);
@@ -179,9 +201,9 @@ impl FlyGame {
         if due.is_empty() {
             return Ok(());
         }
-        let pixels = r.read_pixels(SHOT_SIZE)?;
+        let pixels = r.read_pixels(size)?;
         for path in due {
-            if let Err(e) = crate::shot::write_png(&path, SHOT_SIZE, &pixels) {
+            if let Err(e) = crate::shot::write_png(&path, size, &pixels) {
                 eprintln!("warning: screenshot {}: {e}", path.display());
             }
         }
@@ -190,6 +212,8 @@ impl FlyGame {
 }
 
 const SHOT_SIZE: (u32, u32) = (800, 600);
+/// Sim ticks per frame while `--warp` fast-forwards a scripted run.
+const WARP_TICKS: u32 = 64;
 
 /// `Some(fly_won)` on the tick the winner screen's trophy lands (falls into the hops stage).
 fn trophy_landed(cur: &State, before: &State) -> Option<bool> {

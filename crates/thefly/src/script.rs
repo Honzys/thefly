@@ -18,6 +18,10 @@ pub struct Script {
     pub holds: Vec<Hold>,
     pub shots: Vec<(u64, PathBuf)>,
     pub exit_after_shots: bool,
+    /// Run the sim faster than real time until this tick (`--warp`); key edges repeat while it does.
+    pub warp_until: u64,
+    /// Take the shots of the whole window, bars included (`--window`), not of the 800 × 600 frame.
+    pub window_shots: bool,
 }
 
 impl Script {
