@@ -109,7 +109,7 @@ impl State {
 
     fn screen_tick(&mut self, keys: &KeyState, cx: &mut Ctx) -> Flow {
         match &mut self.screen {
-            // shortcut: no sound-manager or video step; see `Screen::IntroVideo`.
+            // Port decision: no sound-manager or video step; see `Screen::IntroVideo`.
             Screen::Boot | Screen::IntroVideo => Flow::Go(Screen::Logo(Logo::new(cx.now))),
             Screen::Logo(logo) => logo.tick(keys, cx),
             Screen::Menu(menu) => menu.tick(keys, &mut self.config, &mut self.options, cx),

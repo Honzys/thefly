@@ -9,9 +9,8 @@ use crate::world::ai::AiLevel;
 use crate::world::lift::{ANCHOR_GAP, SHOP_SCALE, draw_anchors};
 use crate::world::traps::TrapKind;
 
-/// Period clock limit in minutes (data+0x26), and in tutorial mode.
+/// Period clock limit in minutes (data+0x26), tutorial included.
 pub const PERIOD_MINUTES: u64 = 2;
-pub const TUTORIAL_PERIOD_MINUTES: u64 = 3;
 /// Trap slots at data+0x2a2; the caps keep the count at 14 or fewer.
 pub const TRAP_SLOTS: usize = 15;
 /// The kill-type list at data+0x15c… holds 50 entries and is not bounds-checked; index 0 unused.
@@ -284,9 +283,8 @@ impl MatchState {
         Advance::Next
     }
 
-    /// Extreme: one period at a random meal and side, then over. The draws follow the order
-    /// AR §9.1 lists them (meal, side, winch). shortcut: the order inside `FUN_0040b7b2` is not
-    /// stated; revisit if the binary is re-read.
+    /// Extreme: one period at a random meal and side, then over. `FUN_0040b7b2` draws the meal,
+    /// then the side; the winch slots come after both.
     fn advance_extreme(&mut self, cx: &mut Ctx) -> Advance {
         const MEALS: [Meal; 3] = [Meal::Breakfast, Meal::Lunch, Meal::Dinner];
         if self.progress.meal.is_some() {
@@ -334,16 +332,10 @@ impl MatchState {
         }
     }
 
-    /// Period clock limit in minutes. shortcut: docs/re/observed.md, the tutorial period ran
-    /// 2 min under Wine (one run) against AR §8.6's 3; `TUTORIAL_PERIOD_MINUTES` stays for the
-    /// code-read path. Revisit with a second tutorial capture.
+    /// Period clock limit in minutes: always data+0x26 = 2. The 3-minute branch of `FUN_00405ed0`
+    /// reads a dormant debug flag, not the tutorial (answers.md "Tutorial period length").
     pub fn period_minutes(&self) -> u64 {
-        const TUTORIAL_AS_OBSERVED: bool = true;
-        if self.config.tutorial && !TUTORIAL_AS_OBSERVED {
-            TUTORIAL_PERIOD_MINUTES
-        } else {
-            PERIOD_MINUTES
-        }
+        PERIOD_MINUTES
     }
 
     /// `FUN_0040bc5e`: kills + 1, stats kills + 1, then the type at the new index by this
@@ -422,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn tutorial_wins_over_extreme_and_lasts_two_minutes_as_observed() {
+    fn tutorial_wins_over_extreme_and_lasts_two_minutes() {
         let config = MatchConfig {
             players: Players::Two,
             mode: Mode::Special,
