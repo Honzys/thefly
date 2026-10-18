@@ -2,9 +2,9 @@
 
 use crate::clock::Timer;
 use crate::ctx::Ctx;
-use crate::event::{PlayParams, SoundOp, SoundSlot};
+use crate::event::{Event, PlayParams, SoundOp, SoundSlot};
 use crate::highscores::{HighScoreScreen, HighScoreTable};
-use crate::input::KeyState;
+use crate::input::{KeyState, Scancode};
 use crate::match_state::MatchState;
 use crate::screen::{FADE_END_MS, Fade, Flow, MatchFlow, Screen};
 
@@ -83,10 +83,12 @@ pub struct StatsScreen {
 pub struct Breakdown {
     pub points: i32,
     pub kills: i32,
-    pub kills_after: Timer,
-    pub kill_step: Timer,
-    /// First Enter/Esc jumps to the final numbers.
+    /// Unarmed while the points count; armed 1500 ms when they finish, then 30 ms per kill.
+    pub kill_timer: Timer,
+    /// The counting is over (naturally, or skipped by a held key).
     pub finished: bool,
+    /// Armed 500 ms by the skip; created expired, so a natural finish leaves at once.
+    pub leave_after: Timer,
 }
 
 pub const MIN_SHOW_MS: u64 = 3000;
@@ -103,9 +105,9 @@ impl StatsScreen {
         let breakdown = m.config.highscore().then(|| Breakdown {
             points: 0,
             kills: 0,
-            kills_after: Timer::armed(cx.now, BREAKDOWN_KILLS_AFTER_MS),
-            kill_step: Timer::UNARMED,
+            kill_timer: Timer::UNARMED,
             finished: false,
+            leave_after: Timer::armed(cx.now, 0),
         });
         Self {
             page: m.stats.page(),
@@ -137,19 +139,11 @@ impl StatsScreen {
                 MatchFlow::Stay
             };
         }
-        let (score, kills) = (m.economy.fly.score, m.stats.kills);
-        if let Some(b) = &mut self.breakdown {
-            b.count(score, kills, cx);
-        }
-        if !keys.skip() {
-            return MatchFlow::Stay;
-        }
-        if let Some(b) = self.breakdown.as_mut().filter(|b| !b.finished) {
-            (b.points, b.kills, b.finished) = (score, kills, true);
-            self.min_show.arm(cx.now, SECOND_KEY_MS);
-            return MatchFlow::Stay;
-        }
-        if self.min_show.expired(cx.now) {
+        let leave = match &mut self.breakdown {
+            Some(b) => b.tick(keys, m.economy.fly.score, m.stats.kills, cx),
+            None => keys.skip() && self.min_show.expired(cx.now),
+        };
+        if leave {
             self.leaving = true;
             self.fade = Fade::new(true, FADE_END_MS);
         }
@@ -158,27 +152,58 @@ impl StatsScreen {
 }
 
 impl Breakdown {
-    /// Points +10 per tick, then after 1500 ms kills one per 30 ms (SR §5.2). shortcut: the tick
-    /// sound's slot is not named; the bourse's ring slot is used.
+    /// `FUN_0044c73d`: count, then the keys, read held (answers.md "Stats breakdown"). True
+    /// when the fade-out should start.
+    fn tick(&mut self, keys: &KeyState, score: i32, kills: i32, cx: &mut Ctx) -> bool {
+        self.count(score, kills, cx);
+        if !keys.held(Scancode::ESCAPE) && !keys.held(Scancode::RETURN) {
+            return false;
+        }
+        if self.finished {
+            return self.leave_after.expired(cx.now);
+        }
+        (self.points, self.kills, self.finished) = (score, kills, true);
+        cx.emit(Event::play(SoundSlot::MONEY));
+        self.leave_after.arm(cx.now, SECOND_KEY_MS);
+        false
+    }
+
+    /// Points +10 per tick (the capping tick and a score ≤ 0 included), then from 1500 ms after
+    /// they finish one kill per 30 ms, every step with a tick; slot 11 at the end. With no kills
+    /// there is still one kill step.
     fn count(&mut self, score: i32, kills: i32, cx: &mut Ctx) {
         if self.finished {
             return;
         }
-        if self.points < score {
+        if !self.kill_timer.is_armed() {
             self.points = (self.points + 10).min(score);
-            let freq = 21_500 + cx.rng.r(500) as u32;
-            cx.sound(SoundSlot::RING_A, play_at(freq));
+            ring(21_500, cx);
+            if self.points >= score {
+                self.kill_timer.arm(cx.now, BREAKDOWN_KILLS_AFTER_MS);
+            }
+            return;
         }
-        if self.kills_after.expired(cx.now) && !self.kill_step.is_armed() {
-            self.kill_step.arm(cx.now, BREAKDOWN_KILL_STEP_MS);
+        if !self.kill_timer.expired_rearm(cx.now) {
+            return;
         }
-        if self.kills < kills && self.kill_step.expired_rearm(cx.now) {
-            self.kills += 1;
-            let freq = 18_500 + cx.rng.r(500) as u32;
-            cx.sound(SoundSlot::RING_A, play_at(freq));
+        if self.kills == 0 {
+            self.kill_timer.arm(cx.now, BREAKDOWN_KILL_STEP_MS);
         }
-        self.finished = self.points >= score && self.kills >= kills;
+        self.kills += 1;
+        ring(18_500, cx);
+        if self.kills >= kills {
+            self.kills = kills;
+            self.finished = true;
+            cx.emit(Event::play(SoundSlot::MONEY));
+        }
     }
+}
+
+/// The count tick: slot 49 at `base` + R(500). shortcut: the original switches to slot 50 when
+/// 49 has stopped and 50 has not (`FUN_0040cf55`); the sim has no slot state, so always 49.
+fn ring(base: u32, cx: &mut Ctx) {
+    let freq = base + cx.rng.r(500) as u32;
+    cx.sound(SoundSlot::RING_A, play_at(freq));
 }
 
 fn play_at(freq: u32) -> SoundOp {
@@ -238,5 +263,116 @@ mod tests {
         assert_eq!(p.kills_per_period, 0.75);
         assert_eq!(p.hit_ratio_percent, 25.0);
         assert_eq!(p.avg_damage, 7.5);
+    }
+
+    use crate::match_state::{MatchConfig, Mode, Players};
+    use crate::rng::MsvcRand;
+    use crate::screen::rig::Rig;
+
+    /// A Highscore match with the given fly score and kills, and a seed-1 stream for the screen.
+    fn highscore(rig: &mut Rig, score: i32, kills: i32) -> MatchState {
+        let config = MatchConfig {
+            players: Players::One,
+            mode: Mode::Special,
+            ..MatchConfig::default()
+        };
+        let mut m = rig.cx(|cx| MatchState::new(config, false, cx));
+        m.economy.fly.score = score;
+        m.stats.kills = kills;
+        rig.rng = MsvcRand::new(1);
+        m
+    }
+
+    /// (now, slot, freq) of every sound the breakdown plays.
+    fn sounds(
+        rig: &mut Rig,
+        s: &mut StatsScreen,
+        m: &MatchState,
+        ticks: usize,
+        held: &[Scancode],
+    ) -> Vec<(u64, u8, Option<u32>)> {
+        let table = HighScoreTable::default();
+        let mut out = Vec::new();
+        for _ in 0..ticks {
+            let now = rig.now();
+            let before = rig.events.len();
+            rig.step(held, |k, cx| s.tick(k, m, &table, cx));
+            for e in &rig.events[before..] {
+                if let Event::Sound {
+                    slot,
+                    op: SoundOp::Play(p),
+                } = e
+                {
+                    out.push((now, slot.0, p.freq_hz));
+                }
+            }
+        }
+        out
+    }
+
+    /// answers.md "Stats breakdown": +10 per tick with a 21500-band tick each (seed 1: 41, 18467,
+    /// 6334 → 21541, 21967, 21834); the kill timer is armed when the points finish (tick 2, 30 ms)
+    /// so the first kill fires at 1538 ms (tick 100), the next 30 ms later (tick 102, 1569 ms) in
+    /// the 18500 band (26500, 19169 → 18500, 18669), then slot 11.
+    #[test]
+    fn the_breakdown_counts_kills_from_the_end_of_the_points() {
+        let mut rig = Rig::new(1);
+        let m = highscore(&mut rig, 25, 2);
+        let mut s = rig.cx(|cx| StatsScreen::new(&m, cx));
+        let got = sounds(&mut rig, &mut s, &m, 200, &[]);
+        assert_eq!(
+            got,
+            [
+                (0, 49, Some(21_541)),
+                (15, 49, Some(21_967)),
+                (30, 49, Some(21_834)),
+                (1538, 49, Some(18_500)),
+                (1569, 49, Some(18_669)),
+                (1569, 11, None),
+            ]
+        );
+        let b = s.breakdown.unwrap();
+        assert_eq!((b.points, b.kills, b.finished), (25, 2, true));
+    }
+
+    /// A score ≤ 0 and no kills still give one tick each, then slot 11.
+    #[test]
+    fn a_zero_breakdown_still_ticks_once_per_phase() {
+        let mut rig = Rig::new(1);
+        let m = highscore(&mut rig, 0, 0);
+        let mut s = rig.cx(|cx| StatsScreen::new(&m, cx));
+        let got = sounds(&mut rig, &mut s, &m, 200, &[]);
+        // 1500 ms after tick 0: tick 98 (1507 ms).
+        assert_eq!(
+            got,
+            [
+                (0, 49, Some(21_541)),
+                (1507, 49, Some(18_967)),
+                (1507, 11, None)
+            ]
+        );
+        assert_eq!(s.breakdown.map(|b| (b.points, b.kills)), Some((0, 0)));
+    }
+
+    /// Keys are read held: a held Enter jumps to the final numbers with slot 11, then the fade
+    /// starts once the 500 ms timer has run, with the key still held.
+    #[test]
+    fn a_held_key_skips_the_count_then_leaves_after_500_ms() {
+        let mut rig = Rig::new(1);
+        let m = highscore(&mut rig, 500, 3);
+        let mut s = rig.cx(|cx| StatsScreen::new(&m, cx));
+        let got = sounds(&mut rig, &mut s, &m, 1, &[Scancode::RETURN]);
+        assert_eq!(got, [(0, 49, Some(21_541)), (0, 11, None)]);
+        assert_eq!(
+            s.breakdown.map(|b| (b.points, b.kills, b.finished)),
+            Some((500, 3, true))
+        );
+        let table = HighScoreTable::default();
+        while rig.now() < 500 {
+            rig.step(&[Scancode::RETURN], |k, cx| s.tick(k, &m, &table, cx));
+            assert!(!s.leaving, "{}", rig.now());
+        }
+        rig.step(&[Scancode::RETURN], |k, cx| s.tick(k, &m, &table, cx));
+        assert!(s.leaving);
     }
 }
