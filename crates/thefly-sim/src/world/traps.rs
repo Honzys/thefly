@@ -804,6 +804,7 @@ impl World {
             let pan = Pan::ScreenX {
                 x: visible_x(f.screen_x, f.w),
                 w: f.w,
+                wrap: crate::event::PAN_WRAP_OBJECT,
             };
             cx.sound(SoundSlot::FAN, SoundOp::Move(pan));
         }
@@ -812,6 +813,7 @@ impl World {
             let pan = Pan::ScreenX {
                 x: visible_x(z.screen_x, w),
                 w,
+                wrap: crate::event::PAN_WRAP_OBJECT,
             };
             cx.sound(SoundSlot::ZAPPER_HUM, SoundOp::Move(pan));
         }

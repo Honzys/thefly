@@ -300,6 +300,8 @@ impl Menu {
         let pan = Pan::ScreenX {
             x: i.fly_x as i32,
             w: 120,
+            // shortcut: the intro fly's wrap is open in answers.md (positional sound, round 4); 5000, revisit when decoded
+            wrap: crate::event::PAN_WRAP_OBJECT,
         };
         cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Move(pan));
         if i.fly_x <= 800.0 && !i.fly_timer.expired(cx.now) {

@@ -288,6 +288,7 @@ impl Flyer {
         let pan = Pan::ScreenX {
             x: self.x,
             w: self.w,
+            wrap: crate::event::PAN_WRAP_GAME,
         };
         let params = PlayParams {
             pan,

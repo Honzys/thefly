@@ -343,6 +343,7 @@ impl Lift {
         let pan = Pan::ScreenX {
             x: self.x,
             w: self.w,
+            wrap: crate::event::PAN_WRAP_OBJECT,
         };
         if !std::mem::replace(&mut self.winching, true) {
             let params = PlayParams {
@@ -444,7 +445,11 @@ mod tests {
             volume_cb: -200,
             freq_hz: Some(18555),
             // The anchor goes through the layer x (answers.md "Screen-x setter"): 1617.
-            pan: Pan::ScreenX { x: lift.x, w: 235 },
+            pan: Pan::ScreenX {
+                x: lift.x,
+                w: 235,
+                wrap: 5000,
+            },
         };
         let op = SoundOp::Loop(params);
         assert_eq!(
