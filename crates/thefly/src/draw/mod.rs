@@ -55,7 +55,7 @@ pub fn frame(g: &mut Gfx, v: &View) -> Result<(), Error> {
         Screen::Menu(menu) => front::menu(g, v, menu)?,
         Screen::KeysPage(p) => front::keys_page(g, p.players)?,
         Screen::HighScores(hs) => front::high_scores(g, v, hs)?,
-        Screen::Farewell(_) => front::farewell(g)?,
+        Screen::Farewell(f) => front::farewell(g, v, f)?,
         Screen::Match(im) => in_match(g, v, &im.m, &im.screen)?,
     }
     if let Some(d) = &v.cur.dialog {
