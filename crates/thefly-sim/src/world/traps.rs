@@ -556,7 +556,6 @@ mod layout_tests {
 
     /// A flypaper at stored 500 (screen 500, 53 × 300 from y 0) divides v by 1.4 per tick.
     #[test]
-    #[ignore = "needs W1: Fly::alive, Rect::overlaps"]
     fn a_flypaper_divides_the_fly_speed_by_1_4() {
         let mut rig = Rig::new(1);
         let mut w = world_with(vec![slot(TrapKind::Flypaper, 500)], &mut rig);
@@ -570,7 +569,6 @@ mod layout_tests {
 
     /// The blades knock the fly at most once per 100 ms (tick 7 is 107 ms after tick 0).
     #[test]
-    #[ignore = "needs W1: Fly::alive, outlines_overlap, Fly::add_raw_damage"]
     fn a_fan_hits_at_most_once_per_100_ms() {
         let mut rig = Rig::new(1);
         let mut w = world_with(vec![slot(TrapKind::FanLeft, 500)], &mut rig);
@@ -593,7 +591,6 @@ mod layout_tests {
 
     /// A fly at the top of a zapper's column is grilled (slot 43, kind 13).
     #[test]
-    #[ignore = "needs W1: Fly::alive, Fly::grill"]
     fn a_zapper_grills_a_fly_at_the_top_of_its_column() {
         let mut rig = Rig::new(1);
         let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);

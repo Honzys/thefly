@@ -756,51 +756,158 @@ mod tests {
         )));
     }
 
-    /// GS §2.2 end to end: boot → logo → menu → 2P match of 2 days → shops and bourse each
-    /// period → bonus → winner → stats → menu. Every period ends at once via `period_over`.
-    #[test]
-    #[ignore = "needs W1/W2: World::new and World::tick"]
-    fn a_two_day_match_runs_from_boot_back_to_the_menu() {
-        let mut rig = Rig::new(1);
-        let mut s = State::new(Persisted::default());
-        idle_until(&mut rig, &mut s, |s| matches!(s.screen, Screen::Logo(_)));
-        tap(&mut rig, &mut s, Scancode::RETURN);
-        let menu = |s: &State| matches!(s.screen, Screen::Menu(_));
+    /// Boot → logo → menu → Play page with its input open. The logo reads a key only after
+    /// `LOGO_KEY_MS` and the first-visit intro only after `INTRO_SKIP_MS`, so Enter is tapped
+    /// until each gives way. The top page has no boot slide; the Play page's boot must land
+    /// before its keys are read.
+    fn boot_to_play_page(rig: &mut Rig, s: &mut State) {
+        let intro_done =
+            |s: &State| matches!(&s.screen, Screen::Menu(m) if m.started && m.intro.step.is_none());
         for _ in 0..TICK_CAP {
-            if menu(&s) {
+            if intro_done(s) {
                 break;
             }
-            tap(&mut rig, &mut s, Scancode::RETURN);
+            tap(rig, s, Scancode::RETURN);
         }
-        tap(&mut rig, &mut s, Scancode::RETURN);
-        idle_until(&mut rig, &mut s, input_open);
-        for key in [
-            Scancode::DOWN,
-            Scancode::RETURN,
-            Scancode::RETURN,
-            Scancode::RETURN,
-        ] {
-            tap(&mut rig, &mut s, key);
-        }
-        assert!(matches!(s.screen, Screen::Match(_)));
+        assert!(intro_done(s), "menu intro never ended");
+        tap(rig, s, Scancode::RETURN);
+        assert_eq!(menu_page(s), Some(crate::menu::Page::Play));
+        idle_until(rig, s, input_open);
+    }
+
+    /// The in-match screen's name, for the visit log.
+    fn match_screen(s: &State) -> Option<&'static str> {
+        let Screen::Match(im) = &s.screen else {
+            return None;
+        };
+        Some(match &im.screen {
+            MatchScreen::KeysPage(_) => "keys",
+            MatchScreen::TutorialPage => "tutorial",
+            MatchScreen::Gameplay(_) => "gameplay",
+            MatchScreen::Bonus(_) => "bonus",
+            MatchScreen::GoodiesShop(_) => "goodies",
+            MatchScreen::TrapsShop(_) => "traps",
+            MatchScreen::Bourse(_) => "bourse",
+            MatchScreen::Winner(_) => "winner",
+            MatchScreen::Stats(_) => "stats",
+        })
+    }
+
+    /// Plays the started match back to the menu, tapping a fixed cycle of shop, confirm and
+    /// swing keys, one key every other tick. `force` ends each period as soon as it is playing;
+    /// otherwise the period clock ends it. Returns the in-match screens in visit order.
+    fn play_to_menu(rig: &mut Rig, s: &mut State, force: bool) -> Vec<&'static str> {
+        const MATCH_TICKS: usize = 200_000;
         let cycle = [Scancode::F, Scancode::TAB, Scancode::LEFT, Scancode::RETURN];
-        let mut periods = 0;
-        for _ in 0..TICK_CAP {
-            if menu(&s) {
-                break;
+        let mut visits: Vec<&'static str> = Vec::new();
+        for t in 0..MATCH_TICKS {
+            if matches!(s.screen, Screen::Menu(_)) {
+                return visits;
             }
-            if let Screen::Match(im) = &mut s.screen
+            let name = match_screen(s).expect("the match ended outside the menu");
+            if visits.last() != Some(&name) {
+                visits.push(name);
+            }
+            if force
+                && let Screen::Match(im) = &mut s.screen
                 && let MatchScreen::Gameplay(g) = &mut im.screen
                 && g.phase == GamePhase::Playing
             {
                 g.world.period_over = true;
-                periods += 1;
             }
-            for key in cycle {
-                tap(&mut rig, &mut s, key);
-            }
+            let held: &[Scancode] = if t % 2 == 0 {
+                &cycle[t / 2 % cycle.len()..][..1]
+            } else {
+                &[]
+            };
+            rig.step(held, |k, cx| s.tick(k, cx));
         }
-        assert!(menu(&s));
-        assert_eq!(periods, 6);
+        panic!("match not over after {MATCH_TICKS} ticks: {visits:?}");
+    }
+
+    fn start_match(rig: &mut Rig, s: &mut State, path: &[Scancode]) -> MatchConfig {
+        boot_to_play_page(rig, s);
+        for &key in path {
+            tap(rig, s, key);
+        }
+        let Screen::Match(im) = &s.screen else {
+            panic!("no match started");
+        };
+        im.m.config
+    }
+
+    fn visits_of(visits: &[&str], name: &str) -> usize {
+        visits.iter().filter(|v| **v == name).count()
+    }
+
+    /// GS §2.2 end to end: boot → logo → menu → 2P match of 2 days → shops and bourse each
+    /// period → bonus → winner → stats → menu. Every period ends at once via `period_over`.
+    #[test]
+    fn a_two_day_match_runs_from_boot_back_to_the_menu() {
+        use crate::match_state::Mode;
+        let mut rig = Rig::new(1);
+        let mut s = State::new(Persisted::default());
+        let path = [
+            Scancode::DOWN,
+            Scancode::RETURN,
+            Scancode::RETURN,
+            Scancode::RETURN,
+        ];
+        let c = start_match(&mut rig, &mut s, &path);
+        assert_eq!((c.players, c.mode, c.days), (Players::Two, Mode::Normal, 2));
+        let visits = play_to_menu(&mut rig, &mut s, true);
+        assert_eq!(visits_of(&visits, "gameplay"), 6, "{visits:?}");
+        // AR §9.1: a bonus after each dinner; the shops and the bourse between periods.
+        assert_eq!(visits_of(&visits, "bonus"), 2, "{visits:?}");
+        assert_eq!(visits_of(&visits, "goodies"), 5, "{visits:?}");
+        assert_eq!(visits_of(&visits, "bourse"), 5, "{visits:?}");
+        assert_eq!(visits[visits.len() - 2..], ["winner", "stats"]);
+    }
+
+    /// One player against the AI farmer, every period played to its 2-minute clock: the AI
+    /// shops and swings on its own.
+    #[test]
+    fn a_one_player_match_against_the_ai_runs_on_the_clock_back_to_the_menu() {
+        use crate::match_state::Mode;
+        use crate::world::ai::AiLevel;
+        let mut rig = Rig::new(3);
+        let mut s = State::new(Persisted::default());
+        // 1 Player, Normal mode, Intelligent (one below the preselected Normal), 2 days.
+        let path = [
+            Scancode::RETURN,
+            Scancode::RETURN,
+            Scancode::DOWN,
+            Scancode::RETURN,
+            Scancode::RETURN,
+        ];
+        let c = start_match(&mut rig, &mut s, &path);
+        assert_eq!(
+            (c.players, c.mode, c.ai_level, c.days),
+            (Players::One, Mode::Normal, AiLevel::Intelligent, 2)
+        );
+        let started = rig.now();
+        let visits = play_to_menu(&mut rig, &mut s, false);
+        assert_eq!(visits_of(&visits, "gameplay"), 6, "{visits:?}");
+        assert_eq!(visits_of(&visits, "bonus"), 2, "{visits:?}");
+        assert_eq!(visits[visits.len() - 2..], ["winner", "stats"]);
+        let played = rig.now() - started;
+        assert!(played > 6 * 120_000, "{played} ms");
+    }
+
+    /// Extreme (2P, mode 2): one period in the arena, then the bonus, winner and stats.
+    #[test]
+    fn an_extreme_match_is_one_period_and_a_bonus() {
+        let mut rig = Rig::new(5);
+        let mut s = State::new(Persisted::default());
+        let path = [
+            Scancode::DOWN,
+            Scancode::RETURN,
+            Scancode::DOWN,
+            Scancode::RETURN,
+        ];
+        let c = start_match(&mut rig, &mut s, &path);
+        assert!(c.extreme());
+        let visits = play_to_menu(&mut rig, &mut s, false);
+        assert_eq!(visits, ["gameplay", "bonus", "winner", "stats"]);
     }
 }
