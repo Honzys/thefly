@@ -236,7 +236,7 @@ impl Traps {
         let w = TrapKind::Zapper.spec_size(cx).w;
         self.zappers
             .iter()
-            .any(|z| z.arcing && in_span(x, screen_x(z.x), w) && y >= z.y)
+            .any(|z| z.arcing && in_span(x, visible_x(z.x, w), w) && y >= z.y)
     }
 
     /// (x, y) is inside a fan's frame, where its wind blows (`FUN_00427885`).
@@ -244,7 +244,7 @@ impl Traps {
         let size = fan_frame(cx);
         self.fans
             .iter()
-            .any(|f| in_span(x, screen_x(f.x), size.w) && in_span(y, f.y, size.h))
+            .any(|f| in_span(x, visible_x(f.x, size.w), size.w) && in_span(y, f.y, size.h))
     }
 
     /// `FUN_00427bb4`: may an object occupy [x, x + w] (object placement units, the 1.25 layer's
@@ -252,11 +252,13 @@ impl Traps {
     // shortcut: O22, the exact test is not decoded. Only fans share the table with the objects
     // (flypapers and zappers hang from the top, stored y 0), so only a fan's span blocks, inclusive
     // like the object-object test. Revisit when FUN_00427bb4 is read.
+    // A span past the 5000 ring end also blocks its wrapped part at the left (FW §4.4 step 6).
     pub fn span_free(&self, x: i32, w: i32) -> bool {
         let fan_w = TrapKind::FanLeft.spec().stored_width();
+        let clear = |fx: i32| x + w < fx || fx + fan_w < x;
         self.fans.iter().all(|f| {
-            let fx = placement_x(f.x);
-            x + w < fx || fx + fan_w < x
+            let fx = screen_x(f.x);
+            clear(fx) && clear(fx - SCREEN_WRAP)
         })
     }
 }
@@ -269,6 +271,17 @@ fn placement_x(layer_x: i32) -> i32 {
 /// The wrapped screen x of a 1.25-layer x (FW §4.1).
 fn screen_x(layer_x: i32) -> i32 {
     placement_x(layer_x).rem_euclid(SCREEN_WRAP)
+}
+
+/// The drawn x of a trap w wide: its screen x, minus the wrap width when it straddles the ring end
+/// (FW §4.4 step 6), so a trap at 4990 reaches the left edge of the view.
+fn visible_x(layer_x: i32, w: i32) -> i32 {
+    let x = screen_x(layer_x);
+    if x >= SCREEN_WRAP - w {
+        x - SCREEN_WRAP
+    } else {
+        x
+    }
 }
 
 fn in_span(v: i32, start: i32, len: i32) -> bool {
@@ -330,7 +343,7 @@ impl World {
                 TrapKind::Flypaper.spec().sprite
             };
             let size = cx.data.size(sprite);
-            Rect::new(screen_x(p.x), p.y, size.w, size.h).overlaps(&fly)
+            Rect::new(visible_x(p.x, size.w), p.y, size.w, size.h).overlaps(&fly)
         });
         if touching {
             self.fly.vx = (f64::from(self.fly.vx) / FLYPAPER_DRAG) as i32;
@@ -395,7 +408,7 @@ impl World {
             .traps
             .zappers
             .iter()
-            .find(|z| in_span(fx, screen_x(z.x), size.w));
+            .find(|z| in_span(fx, visible_x(z.x, size.w), size.w));
         let Some(z) = column else {
             return;
         };
@@ -441,7 +454,7 @@ impl World {
         if let [f] = self.traps.fans.as_slice() {
             let w = fan_frame(cx).w;
             let pan = Pan::ScreenX {
-                x: screen_x(f.x),
+                x: visible_x(f.x, w),
                 w,
             };
             cx.sound(SoundSlot::FAN, SoundOp::Move(pan));
@@ -449,7 +462,7 @@ impl World {
         if let [z] = self.traps.zappers.as_slice() {
             let w = TrapKind::Zapper.spec_size(cx).w;
             let pan = Pan::ScreenX {
-                x: screen_x(z.x),
+                x: visible_x(z.x, w),
                 w,
             };
             cx.sound(SoundSlot::ZAPPER_HUM, SoundOp::Move(pan));
@@ -506,6 +519,17 @@ mod tests {
         assert!(!traps.span_free(900, 100) && !traps.span_free(1223, 50));
         assert!(traps.span_free(2500, 100), "flypapers hang above the table");
         assert!(Traps::default().span_free(0, 5000));
+    }
+
+    /// A fan at layer 3920 (placement 4900) spans 4900..5123, which wraps onto 0..123 (FW §4.4).
+    #[test]
+    fn a_fan_span_across_the_ring_end_blocks_the_left_edge() {
+        let traps = Traps {
+            fans: vec![fan_at(3920)],
+            ..Traps::default()
+        };
+        assert!(!traps.span_free(50, 100) && !traps.span_free(4850, 100));
+        assert!(traps.span_free(124, 100));
     }
 }
 
@@ -598,5 +622,98 @@ mod layout_tests {
         w.traps_step(&mut rig.at(1));
         assert!(w.fly.splatted);
         assert!(rig.events.contains(&Event::play(SoundSlot::ZAPPER_GRILL)));
+    }
+
+    /// FW §4.4 step 6: a trap whose screen x is within its width of the 5000 ring end is drawn
+    /// at x − 5000, so a flypaper at stored 4990 (layer 3992, screen 4990) covers x 0..43.
+    #[test]
+    fn a_flypaper_at_the_ring_end_drags_a_fly_at_the_left_edge() {
+        let mut rig = Rig::new(1);
+        let mut w = world_with(vec![slot(TrapKind::Flypaper, 4990)], &mut rig);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (0, 100, 300, -140);
+        w.traps_step(&mut rig.at(1));
+        assert_eq!((w.fly.vx, w.fly.vy), (214, -100));
+    }
+
+    /// A fan at stored 4900 (screen 4900, frame 222 wide) blows at x −100..122 (midge test).
+    #[test]
+    fn a_fan_at_the_ring_end_touches_a_point_at_the_left_edge() {
+        let mut rig = Rig::new(1);
+        let w = world_with(vec![slot(TrapKind::FanLeft, 4900)], &mut rig);
+        let y = w.traps.fans[0].y + 10;
+        assert!(w.traps.fan_touches(5, y, &rig.cx(0)));
+        assert!(!w.traps.fan_touches(200, y, &rig.cx(0)));
+    }
+
+    /// A zapper at stored 4995 has its column across the ring end: a fly centred at x 20 is in it.
+    #[test]
+    fn a_zapper_at_the_ring_end_grills_a_fly_at_the_left_edge() {
+        let mut rig = Rig::new(1);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 4995)], &mut rig);
+        (w.fly.x, w.fly.y) = (20 - w.fly.size.w / 2, 40);
+        w.traps_step(&mut rig.at(1));
+        assert!(w.fly.splatted);
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::super::farmer::rig::Rig;
+    use super::*;
+    use crate::match_state::{MatchConfig, MatchState, Players, TrapSlot};
+
+    const STORED: i32 = 1618;
+    const SEEDS: u32 = 20;
+
+    fn world_with_fan(seed: u32) -> World {
+        let mut rig = Rig::new(seed);
+        let config = MatchConfig {
+            players: Players::Two,
+            ..MatchConfig::default()
+        };
+        let mut m = MatchState::new(config, false, &mut rig.cx(0));
+        m.traps.slots = vec![TrapSlot {
+            kind: TrapKind::FanLeft,
+            x: STORED,
+            y: TrapKind::FanLeft.spec().stored_y,
+        }];
+        m.winch = [STORED; 3];
+        m.advance(&mut rig.cx(0));
+        World::new(&mut m, &mut rig.cx(0))
+    }
+
+    /// AR §4.3, FW §5.6: trap and winch x share the stored unit, the 1.25 layer's screen ring
+    /// (0..5000). A fan and a winch at the same stored x meet on screen (±1 px for the trunc
+    /// through the layer x), and so does the fan's stand.
+    #[test]
+    fn a_fan_and_a_winch_at_the_same_stored_x_share_a_screen_x() {
+        let w = world_with_fan(1);
+        let fan_x = screen_x(w.traps.fans[0].x);
+        assert_eq!(w.lift.x, STORED);
+        assert!((fan_x - STORED).abs() <= 1, "{fan_x}");
+        let stand = w.objects.list.iter().find(|o| o.sprite == "piedventi_gc");
+        assert_eq!(stand.map(|o| o.screen_x), Some(fan_x));
+    }
+
+    /// FW §5.2 step 3: placement passes screen-unit x to `span_free`, so no placed object
+    /// overlaps the fan's stored span on any seed.
+    #[test]
+    fn no_placed_object_overlaps_a_fan_span() {
+        let fan_w = TrapKind::FanLeft.spec().stored_width();
+        for seed in 1..=SEEDS {
+            let w = world_with_fan(seed);
+            let fx = placement_x(w.traps.fans[0].x);
+            let clash = w
+                .objects
+                .list
+                .iter()
+                .filter(|o| o.collectible)
+                .find(|o| o.screen_x + o.w >= fx && o.screen_x <= fx + fan_w);
+            assert!(
+                clash.is_none(),
+                "seed {seed}: {:?}",
+                clash.map(|o| o.screen_x)
+            );
+        }
     }
 }
