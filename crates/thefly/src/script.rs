@@ -76,6 +76,7 @@ pub fn parse_shot(s: &str) -> Result<(u64, PathBuf), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thefly_sim::saves::Persisted;
 
     #[test]
     fn taps_press_and_release_on_successive_ticks() {
@@ -104,8 +105,10 @@ mod tests {
     /// the farmer side and leave, leave a traps shop at once, and go on from
     /// the bourse, bonus, winner and stats. Tick numbers follow the 2 min period (7800 ticks).
     fn two_player_match_keys() -> String {
-        const MENU: &str =
-            "200:Return,400:Return,460:Return,600:Down,620:Return,760:Return,900:Return";
+        // the last two close the keys and tutorial pages when the saved options turn the tutorial
+        // on; with it off they land in the loading screen, which ignores keys
+        const MENU: &str = "200:Return,400:Return,460:Return,600:Down,620:Return,760:Return,900:Return,\
+                            902:Return,904:Return";
         // shop entry → fly tally skip (a buy that fails when nothing was saved), turbo (button 2,
         // the one item the bonus money pays for), fly done; the fade to the farmer; kill tally
         // skip, farmer buy, farmer done; traps done; bourse. A buy drops for 54 ticks, so the
@@ -128,7 +131,7 @@ mod tests {
             (1060, "Return"),
         ];
         const SHOPS_AT: [u64; 5] = [9140, 18440, 30740, 40040, 49340];
-        const AFTER: &str = "30740:Return,61640:Return,62100:Return,62400:Return";
+        const AFTER: &str = "30740:Return,61640:Return,62400:Return,62700:Return";
         let shops = SHOPS_AT
             .iter()
             .flat_map(|p| SHOP.iter().map(move |(dt, k)| format!("{}:{k}", p + dt)));
@@ -186,12 +189,11 @@ mod tests {
         }
     }
 
-    fn run_script(data: thefly_sim::data::GameData) -> Run {
+    fn run_script(data: thefly_sim::data::GameData, saves: thefly_sim::saves::Persisted) -> Run {
         use thefly_sim::event::Event;
         use thefly_sim::input::KeyState;
-        use thefly_sim::saves::Persisted;
         use thefly_sim::sim::Sim;
-        const TICKS: u64 = 62_500;
+        const TICKS: u64 = 63_000;
         let script = Script {
             holds: parse_keys(&two_player_match_keys()).unwrap(),
             ..Script::default()
@@ -199,7 +201,7 @@ mod tests {
         let mut codes: Vec<Scancode> = script.holds.iter().map(|h| h.key).collect();
         codes.sort_by_key(|k| k.0);
         codes.dedup();
-        let mut sim = Sim::new(1, data, Persisted::default());
+        let mut sim = Sim::new(1, data, saves);
         let mut run = Run {
             seen: Vec::new(),
             banner_sounds: 0,
@@ -277,7 +279,10 @@ mod tests {
     /// stats and back to the menu, with sounds under the banner.
     #[test]
     fn a_scripted_two_player_match_runs_to_the_stats() {
-        let run = run_script(thefly_sim::data::GameData::synthetic());
+        let run = run_script(
+            thefly_sim::data::GameData::synthetic(),
+            Persisted::default(),
+        );
         let period = ["Loading", "Banner", "Playing"];
         let shop = ["GoodiesShop", "Bourse"];
         let day: Vec<&str> = [&period[..], &shop, &period, &shop, &period, &["Bonus"]].concat();
@@ -306,7 +311,9 @@ mod tests {
         let dir = thefly_platform::data_dir::resolve(None, Some(env), Path::new("."), Path::is_dir)
             .expect("THEFLY_DATA");
         let data = crate::assets::game_data(&dir).expect("real game data");
-        assert_full_run(&run_script(data));
+        let run = run_script(data, crate::assets::persisted(&dir));
+
+        assert_full_run(&run);
     }
 
     #[test]
