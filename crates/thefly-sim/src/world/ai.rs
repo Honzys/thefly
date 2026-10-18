@@ -40,7 +40,8 @@ pub const SWATTER_CENTRE_DX: i32 = HITBOX_W / 2;
 /// The midge-escape point (farmerX + 90, 430) (AR §2.4 step 4).
 pub const ESCAPE_DX: i32 = 90;
 pub const ESCAPE_Y: i32 = 430;
-/// Boot interval divisors: /5 on the level term, /14 (= 5 + 2 + 7 trap caps) on the trap term.
+/// Boot interval divisors: data+0x54 (5) on the level term, and the trap caps at data+0x29c,
+/// +0x29e and +0x2a0 (5 + 2 + 7 = 14) on the trap term (answers.md "AI divisor").
 pub const BOOT_LEVEL_DIVISOR: i32 = 5;
 pub const BOOT_TRAP_DIVISOR: i32 = 14;
 
@@ -222,13 +223,12 @@ pub struct Controller {
 }
 
 impl Controller {
-    /// `FUN_0043baa4`: a fresh offset within the current spread.
-    // shortcut: AR §2.3 gives "±(rand % S) with an independent sign" but not the draw order; the
-    // port draws x magnitude, x sign, y magnitude, y sign. Revisit if a trace shows otherwise.
+    /// `FUN_0043baa4`: a fresh offset within the current spread. Per axis, x first, the parity
+    /// sign (− on an even rand) and then R(S) (answers.md "AI aim offset").
     pub fn reroll_offset(&mut self, cx: &mut Ctx) {
         let spread = self.spread.max(MIN_SPREAD);
-        self.ox = cx.rng.r(spread) * cx.rng.sign();
-        self.oy = cx.rng.r(spread) * cx.rng.sign();
+        self.ox = signed_draw(spread, cx);
+        self.oy = signed_draw(spread, cx);
     }
 
     /// Refresh dx, dy and distance from the swatter reference point (centre x, trunc(reach + 77))
@@ -247,6 +247,11 @@ impl Controller {
         }
         d
     }
+}
+
+fn signed_draw(spread: i32, cx: &mut Ctx) -> i32 {
+    let sign = if cx.rng.odd() { 1 } else { -1 };
+    sign * cx.rng.r(spread)
 }
 
 /// Alignment with the reaction delay (`FUN_0043e306`, `FUN_0043e4e9`), shared by both AIs.
@@ -319,6 +324,8 @@ impl Aligner {
 pub struct AiView {
     pub swatter_centre: (i32, i32),
     pub fly_centre: (i32, i32),
+    /// The fly's life state (`FUN_0043885d`) is 0.
+    pub fly_alive: bool,
     pub fly_carrying: bool,
     /// Price of the carried object's type, when carrying.
     pub carried_price: Option<f32>,
@@ -376,10 +383,8 @@ pub struct FarmerAi {
 }
 
 impl FarmerAi {
-    /// `FUN_0043ee0b`: parameters, timers, target the fly, offset, budgets.
-    // shortcut: AR §2.1 says the Triple, Nuclear and boot timers are "created" but not their first
-    // deadline; the port arms them with tripleIdleMs, nukeWaitMs and the boot interval, so each
-    // decision first fires one period in. Revisit with a trace of FUN_0043ee0b.
+    /// `FUN_0043ee0b`: parameters, timers, target the fly, offset, budgets. Every timer is armed
+    /// here (answers.md "AI timers armed at creation"); the frenzy's first span has no rand.
     pub fn new(level: AiLevel, view: &AiView, cx: &mut Ctx) -> Self {
         let params = AI_PARAMS[level as usize];
         let mut ai = Self {
@@ -399,14 +404,14 @@ impl FarmerAi {
             },
             paused: false,
             dwell: None,
-            wander_timer: Timer::UNARMED,
+            wander_timer: Timer::armed(cx.now, params.wander_check_ms),
             wandering: false,
             escape_timer: None,
             escaping: false,
             escape_flag: false,
-            chase_timer: Timer::UNARMED,
+            chase_timer: Timer::armed(cx.now, params.chase_off_ms),
             chasing: false,
-            frenzy_timer: Timer::UNARMED,
+            frenzy_timer: Timer::armed(cx.now, frenzy_first_ms(&params)),
             frenzy: false,
             swing_request: false,
             triple_timer: Timer::armed(cx.now, params.triple_idle_ms),
@@ -435,12 +440,12 @@ impl FarmerAi {
         self.controller.spread = self.spread(view);
         let target = self.target_point(view);
         self.controller.refresh(view.swatter_centre, target);
-        self.dwell_step(cx);
+        self.dwell_step(view, cx);
         self.wander_step(cx);
         self.escape_step(view, cx);
         self.chase_step(view, cx);
         self.frenzy_step(view, cx);
-        self.align_step(cx);
+        self.align_step(view, cx);
         let goodie = self.goodie_step(view, cx);
         let swing = std::mem::take(&mut self.swing_request);
         AiOutput {
@@ -475,16 +480,23 @@ impl FarmerAi {
         self.controller.reroll_offset(cx);
     }
 
-    /// Step 2.
-    // shortcut: "reset speed" is read as clearing the held direction keys. Revisit with
-    // FUN_0043f611.
-    fn dwell_step(&mut self, cx: &mut Ctx) {
+    /// The offset re-roll after a dwell or an alignment swing (`FUN_0043e716`, `FUN_0043f8b1`):
+    /// at the aim spread with Triple off and not wandering, only while the fly is alive.
+    fn aim_reroll(&mut self, view: &AiView, cx: &mut Ctx) {
+        if !self.wandering && !view.triple_on && !view.fly_alive {
+            return;
+        }
+        self.controller.spread = self.spread(view);
+        self.controller.reroll_offset(cx);
+    }
+
+    /// Step 2 (answers.md "AI dwell expiry"): re-roll the offset, request a swing, destroy the
+    /// dwell timer. The direction keys and the pending reaction stay.
+    fn dwell_step(&mut self, view: &AiView, cx: &mut Ctx) {
         if !self.dwell.is_some_and(|t| t.expired(cx.now)) {
             return;
         }
-        self.aligner.x_dir = 0;
-        self.aligner.y_dir = 0;
-        self.aligner.pending_x_dir = None;
+        self.aim_reroll(view, cx);
         self.swing_request = true;
         self.dwell = None;
     }
@@ -559,9 +571,10 @@ impl FarmerAi {
 
     /// Step 6. L is the farmer's bought level.
     fn frenzy_step(&mut self, view: &AiView, cx: &mut Ctx) {
-        let p = &self.params;
-        let first = u64::try_from(p.frenzy_off_base + p.frenzy_off_rand).unwrap_or(0);
-        if self.frenzy_timer.ai_tick(cx.now, first) {
+        if self
+            .frenzy_timer
+            .ai_tick(cx.now, frenzy_first_ms(&self.params))
+        {
             self.toggle_frenzy(view.farmer_level, cx);
         }
         if self.frenzy && !view.triple_on {
@@ -598,13 +611,13 @@ impl FarmerAi {
     }
 
     /// Step 7.4–7.5.
-    fn align_step(&mut self, cx: &mut Ctx) {
+    fn align_step(&mut self, view: &AiView, cx: &mut Ctx) {
         let al = self
             .aligner
             .step(self.controller.dx, self.controller.dy, cx);
         if al.x_aligned && al.y_aligned {
             self.swing_request = true;
-            self.controller.reroll_offset(cx);
+            self.aim_reroll(view, cx);
             self.dwell = None;
         } else if al.x_aligned && self.dwell.is_none() {
             self.dwell = Some(Timer::armed(cx.now, self.params.dwell_ms));
@@ -752,9 +765,8 @@ impl FarmerAi {
         Some(goodie)
     }
 
-    /// `FUN_00440068`.
-    // shortcut: (flyStrength + flySpeed)/2 is taken as a float; the docs do not say whether the
-    // division is integer. Revisit with FUN_00440068.
+    /// `FUN_00440068`: (flyStrength + flySpeed) / 2.0 is a float division (answers.md "AI
+    /// divisor").
     pub fn boot_interval(&self, view: &AiView) -> u64 {
         let p = &self.params;
         let (strength, speed) = view.fly_levels;
@@ -788,10 +800,15 @@ impl FarmerAi {
     }
 }
 
+/// The frenzy timer's first span, frenzyOffBase + frenzyOffRand (AR §2.4 step 6).
+fn frenzy_first_ms(p: &AiParams) -> u64 {
+    u64::try_from(p.frenzy_off_base + p.frenzy_off_rand).unwrap_or(0)
+}
+
 impl World {
-    /// What the AI reads this tick (step 6, and `World::new` for [`FarmerAi::new`]).
-    // shortcut: the carried object's `kind` is taken as the index into the food prices. Revisit
-    // if W1's type table maps kinds to price indices differently.
+    /// What the AI reads this tick (step 6, and `World::new` for [`FarmerAi::new`]). The carried
+    /// object's `kind` indexes the active food prices; out of range reads as cheap, like the
+    /// original's 0.0 (answers.md "Carried object's kind is the price index").
     pub fn ai_view(&self, m: &MatchState) -> AiView {
         let f = &self.farmer;
         let carried_price = self
@@ -805,6 +822,7 @@ impl World {
         AiView {
             swatter_centre: (f.x + SWATTER_CENTRE_DX, f.swatter_y()),
             fly_centre: self.fly.centre(),
+            fly_alive: self.fly.alive(),
             fly_carrying: self.objects.carrying,
             carried_price,
             farmer_goodie: g.active.then_some((g.x + g.w / 2, g.y + g.h / 2)),
@@ -836,8 +854,8 @@ mod tests {
         (out, next)
     }
 
-    /// AR §2.3: ox = 41 % 181 = 41, sign of 18467 (> 16383) is +; oy = 6334 % 181 = 180, sign
-    /// of 26500 is +.
+    /// answers.md "AI aim offset": per axis the parity sign, then the magnitude. 41 is odd (+),
+    /// ox = 18467 % 181 = 5; 6334 is even (−), oy = −(26500 % 181) = −74.
     #[test]
     fn the_offset_is_a_signed_draw_per_axis() {
         let mut c = Controller {
@@ -845,7 +863,7 @@ mod tests {
             ..Controller::default()
         };
         let ((), next) = with_seed_1(0, |cx| c.reroll_offset(cx));
-        assert_eq!((c.ox, c.oy, next), (41, 180, 19169));
+        assert_eq!((c.ox, c.oy, next), (5, -74, 19169));
     }
 
     #[test]
@@ -916,10 +934,76 @@ mod farmer_ai_tests {
         AiView {
             swatter_centre: (farmer.x + SWATTER_CENTRE_DX, farmer.swatter_y()),
             fly_centre: fly,
+            fly_alive: true,
             owned,
             fly_levels: (2, 2),
             ..AiView::default()
         }
+    }
+
+    /// A Normal AI with a still fly, its rand reset to seed 1 after creation.
+    fn normal_ai(rig: &mut Rig) -> (FarmerAi, AiView) {
+        let farmer = Farmer::new(0, &mut rig.cx(0));
+        let v = view(&farmer, (farmer.x + 65, 300), [0; 3]);
+        let ai = FarmerAi::new(AiLevel::Normal, &v, &mut rig.cx(0));
+        rig.rng = MsvcRand::new(1);
+        (ai, v)
+    }
+
+    /// answers.md "AI dwell expiry": the offset is re-rolled (spread 181, so (5, −74) on seed 1),
+    /// a swing is requested and the dwell timer goes; the direction keys stay as they were.
+    #[test]
+    fn dwell_expiry_rerolls_the_offset_and_keeps_the_keys() {
+        let mut rig = Rig::new(1);
+        let (mut ai, v) = normal_ai(&mut rig);
+        ai.dwell = Some(Timer::armed(0, 1000));
+        (ai.aligner.x_dir, ai.aligner.y_dir, ai.aligner.pending_x_dir) = (1, -1, Some(0));
+        ai.dwell_step(&v, &mut rig.cx(1000));
+        assert_eq!((ai.controller.ox, ai.controller.oy), (5, -74));
+        assert!(ai.swing_request && ai.dwell.is_none());
+        assert_eq!(
+            (ai.aligner.x_dir, ai.aligner.y_dir, ai.aligner.pending_x_dir),
+            (1, -1, Some(0))
+        );
+        assert_eq!(rig.rng.rand(), 19169);
+    }
+
+    /// answers.md "AI aim offset": not wandering and Triple off, the offset is only re-rolled
+    /// while the fly is alive; wandering it is re-rolled at spread 700 regardless (41 odd, so
+    /// ox = 18467 % 700 = 267; 6334 even, so oy = −(26500 % 700) = −600).
+    #[test]
+    fn the_aim_reroll_waits_for_a_live_fly_unless_wandering() {
+        let mut rig = Rig::new(1);
+        let (mut ai, mut v) = normal_ai(&mut rig);
+        let before = (ai.controller.ox, ai.controller.oy);
+        v.fly_alive = false;
+        ai.aim_reroll(&v, &mut rig.cx(0));
+        assert_eq!((ai.controller.ox, ai.controller.oy), before);
+        assert_eq!(rig.rng.rand(), 41);
+        rig.rng = MsvcRand::new(1);
+        ai.wandering = true;
+        ai.aim_reroll(&v, &mut rig.cx(0));
+        assert_eq!((ai.controller.ox, ai.controller.oy), (267, -600));
+    }
+
+    /// answers.md "AI timers armed at creation": wander (wanderCheckMs), chase (chaseOffMs) and
+    /// frenzy (frenzyOffBase + frenzyOffRand) count from the creation time.
+    #[test]
+    fn the_ai_timers_are_armed_at_creation() {
+        let mut rig = Rig::new(1);
+        let farmer = Farmer::new(0, &mut rig.cx(0));
+        let v = view(&farmer, (0, 0), [0; 3]);
+        let ai = FarmerAi::new(AiLevel::Normal, &v, &mut rig.cx(500));
+        let left = |t: &Timer| t.remaining_ms(500);
+        assert_eq!(
+            (
+                left(&ai.wander_timer),
+                left(&ai.chase_timer),
+                left(&ai.frenzy_timer)
+            ),
+            (1500, 3000, 10_000)
+        );
+        assert_eq!((left(&ai.triple_timer), left(&ai.nuke_timer)), (9000, 9000));
     }
 
     #[test]
@@ -944,6 +1028,7 @@ mod farmer_ai_tests {
             ai.params.wander_ms,
             ai.params.p_wander,
         ) = (700, 700, 100);
+        ai.wander_timer = Timer::armed(0, 700);
         let mut flips = Vec::new();
         for tick in 0..=140 {
             let was = ai.wandering;
