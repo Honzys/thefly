@@ -5,7 +5,7 @@
 use super::collision::{Rect, Shape, fly_outline, outlines_overlap};
 use super::fly::Fly;
 use super::lift::LiftResult;
-use super::traps::{Traps, fan_frame};
+use super::traps::{Traps, fan_frame, play_fan_hit};
 use super::{OBJECT_PARALLAX, W, World};
 use crate::clock::DT;
 use crate::ctx::Ctx;
@@ -27,8 +27,20 @@ pub const PLACEMENT_X_TRIES: u32 = 1000;
 pub const SEPARATE_TRIES: u32 = 1000;
 /// Grab lock distance from the fly's bottom-centre to the grip point (§5.5 step 5).
 pub const LOCK_DISTANCE: f64 = 1000.0;
-/// Side-test retries when a falling object meets another (§5.4).
+/// Side-test retries, d = 2..=11, when a falling object meets another (answers.md "Object side
+/// test").
 pub const FALL_SIDE_RETRIES: u32 = 10;
+/// The probe distance after a blocked attach.
+const BLOCKED_PROBE: i32 = 5;
+/// Fan bounce of a moving object (answers.md "Object fan push"): |vx| and vy grow by
+/// R(60) + 90, drop vx by 50 + R(70), then an unused R(100) sign.
+const FAN_BOUNCE_RAND: i32 = 60;
+const FAN_BOUNCE_BASE: i32 = 90;
+const FAN_DROP_BASE: i32 = 50;
+const FAN_DROP_RAND: i32 = 70;
+const FAN_UNUSED_SIGN_ROLL: i32 = 100;
+/// A carried object on the blades kicks the fly back this much per axis.
+const CARRIED_FAN_KICK: i32 = 200;
 pub const GRAVITY_PER_TICK: i32 = 50;
 pub const MAX_VX: i32 = 500;
 /// Objects rest at y = 580 − h.
@@ -231,23 +243,29 @@ impl Objects {
         }
     }
 
-    /// §5.5 step 1 for every active object: landing dust, the object–object interaction
-    /// (collectible, weight > 0), then the motion of §5.4 when not held.
+    /// §5.5 step 1 in the two passes of `FUN_0042c888` (answers.md "Object fan push"): every
+    /// active object in ascending index gets its landing dust and, when not held, the motion of
+    /// §5.4; then each moving collectible object, in descending index, the object–object step
+    /// and the fan push.
     ///
-    /// shortcut: the fan push of objects (`FUN_0042754d`) is not applied; answers.md "Fan
-    /// strength" decodes the blow field for the fly only. Revisit when `FUN_0042754d` is read.
-    pub fn step_objects(&mut self, delta: f64, cx: &mut Ctx) {
+    /// shortcut: answers.md "Object fan push" and "Object side test" leave open whether the
+    /// moving gate is read when pass 2 visits (taken here, so an object pushed earlier in pass 2
+    /// is visited) and which touching object is picked (the first in index order).
+    pub fn step_objects(&mut self, delta: f64, traps: &Traps, cx: &mut Ctx) {
         for i in 0..self.list.len() {
             if !self.list[i].active {
                 continue;
             }
             self.landing_dust(i, cx);
-            let o = &self.list[i];
-            if o.collectible && o.weight > 0 && !o.held && !o.on_lift {
-                self.interact(i, cx);
-            }
             if !self.list[i].held {
                 self.list[i].motion(delta);
+            }
+        }
+        for i in (0..self.list.len()).rev() {
+            let o = &self.list[i];
+            if o.active && o.collectible && o.state != ObjState::Rest {
+                self.interact(i, cx);
+                self.fan_bounce(i, traps, cx);
             }
         }
     }
@@ -265,70 +283,84 @@ impl Objects {
         cx.emit(Event::play(SoundSlot::BOOM));
     }
 
-    /// `FUN_0042ec96`, the object–object step (§5.4).
+    /// `FUN_0042754d` mode 0 (answers.md "Object fan push"): an object on the blades of the
+    /// first fan it touches bounces away from that fan's centre.
+    fn fan_bounce(&mut self, i: usize, traps: &Traps, cx: &mut Ctx) {
+        let Some(fan) = traps.blades_hit(&self.list[i].shape(cx), cx) else {
+            return;
+        };
+        let fan_centre = fan.visible_x() + fan.w / 2;
+        let o = &mut self.list[i];
+        let s = if o.screen_x + o.w / 2 <= fan_centre {
+            -1
+        } else {
+            1
+        };
+        o.vx = (o.vx.abs() + cx.rng.r(FAN_BOUNCE_RAND) + FAN_BOUNCE_BASE) * s;
+        o.drop_vx = (o.drop_vx + FAN_DROP_BASE + cx.rng.r(FAN_DROP_RAND)) * s;
+        o.vy = -(o.vy + cx.rng.r(FAN_BOUNCE_RAND) + FAN_BOUNCE_BASE);
+        // The original draws a sign here and never uses it.
+        let _ = cx.rng.r(FAN_UNUSED_SIGN_ROLL);
+        play_fan_hit(cx);
+    }
+
+    /// `FUN_0042ec96`, the object–object step (§5.4, answers.md "Object side test").
     fn interact(&mut self, i: usize, cx: &mut Ctx) {
         match self.list[i].state {
             ObjState::Rest => {}
             ObjState::Sliding => self.slide(i, cx),
-            ObjState::Falling => match self.hit_other(i, 0, cx) {
-                None => self.list[i].land_on_table(),
-                Some(k) => self.fall_into(i, k, cx),
-            },
+            ObjState::Falling => self.fall(i, cx),
         }
     }
 
-    /// A sliding object: push what it slides into, bounce, then fall when unsupported.
-    ///
-    /// shortcut: §5.4's side test (`FUN_0042fb1c`) is not documented, so after the bounce
-    /// (gaps §3: ±10 × trunc(weight / 3) − vx, 0 unless the sign flips) v is left as is.
-    /// Revisit when `FUN_0042fb1c` is read.
+    /// A sliding object: on a touch it goes back, pushes what it touched (mode 1) and bounces;
+    /// then, resting on a support, it falls off it or bounces off its side.
     fn slide(&mut self, i: usize, cx: &mut Ctx) {
-        if let Some(k) = self.hit_other(i, 0, cx) {
+        let support = self.support(i, cx);
+        if let Some(k) = self.hit_other(i, cx) {
+            self.list[i].restore();
             let o = &self.list[i];
             let (vx, vy, weight) = (o.vx, o.vy, o.weight);
             if self.list[k].collectible {
                 self.push(k, PushMode::Slide, vx, vy, weight, cx);
             }
-            let rebound = vx.signum() * 10 * (f64::from(weight) / 3.0) as i32 - vx;
-            self.list[i].vx = if rebound.signum() == -vx.signum() {
-                rebound
-            } else {
-                0
-            };
+            self.list[i].bounce();
         }
-        if !self.supported(i) {
+        let Some((k, still)) = support else {
+            return;
+        };
+        if !still {
             self.detach(i);
             let o = &mut self.list[i];
             o.state = ObjState::Falling;
             o.drop_vx = (f64::from(o.vx) / 50.0) as i32;
+            return;
+        }
+        let s = self.probe(i, k, 1, Probe::Heading, cx);
+        if s.right || s.left {
+            self.list[i].bounce();
         }
     }
 
-    /// On the table, or above a supporter that still spans its x.
-    fn supported(&self, i: usize) -> bool {
-        let o = &self.list[i];
-        o.y >= o.rest_y
-            || o.supported_by.iter().any(|&s| {
-                let b = &self.list[s];
-                o.screen_x < b.screen_x + b.w && b.screen_x < o.screen_x + o.w
-            })
-    }
-
-    /// A falling object meets object `k`.
-    ///
-    /// shortcut: §5.4 gives "side tests with up to 10 retries" without the test. Here the
-    /// object lands on top when its bottom is in the upper half of `k` (stepping up 1 px while
-    /// the outlines still touch, at most [`FALL_SIDE_RETRIES`]); otherwise it is a side hit.
-    /// Revisit when `FUN_0042fb1c` is read.
-    fn fall_into(&mut self, i: usize, k: usize, cx: &mut Ctx) {
-        let (o, other) = (&self.list[i], &self.list[k]);
-        if o.y + o.h - other.y < other.h / 2 {
-            for _ in 0..FALL_SIDE_RETRIES {
-                if self.hit_other(i, 0, cx) != Some(k) {
-                    break;
-                }
-                self.list[i].y -= 1;
+    /// A falling object lands on the table, or meets object k: probes widen from d = 1 to
+    /// 1 + [`FALL_SIDE_RETRIES`]; below only lands on k, anything else is a side hit (mode 2).
+    fn fall(&mut self, i: usize, cx: &mut Ctx) {
+        let Some(k) = self.hit_other(i, cx) else {
+            self.list[i].land_on_table();
+            return;
+        };
+        let mut s = self.probe(i, k, 1, Probe::Heading, cx);
+        self.list[i].restore();
+        for d in 2..=1 + FALL_SIDE_RETRIES as i32 {
+            if s != Sides::NONE {
+                break;
             }
+            s = self.probe(i, k, d, Probe::Heading, cx);
+        }
+        if s == Sides::NONE {
+            s.left = true;
+        }
+        if s.below && !s.right && !s.left {
             self.list[k].resting_on_top.push(i);
             let o = &mut self.list[i];
             o.supported_by.push(k);
@@ -336,8 +368,9 @@ impl Objects {
             o.vy = 0;
             return;
         }
+        let o = &self.list[i];
         let (vx, vy, weight) = (o.vx, o.vy, o.weight);
-        if other.collectible {
+        if self.list[k].collectible {
             self.push(k, PushMode::Drop, vx, vy, weight, cx);
         }
         let o = &mut self.list[i];
@@ -346,10 +379,50 @@ impl Objects {
         o.vy = 0;
     }
 
-    /// The first other active object whose outline touches object `i` shifted `dx` px, leaving
-    /// out its own stack and objects on the lift.
-    fn hit_other(&self, i: usize, dx: i32, cx: &Ctx) -> Option<usize> {
-        self.hit_where(i, dx, cx, |_| true)
+    /// `FUN_0042fe10`'s support: the last active object `i` rests on, and whether it still
+    /// touches it 1 px lower.
+    fn support(&self, i: usize, cx: &Ctx) -> Option<(usize, bool)> {
+        let o = &self.list[i];
+        let k = o
+            .supported_by
+            .iter()
+            .copied()
+            .filter(|&k| self.list[k].active)
+            .max()?;
+        Some((k, self.touches_at(i, k, (0, 1), cx)))
+    }
+
+    /// `FUN_0042fb1c`: which of `i`'s probes against `k` still touch, with its layer x moved
+    /// ±d or its y moved +d. Mode 0 ([`Probe::Both`]) tries both sides; mode 1
+    /// ([`Probe::Heading`]) the side vx points to and, while vy ≠ 0, below.
+    fn probe(&self, i: usize, k: usize, d: i32, mode: Probe, cx: &Ctx) -> Sides {
+        let o = &self.list[i];
+        let (right, left, below) = match mode {
+            Probe::Both => (true, true, false),
+            Probe::Heading => (o.vx > 0, o.vx < 0, o.vy != 0),
+        };
+        Sides {
+            right: right && self.touches_at(i, k, (d, 0), cx),
+            left: left && self.touches_at(i, k, (-d, 0), cx),
+            below: below && self.touches_at(i, k, (0, d), cx),
+        }
+    }
+
+    /// Object `i` with its layer x moved `dx` (screen x recomputed) and its y `dy` touches `k`.
+    fn touches_at(&self, i: usize, k: usize, (dx, dy): (i32, i32), cx: &Ctx) -> bool {
+        let o = &self.list[i];
+        let mut a = o.shape(cx);
+        if dx != 0 {
+            a.x = screen_of((o.layer_x + dx).rem_euclid(W));
+        }
+        a.y += dy;
+        outlines_overlap(&a, &self.list[k].shape(cx), self.wrap_width)
+    }
+
+    /// The first other active object whose outline touches object `i`, leaving out its own
+    /// stack and objects on the lift.
+    fn hit_other(&self, i: usize, cx: &Ctx) -> Option<usize> {
+        self.hit_where(i, 0, cx, |_| true)
     }
 
     fn hit_where(
@@ -479,9 +552,7 @@ impl Objects {
                 o.vx = v;
             }
         }
-        o.layer_x = o.prev_x;
-        o.y = o.prev_y;
-        o.screen_x = o.screen_from_layer();
+        o.restore();
         (fly.x, fly.y) = (fly.prev_x, fly.prev_y);
         for _ in 0..SEPARATE_TRIES {
             if !self.touches_fly(i, fly, fly_shape, cx) {
@@ -518,7 +589,7 @@ impl Objects {
     }
 
     /// §5.5 steps 3–8: grab state, unlock, lock, attach or magnet, drop, carry.
-    pub fn grab(&mut self, fly: &mut Fly, candidates: &[usize], cx: &mut Ctx) {
+    pub fn grab(&mut self, fly: &mut Fly, candidates: &[usize], traps: &Traps, cx: &mut Ctx) {
         let grab = fly.aspirating && !(self.carrying && !fly.carrying);
         if !grab {
             self.locked = None;
@@ -533,7 +604,7 @@ impl Objects {
             self.drop_carried(fly);
         }
         if grab && self.carrying {
-            self.carry(fly, cx);
+            self.carry(fly, traps, cx);
         }
     }
 
@@ -551,9 +622,6 @@ impl Objects {
     }
 
     /// `FUN_0042e704` (§5.5 step 6).
-    ///
-    /// shortcut: the side test after a blocked attach is undocumented; the object is pushed
-    /// away from the object it hit. Revisit when `FUN_0042fb1c` is read.
     fn attach(&mut self, i: usize, fly: &mut Fly, cx: &mut Ctx) {
         let o = &self.list[i];
         if !o.collectible {
@@ -565,12 +633,9 @@ impl Objects {
         if (centre - grip).abs() < tol && o.y < fly.y + fly.size.h {
             let saved_y = o.y;
             self.list[i].y = fly.y + fly.size.h - (o.grip_y + 14);
-            if let Some(k) = self.hit_other(i, 0, cx) {
-                let away = (self.list[i].screen_x - self.list[k].screen_x).signum();
-                let o = &mut self.list[i];
-                o.y = saved_y;
-                o.vx = away * o.weight * 100 / 20;
-                o.state = ObjState::Sliding;
+            if let Some(k) = self.hit_other(i, cx) {
+                self.list[i].y = saved_y;
+                self.blocked_push(i, k, cx);
                 return;
             }
             self.detach(i);
@@ -589,6 +654,20 @@ impl Objects {
         }
     }
 
+    /// A blocked attach (answers.md "Object side test"): the ±5 probes against k push the
+    /// object away from the side still touching, or not at all.
+    fn blocked_push(&mut self, i: usize, k: usize, cx: &Ctx) {
+        let s = self.probe(i, k, BLOCKED_PROBE, Probe::Both, cx);
+        let o = &mut self.list[i];
+        let p = o.weight * 100 / 20;
+        o.vx = match (s.right, s.left) {
+            (true, _) => -p,
+            (false, true) => p,
+            (false, false) => return,
+        };
+        o.state = ObjState::Sliding;
+    }
+
     /// §5.5 step 7.
     fn drop_carried(&mut self, fly: &mut Fly) {
         if let Some(i) = self.carried.take() {
@@ -604,13 +683,11 @@ impl Objects {
         self.carrying = false;
     }
 
-    /// `FUN_0042f3b1` (§5.5 step 8), then fly vy += weight.
+    /// `FUN_0042f3b1` (§5.5 step 8), the fan kick, then fly vy += weight.
     ///
     /// shortcut: on a collision the object goes back to its previous position before the fly
-    /// is placed on it (§5.5 step 8.5 does not say). Revisit when `FUN_0042f3b1` is read. The
-    /// fan push between the carry and vy += weight is skipped with the object fan push (the port
-    /// rewrites the carried object's v from the fly on every carry).
-    fn carry(&mut self, fly: &mut Fly, cx: &mut Ctx) {
+    /// is placed on it (§5.5 step 8.5 does not say). Revisit when `FUN_0042f3b1` is read.
+    fn carry(&mut self, fly: &mut Fly, traps: &Traps, cx: &mut Ctx) {
         let Some(i) = self.carried else {
             return;
         };
@@ -624,15 +701,14 @@ impl Objects {
         o.y = fly.y + fly.size.h - off;
         (o.vx, o.vy) = (fly.vx, fly.vy);
         let weight = o.weight;
-        match self.hit_other(i, 0, cx) {
+        match self.hit_other(i, cx) {
             None => self.carry_on_table(i, fly, off),
             Some(k) => {
                 if self.list[k].collectible {
                     self.push(k, PushMode::Carried, fly.vx, fly.vy, weight, cx);
                 }
                 let o = &mut self.list[i];
-                (o.layer_x, o.y) = (o.prev_x, o.prev_y);
-                o.screen_x = o.screen_from_layer();
+                o.restore();
                 let grip = self.screen_left(&self.list[i]) + self.list[i].grip_x;
                 fly.x = (f64::from(grip) - f64::from(fly.size.w) / 2.0) as i32;
                 fly.y = self.list[i].y - fly.size.h + off;
@@ -640,7 +716,25 @@ impl Objects {
                 fly.vy = (-(f64::from(fly.vy) / 1.4) - f64::from(weight + 20)) as i32;
             }
         }
+        self.carried_fan_kick(i, fly, traps, cx);
         fly.vy += weight;
+    }
+
+    /// `FUN_0042754d` mode 1 (answers.md "Object fan push"): a carried object on the blades
+    /// kicks the fly back, vx = −(vx ± 200) with the sign of vx (+ at 0), the same for vy.
+    fn carried_fan_kick(&self, i: usize, fly: &mut Fly, traps: &Traps, cx: &mut Ctx) {
+        if traps.blades_hit(&self.list[i].shape(cx), cx).is_none() {
+            return;
+        }
+        let kick = |v: i32| {
+            -(v + if v < 0 {
+                -CARRIED_FAN_KICK
+            } else {
+                CARRIED_FAN_KICK
+            })
+        };
+        (fly.vx, fly.vy) = (kick(fly.vx), kick(fly.vy));
+        play_fan_hit(cx);
     }
 
     /// §5.5 step 8.4: the carried object touches the table.
@@ -689,6 +783,31 @@ pub enum PushMode {
     Drop,
     /// 3: the fly carries an object into another.
     Carried,
+}
+
+/// The flags of `FUN_0042fb1c`: still touching with the layer x moved +d, −d, or y moved +d.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Sides {
+    right: bool,
+    left: bool,
+    below: bool,
+}
+
+impl Sides {
+    const NONE: Self = Self {
+        right: false,
+        left: false,
+        below: false,
+    };
+}
+
+/// The probe modes of `FUN_0042fb1c`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// Mode 0: right and left.
+    Both,
+    /// Mode 1: the side vx points to, and below while vy ≠ 0.
+    Heading,
 }
 
 /// §5.5 step 6.4: the magnet reaches this far from the grip x, inclusive.
@@ -740,11 +859,8 @@ impl Object {
         }
     }
 
-    /// Sets the screen x directly and the layer x from it.
-    ///
-    /// shortcut: §5.2 and §5.5 step 8.2 write the screen x; the layer x is taken back as
-    /// trunc(x / 1.25), which the next integration turns into trunc(layer × 1.25). Revisit if
-    /// the sprite setter is read.
+    /// The screen-x setter (answers.md "Screen-x setter"): the screen x as given and the layer
+    /// x trunc(x / 1.25), until the next motion step sets trunc(layer × 1.25).
     pub fn set_screen_x(&mut self, x: i32) {
         self.screen_x = x;
         self.layer_x = (f64::from(x) / OBJECT_PARALLAX) as i32;
@@ -752,7 +868,29 @@ impl Object {
     }
 
     fn screen_from_layer(&self) -> i32 {
-        (f64::from(self.layer_x) * OBJECT_PARALLAX) as i32
+        screen_of(self.layer_x)
+    }
+
+    /// Back to the previous position.
+    ///
+    /// shortcut: answers.md "Object side test" does not say when the previous position is saved;
+    /// the port keeps the one saved at rest or by the carry (FW §5.4 step 4), so a sliding or
+    /// falling object that touches another jumps back to where it last rested. Revisit if the
+    /// original saves it per tick.
+    fn restore(&mut self) {
+        (self.layer_x, self.y) = (self.prev_x, self.prev_y);
+        self.screen_x = self.screen_from_layer();
+    }
+
+    /// The slide bounce (gaps §3, answers.md "Object side test"), w = trunc(weight / 3): vx < 0
+    /// becomes −10w − vx, stopping below 1; vx > 0 becomes 10w − vx, stopping at ≥ 0.
+    fn bounce(&mut self) {
+        let w10 = 10 * (f64::from(self.weight) / 3.0) as i32;
+        self.vx = match self.vx {
+            v if v < 0 && -w10 - v >= 1 => -w10 - v,
+            v if v > 0 && w10 - v < 0 => w10 - v,
+            _ => 0,
+        };
     }
 
     fn shape<'a>(&self, cx: &Ctx<'a>) -> Shape<'a> {
@@ -807,6 +945,11 @@ impl Object {
         (self.vx, self.vy) = (0, 0);
         self.landed = true;
     }
+}
+
+/// The object screen x of a layer x: trunc(layer × 1.25).
+fn screen_of(layer_x: i32) -> i32 {
+    (f64::from(layer_x) * OBJECT_PARALLAX) as i32
 }
 
 /// `v` moved `d` toward 0 without overshooting.
@@ -876,9 +1019,10 @@ impl World {
     /// magnet, drop, carry, the lift, then delivery and the period-over flag.
     pub fn objects_step(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let delta = self.camera.delta;
-        self.objects.step_objects(delta, cx);
+        self.objects.step_objects(delta, &self.traps, cx);
         let candidates = self.objects.fly_contact(&mut self.fly, cx);
-        self.objects.grab(&mut self.fly, &candidates, cx);
+        self.objects
+            .grab(&mut self.fly, &candidates, &self.traps, cx);
         let result = self
             .lift
             .update(&mut self.objects, self.fly.carrying, delta, cx);
@@ -892,11 +1036,13 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::Timer;
     use crate::data::GameData;
-    use crate::event::{Event, SoundSlot};
+    use crate::event::{Event, SoundOp, SoundSlot};
     use crate::rng::MsvcRand;
     use crate::world::fly::Fly;
     use crate::world::lift::LiftState;
+    use crate::world::traps::{FAN_STRENGTH, Fan};
 
     struct Bench {
         rng: MsvcRand,
@@ -997,7 +1143,7 @@ mod tests {
         objs.list.push(o);
         let mut vys = Vec::new();
         for _ in 0..60 {
-            b.with(|cx| objs.step_objects(0.0, cx));
+            b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
             let o = &objs.list[0];
             assert!(o.vx.abs() <= MAX_VX);
             if o.state != ObjState::Falling {
@@ -1009,7 +1155,7 @@ mod tests {
         let o = &objs.list[0];
         assert_eq!((o.y, o.vx, o.vy), (TABLE_Y - o.h, 0, 0));
         assert!(o.landed);
-        b.with(|cx| objs.step_objects(0.0, cx));
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
         assert!(!objs.list[0].landed);
         assert!(b.events.contains(&Event::play(SoundSlot::BOOM)));
     }
@@ -1022,7 +1168,7 @@ mod tests {
         (o.y, o.state, o.drop_vx) = (-4000, ObjState::Falling, 40);
         objs.list.push(o);
         for _ in 0..30 {
-            b.with(|cx| objs.step_objects(0.0, cx));
+            b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
         }
         assert_eq!(objs.list[0].vx, MAX_VX);
     }
@@ -1138,16 +1284,16 @@ mod tests {
         // Bottom-centre on the grip x, fly bottom just under the object top.
         let mut fly = fly_at(&mut b, grip_abs - 60, top - 94 + 5);
         fly.aspirating = true;
-        b.with(|cx| objs.grab(&mut fly, &[0], cx));
+        b.with(|cx| objs.grab(&mut fly, &[0], &Traps::default(), cx));
         assert!(fly.carrying && objs.carrying);
         assert_eq!(objs.carried, Some(0));
         assert!(objs.list[0].held);
         // Carrying puts the object under the fly: y = flyY + flyH − (grip y + 14).
-        b.with(|cx| objs.grab(&mut fly, &[], cx));
+        b.with(|cx| objs.grab(&mut fly, &[], &Traps::default(), cx));
         assert_eq!(objs.list[0].y, fly.y + 94 - (20 + 14));
         fly.aspirating = false;
         fly.vx = 400;
-        b.with(|cx| objs.grab(&mut fly, &[], cx));
+        b.with(|cx| objs.grab(&mut fly, &[], &Traps::default(), cx));
         let o = &objs.list[0];
         assert!(!o.held && o.state == ObjState::Falling && o.drop_vx == 8);
         assert!(fly.drop_pop && !fly.carrying && objs.carried.is_none());
@@ -1163,7 +1309,7 @@ mod tests {
         // Centre 80 px left of the grip: outside tol (64) but within 100.
         let mut fly = fly_at(&mut b, grip_abs - 80 - 60, top - 200);
         fly.aspirating = true;
-        b.with(|cx| objs.grab(&mut fly, &[0], cx));
+        b.with(|cx| objs.grab(&mut fly, &[0], &Traps::default(), cx));
         assert!(!fly.carrying);
         // d = |flyX − grip| + 10 = 150; vy += |flyY − (objY + 20)| / 2 = 110.
         assert_eq!((fly.vx, fly.vy), (150, 110));
@@ -1218,5 +1364,242 @@ mod tests {
         b.with(|cx| w.objects_step(&mut m, cx));
         assert_eq!(m.stats.delivered, 1);
         assert!(!w.objects.all_delivered && !w.period_over);
+    }
+
+    /// The object at `y`, with its previous position there too.
+    fn placed(mut o: Object, y: i32) -> Object {
+        (o.y, o.prev_y) = (y, y);
+        o
+    }
+
+    /// A left fan at screen 500, y 270: synthetic blades 100 × 100 at half-x 250..299, rows
+    /// 270..369; its centre is 500 + 222 / 2 = 611.
+    fn one_fan() -> Traps {
+        Traps {
+            fans: vec![Fan {
+                facing_right: false,
+                x: 400,
+                screen_x: 500,
+                y: 270,
+                w: 222,
+                strength: FAN_STRENGTH,
+                rehit: Timer::UNARMED,
+            }],
+            ..Traps::default()
+        }
+    }
+
+    fn fan_hits_hz(events: &[Event]) -> Vec<u32> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Sound {
+                    slot,
+                    op: SoundOp::Play(p),
+                } if *slot == SoundSlot::FAN_HIT => p.freq_hz,
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// answers.md "Object fan push": pass 2 runs in descending index, so object 1 draws first.
+    /// Both fall (vy 50 after the motion) left of the fan's centre (420 + 75 ≤ 611, s = −1),
+    /// one over the other so they do not touch. Seed 1: object 1 takes R(60) 41, R(70) 57,
+    /// R(60) 34, R(100) 0, R(6000) 1169; object 0 takes 15724 % 60 = 4, 11478 % 70 = 68,
+    /// 29358 % 60 = 18, 26962 % 100, 24464 % 6000 = 464.
+    #[test]
+    fn falling_objects_bounce_off_the_blades_in_descending_order() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        for y in [300, 200] {
+            let mut o = placed(b.object(3, 420), y);
+            o.state = ObjState::Falling;
+            objs.list.push(o);
+        }
+        b.with(|cx| objs.step_objects(0.0, &one_fan(), cx));
+        let v = |o: &Object| (o.vx, o.drop_vx, o.vy, o.state);
+        assert_eq!(v(&objs.list[1]), (-131, -107, -174, ObjState::Falling));
+        assert_eq!(v(&objs.list[0]), (-94, -118, -158, ObjState::Falling));
+        assert_eq!(fan_hits_hz(&b.events), [21_169, 20_464]);
+        assert_eq!(b.rng.rand(), 5705);
+    }
+
+    /// A resting object on the blades is never pushed and draws nothing.
+    #[test]
+    fn a_resting_object_is_not_pushed_by_a_fan() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        objs.list.push(placed(b.object(3, 420), 300));
+        b.with(|cx| objs.step_objects(0.0, &one_fan(), cx));
+        assert_eq!((objs.list[0].vx, objs.list[0].vy), (0, 0));
+        assert_eq!(b.rng.rand(), 41);
+    }
+
+    /// The carried can2 (222 wide, grip 111) sits at (420, 300) on the blades: fly vx 100 →
+    /// −(100 + 200), vy −50 → −(−50 − 200) = 250, then + weight 35. Fly::new takes 41; the kick
+    /// draws 18467 % 6000 = 467 → 20467 Hz.
+    #[test]
+    fn a_carried_object_on_the_blades_kicks_the_fly_200_back() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut can = b.object(1, 420);
+        can.held = true;
+        objs.list.push(can);
+        (objs.carrying, objs.carried) = (true, Some(0));
+        let mut fly = fly_at(&mut b, 471, 240);
+        (fly.aspirating, fly.carrying, fly.vx, fly.vy) = (true, true, 100, -50);
+        b.with(|cx| objs.grab(&mut fly, &[], &one_fan(), cx));
+        assert_eq!((objs.list[0].screen_x, objs.list[0].y), (420, 300));
+        assert_eq!((fly.vx, fly.vy), (-300, 285));
+        assert_eq!(fan_hits_hz(&b.events), [20_467]);
+        assert_eq!(b.rng.rand(), 6334);
+    }
+
+    /// Blocked attach (answers.md "Object side test"): chips1 at (300, 480) with the fly over
+    /// its grip at y 400 is lifted to y 460, where chips2 at (200, k_y) touches it (row 460:
+    /// chips1's top row 150..224 holds chips2's right side 174). Back at y 480 it probes chips2
+    /// at layer x ± 5.
+    fn blocked_attach(k_y: i32) -> Object {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        objs.list.push(b.object(3, 300));
+        objs.list.push(placed(b.object(4, 200), k_y));
+        let mut fly = fly_at(&mut b, 315, 400);
+        fly.aspirating = true;
+        b.with(|cx| objs.grab(&mut fly, &[0], &Traps::default(), cx));
+        assert!(!fly.carrying && !objs.list[0].held);
+        objs.list.swap_remove(0)
+    }
+
+    /// k at y 430 shares rows with the object at y 480; layer 245 (screen 306, half-x 153..227)
+    /// still holds 174, so right is set: vx = −15 × 100 / 20, although k is on the left.
+    #[test]
+    fn a_blocked_attach_with_the_right_probe_set_pushes_left() {
+        let o = blocked_attach(430);
+        assert_eq!((o.y, o.vx, o.state), (480, -75, ObjState::Sliding));
+    }
+
+    /// k at y 380 (rows 380..479) shares no row with the object back at y 480: no push.
+    #[test]
+    fn a_blocked_attach_with_no_probe_set_pushes_nothing() {
+        let o = blocked_attach(380);
+        assert_eq!((o.y, o.vx, o.state), (480, 0, ObjState::Rest));
+    }
+
+    /// chips1 (weight 15, w = 5) slides right at 300: friction leaves 295 and it moves 4 layer
+    /// px to screen 305, where its right side (half-x 226) meets chips2's top row at 452. It goes
+    /// back to its previous position, pushes chips2 (s = 147, E = 15 × 147², q = E / 30 = 10804,
+    /// √ = 103) and bounces: 10 × 5 − 295 = −245.
+    #[test]
+    fn a_sliding_object_that_hits_another_returns_to_its_previous_position() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = b.object(3, 300);
+        (o.state, o.vx, o.prev_x) = (ObjState::Sliding, 300, 200);
+        objs.list.push(o);
+        objs.list.push(b.object(4, 452));
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!((o.layer_x, o.screen_x, o.vx), (200, 250, -245));
+        assert_eq!(
+            (objs.list[1].vx, objs.list[1].state),
+            (103, ObjState::Sliding)
+        );
+    }
+
+    /// chips1 rests one row into chips2 (y 381, bottom row 480 = chips2's top row) and slides
+    /// right at 300 → 295, layer 260. Still supported (row 481 holds chips2's side 224); the
+    /// right probe at layer 261 meets chips2's top row, so it bounces to 10 × 5 − 295 = −245.
+    #[test]
+    fn a_sliding_object_bounces_off_the_side_of_its_support() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = placed(b.object(3, 320), 381);
+        (o.state, o.vx) = (ObjState::Sliding, 300);
+        o.supported_by.push(1);
+        let mut k = b.object(4, 300);
+        k.resting_on_top.push(0);
+        objs.list.extend([o, k]);
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!(
+            (o.layer_x, o.y, o.vx, o.state),
+            (260, 381, -245, ObjState::Sliding)
+        );
+        assert_eq!(o.supported_by, [1]);
+    }
+
+    /// Off its support (no overlap 1 px lower) a sliding object falls: drop vx trunc(295 / 50).
+    #[test]
+    fn a_sliding_object_off_its_support_falls() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = placed(b.object(3, 1000), 380);
+        (o.state, o.vx) = (ObjState::Sliding, 300);
+        o.supported_by.push(1);
+        let mut k = b.object(4, 300);
+        k.resting_on_top.push(0);
+        objs.list.extend([o, k]);
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!((o.state, o.drop_vx), (ObjState::Falling, 5));
+        assert!(o.supported_by.is_empty() && objs.list[1].resting_on_top.is_empty());
+    }
+
+    /// chips1 falls straight down (vx 0, vy 50) into chips2's top row: only the below probe is
+    /// set, so it lands on chips2 at its previous position (y 379).
+    #[test]
+    fn a_falling_object_touching_only_below_lands_on_the_other() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = placed(b.object(3, 320), 381);
+        (o.state, o.prev_y) = (ObjState::Falling, 379);
+        objs.list.extend([o, b.object(4, 300)]);
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!((o.y, o.vy, o.state), (379, 0, ObjState::Sliding));
+        assert_eq!(
+            (
+                o.supported_by.as_slice(),
+                objs.list[1].resting_on_top.as_slice()
+            ),
+            (&[1][..], &[0][..])
+        );
+    }
+
+    /// chips1 falls right at 300 (layer 240 → 244, screen 305) into chips2's top row at 452:
+    /// right and below are set, a side hit. chips2 is pushed in mode 2 (200 and 33: s = 116,
+    /// q = 15 × 116² / 30 = 6728, √ = 82), chips1 reverses and goes back to its previous position.
+    #[test]
+    fn a_falling_object_with_a_side_flag_reverses_and_pushes() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = placed(b.object(3, 300), 430);
+        (o.state, o.vx) = (ObjState::Falling, 300);
+        objs.list.extend([o, b.object(4, 452)]);
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!((o.layer_x, o.y, o.vx, o.vy), (240, 430, -300, 0));
+        assert_eq!(
+            (objs.list[1].vx, objs.list[1].state),
+            (82, ObjState::Sliding)
+        );
+        assert!(objs.list[1].resting_on_top.is_empty());
+    }
+
+    /// With vx 0 and vy 0 after the motion nothing is probed at any d, so the fallback is a
+    /// side hit: it does not land on the other, though it touches its top row.
+    #[test]
+    fn a_falling_object_with_no_probe_set_takes_the_side_hit() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = placed(b.object(3, 320), 381);
+        (o.state, o.vy, o.prev_y) = (ObjState::Falling, -50, 300);
+        objs.list.extend([o, b.object(4, 300)]);
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        let o = &objs.list[0];
+        assert_eq!((o.y, o.vx, o.vy, o.state), (300, 0, 0, ObjState::Falling));
+        assert!(objs.list[1].resting_on_top.is_empty());
+        assert_eq!(b.rng.rand(), 41);
     }
 }
