@@ -2,9 +2,11 @@
 //! shop (0x28) (ai-and-rules §7.2, §7.3, §4.2, §4.3; screens-and-rendering §3.1, §3.2;
 //! answers.md "Goodies shop: purchase and tally are motion-driven", "Goodies shop side order and
 //! exit", "Traps shop: carrying a trap").
-//! shortcut: the shaking machine runs the shared wander mover every shop tick and draws rand
-//! (answers.md "Goodies shop: purchase and tally are motion-driven"); not modelled until the
-//! wander mover lands, so the shop's RNG stream lacks those draws.
+//! shortcut: the shaking machine runs [`crate::mover::Wander`] every shop tick, fades included
+//! (answers.md "Goodies shop: purchase and tally are motion-driven"), but its reroll, speeds, run
+//! caps and accel (presumably set in the shop init `FUN_0042123c`) are not documented: SR §3.1
+//! gives only the start (7, 143) and the box x 3..w + 11, y 139..h + 147. So the shop's RNG
+//! stream lacks those draws. Revisit once the parameters are decoded.
 
 use crate::bourse::Bourse;
 use crate::clock::{FPS, Timer};
