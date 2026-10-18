@@ -25,6 +25,17 @@ const BOX_DX: f32 = 56.0;
 const BOX_W: f32 = 58.0;
 const PRICE_RED: Color = Color::RGB(220, 30, 30);
 
+/// The four cockroaches on the stump of the fly's shop, top-left of frame 0 of `g_blatte`,
+/// measured on shot 40. shortcut: SR §3.1 gives only the hidden trigger spot (500, 400) and
+/// frame 1 (the sign) for the purchase; the idle dance and the stump positions are not in the
+/// docs, so they stand still. Revisit when `FUN_00423be2` is read.
+const COCKROACHES: [(f32, f32); 4] = [
+    (417.0, 317.0),
+    (493.0, 309.0),
+    (568.0, 314.0),
+    (645.0, 319.0),
+];
+
 fn shop_fade(v: &View, cur: f64) -> f64 {
     let prev = match v.prev_screen() {
         Some(MatchScreen::GoodiesShop(s)) => Some(s.fade.alpha),
@@ -38,10 +49,15 @@ fn shop_fade(v: &View, cur: f64) -> f64 {
 /// each top icon, the side's panel and bottom bar (`g_barres_bas` frame 0 fly, 1 farmer) over the
 /// machine, owned counts as a coloured icon plus "xN" in the bottom boxes, and the money in the
 /// panel; the bought item drops from its button and the tally sprite slides in from the right.
-/// shortcut: open item O4, the cockroaches and the level gauges are not decoded; revisit when
+/// shortcut: open item O4, the level gauges and the cockroaches' dance are not decoded; revisit when
 /// `FUN_0042322f` is read.
 pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> Result<(), Error> {
     g.spr("g_background", 0.0, 0.0, 0)?;
+    if s.side == ShopSide::Fly {
+        for (x, y) in COCKROACHES {
+            g.spr("g_blatte", x, y, 0)?;
+        }
+    }
     let belt = if s.conveyor.is_some() {
         v.anim(100, 3)
     } else {
@@ -207,16 +223,19 @@ const BAND_COLOURS: [Color; 3] = [
 ];
 const BAND: i32 = 100;
 
-/// The bands of a bourse bar of `h` px, bottom up: `(offset from the baseline, height, colour)`.
-/// Green, yellow and red per 100 px, black beyond (SR §3.3).
-pub fn bar_bands(h: i32) -> Vec<(i32, i32, Color)> {
+/// The bands of a bourse bar of `h` px, in drawing order: `(height, colour)`, every band growing
+/// up from the baseline. A band is at most 100 px and the next one overdraws its foot, so a 102 px
+/// bar is a green column with 2 px of yellow at its foot (shot 43). Black beyond red (SR §3.3).
+pub fn bar_bands(h: i32) -> Vec<(i32, Color)> {
     const MAX_BANDS: i32 = 40;
-    (0..MAX_BANDS)
-        .map(|k| (k * BAND, (h - k * BAND).min(BAND), k))
-        .take_while(|&(_, len, _)| len > 0)
-        .map(|(off, len, k)| {
+    if h <= 0 {
+        return Vec::new();
+    }
+    let top = ((h - 1) / BAND).min(MAX_BANDS - 1);
+    (0..=top)
+        .map(|k| {
             let c = BAND_COLOURS.get(k as usize).copied().unwrap_or(BLACK);
-            (off, len, c)
+            ((h - k * BAND).min(BAND), c)
         })
         .collect()
 }
@@ -243,8 +262,10 @@ pub fn bourse(g: &mut Gfx, _v: &View, m: &MatchState, b: &Bourse) -> Result<(), 
             (392.0, 282.0)
         };
         let x = 50.0 + 69.0 * col;
-        for (off, len, c) in bar_bands(b.bars[i]) {
-            g.fill(x, base - (off + len) as f32, 9.0, len as f32, c)?;
+        for (len, c) in bar_bands(b.bars[i]) {
+            // a 1 px black line caps every band (shot 43)
+            g.fill(x, base - len as f32 - 1.0, 9.0, 1.0, BLACK)?;
+            g.fill(x, base - len as f32, 9.0, len as f32, c)?;
         }
         let hidden = b.blink_on && b.leader == Some(i) && b.bars[i] >= price(obj);
         if !hidden {
@@ -409,9 +430,18 @@ mod tests {
         assert!(bar_bands(0).is_empty());
         let b = bar_bands(250);
         assert_eq!(b.len(), 3);
-        assert_eq!((b[0].0, b[0].1, b[0].2), (0, 100, BAND_COLOURS[0]));
-        assert_eq!((b[2].0, b[2].1, b[2].2), (200, 50, BAND_COLOURS[2]));
-        assert_eq!(bar_bands(350)[3].2, BLACK);
+        assert_eq!(b[0], (100, BAND_COLOURS[0]));
+        assert_eq!(b[2], (50, BAND_COLOURS[2]));
+        assert_eq!(bar_bands(350)[3].1, BLACK);
+    }
+
+    #[test]
+    fn a_bar_over_100_px_keeps_its_remainder_at_the_foot() {
+        assert_eq!(bar_bands(100), [(100, BAND_COLOURS[0])]);
+        assert_eq!(
+            bar_bands(102),
+            [(100, BAND_COLOURS[0]), (2, BAND_COLOURS[1])]
+        );
     }
 
     #[test]

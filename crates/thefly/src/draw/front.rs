@@ -204,11 +204,15 @@ fn view_keys(g: &mut Gfx) -> Result<(), Error> {
 /// SR §2.3. shortcut: the credit text pairs are not reproduced in the docs, so only the photos
 /// and the letterbox are drawn.
 fn credits_page(g: &mut Gfx, v: &View, m: &Menu, p: Option<&Menu>) -> Result<(), Error> {
-    const PHOTO_START_Y: f32 = -300.0;
     let dy = v.l.f(p.map(|p| p.credits.scene_y), m.credits.scene_y);
     let frame = v.anim(20, 3);
-    g.spr("i_credit_seb", 100.0, PHOTO_START_Y + dy, frame)?;
-    g.spr("i_credit_gaga", 400.0, PHOTO_START_Y + dy, frame)?;
+    for (i, name) in ["i_credit_seb", "i_credit_gaga"].into_iter().enumerate() {
+        let [x, y] = m.credits.photos[i];
+        let prev = p.map(|p| p.credits.photos[i]);
+        let x = v.l.i(prev.map(|q| q[0]), x);
+        let y = v.l.i(prev.map(|q| q[1]), y);
+        g.spr(name, x, y + dy, frame)?;
+    }
     let bar = v.l.i(p.map(|p| p.credits.letterbox), m.credits.letterbox);
     g.fill(0.0, 0.0, 800.0, bar, BLACK)?;
     g.fill(0.0, SCREEN_H - bar, 800.0, bar, BLACK)
