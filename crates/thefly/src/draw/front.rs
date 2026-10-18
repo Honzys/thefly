@@ -5,7 +5,7 @@ use thefly_platform::{Color, Error};
 use thefly_sim::highscores::{HighScoreScreen, ROW_SWEEP_MS, ROWS};
 use thefly_sim::match_state::Players;
 use thefly_sim::menu::{BOOT_KICK_MS, BOOT_X, Menu, Page, SlidePhase};
-use thefly_sim::screen::{Logo, QuitDialog, Screen};
+use thefly_sim::screen::{FAREWELL_EFFECT_MS, Farewell, Logo, QuitDialog, Screen};
 
 use super::View;
 use crate::assets::{ARIAL_BLACK, JOINT};
@@ -301,9 +301,24 @@ pub fn high_scores(g: &mut Gfx, v: &View, hs: &HighScoreScreen) -> Result<(), Er
     )
 }
 
-/// SR §5.4. shortcut: open item O5, the farewell layout and timing are not decoded; the logo is
-/// centred on black and the midges are left out.
-pub fn farewell(g: &mut Gfx) -> Result<(), Error> {
-    let (w, h) = g.size("logo")?;
-    g.spr("logo", (800.0 - w) / 2.0, (SCREEN_H - h) / 2.0, 0)
+/// The farewell's second-layer effect: `color_shade` cell and length (sim `FAREWELL_EFFECT_MS`).
+/// shortcut: SR §5.4 names the layer but not what it shows; a flash of cell 1 fading out over
+/// the 150 ms stands in. Revisit when `FUN_0044a641`'s render is read.
+const EFFECT_CELL: u32 = 1;
+
+/// SR §5.4 / answers.md "Farewell length": the logo zooms from its centre, the effect flashes
+/// when it is full, and the 700 ms exit fade goes to black. shortcut: the two `color_shade`
+/// background layers and the wandering midges are left out (O5).
+pub fn farewell(g: &mut Gfx, v: &View, f: &Farewell) -> Result<(), Error> {
+    let prev = match v.prev.map(|s| &s.screen) {
+        Some(Screen::Farewell(p)) => Some(p.scale),
+        _ => None,
+    };
+    let scale = v.l.f(prev, f.scale);
+    g.spr_centred("logo", 400.0, SCREEN_H / 2.0, 0, scale, 255.0)?;
+    if f.effect.is_armed() && !f.effect.expired(v.now) {
+        let left = f.effect.remaining_ms(v.now) as f32 / FAREWELL_EFFECT_MS as f32;
+        g.shade(EFFECT_CELL, 255.0 * left)?;
+    }
+    g.fade(f.fade.map_or(0.0, |fade| fade.alpha))
 }
