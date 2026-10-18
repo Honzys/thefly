@@ -254,7 +254,7 @@ fn after_goodies(m: &mut MatchState, cx: &mut Ctx) -> MatchScreen {
     }
     m.traps.slots.clear();
     m.winch = draw_anchors(ANCHOR_GAP, cx);
-    MatchScreen::Bourse(Box::new(Bourse::new(cx)))
+    MatchScreen::Bourse(Box::new(Bourse::new(m, cx)))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -300,7 +300,7 @@ impl TrapsShop {
         let faded = self.fade.step();
         if self.leaving {
             return if faded {
-                MatchFlow::Next(MatchScreen::Bourse(Box::new(Bourse::new(cx))))
+                MatchFlow::Next(MatchScreen::Bourse(Box::new(Bourse::new(m, cx))))
             } else {
                 MatchFlow::Stay
             };
