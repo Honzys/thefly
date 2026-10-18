@@ -217,6 +217,16 @@ pub enum Effect {
         vy: i32,
         life_ms: i32,
     },
+    /// One fly sparkle (`FUN_00439450`, answers.md "Fly reset(0) and SuperFly sparkles"), one
+    /// event per sparkle: start x, y, velocity in px/s and the delay before it shows, in ms.
+    /// 45 at reset(0), 5 at the SuperFly start and per 40 ms while it lasts; 90 slots.
+    Sparkles {
+        x: i32,
+        y: i32,
+        vx: i32,
+        vy: i32,
+        delay_ms: i32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
