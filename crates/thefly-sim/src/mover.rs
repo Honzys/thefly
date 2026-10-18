@@ -4,44 +4,41 @@
 use crate::clock::{FPS, Timer};
 use crate::ctx::Ctx;
 
-/// The run state of `FUN_004180af`: exactly |v| px over each run of FPS frames; the run restarts
-/// when v changes or the frame count reaches FPS.
+/// The run state of `FUN_004180af` (answers.md "FPS integrator: per-axis runs and percent
+/// rounding"): each axis moves exactly |v| px over a run of FPS frames, and restarts its own run
+/// when its v changes or its frame count reaches FPS. An axis at v = 0 is left untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FpsRun {
-    frames: i32,
-    rem: [i32; 2],
-    /// The velocity the current run started with.
+    frames: [i32; 2],
+    moved: [i32; 2],
+    /// The velocity each axis's current run started with.
     run_v: [i32; 2],
 }
 
 impl FpsRun {
     /// One frame at v px/s; returns the (dx, dy) px moved.
     pub fn step(&mut self, v: [i32; 2]) -> (i32, i32) {
-        if v != self.run_v || self.frames >= FPS {
-            *self = Self {
-                run_v: v,
-                ..Self::default()
-            };
-        }
-        self.frames += 1;
-        (
-            fps_share(v[0], &mut self.rem[0]),
-            fps_share(v[1], &mut self.rem[1]),
-        )
+        let dy = self.axis(1, v[1]);
+        (self.axis(0, v[0]), dy)
     }
-}
 
-/// This frame's share of |v| px over FPS frames: the quotient, plus 1 when the remainder carries.
-fn fps_share(v: i32, rem: &mut i32) -> i32 {
-    let (q, r) = (v.abs() / FPS, v.abs() % FPS);
-    *rem += r;
-    let carry = if *rem >= FPS {
-        *rem -= FPS;
-        1
-    } else {
-        0
-    };
-    v.signum() * (q + carry)
+    /// step = q, or q + 1 when the percent remainder of the rest of the run beats the run's.
+    fn axis(&mut self, a: usize, v: i32) -> i32 {
+        if v == 0 {
+            return 0;
+        }
+        if self.frames[a] >= FPS || v != self.run_v[a] {
+            (self.frames[a], self.moved[a], self.run_v[a]) = (0, 0, v);
+        }
+        let r0 = 100 * (v.abs() % FPS) / FPS;
+        let left = FPS - self.frames[a];
+        let rest = v.abs() - self.moved[a];
+        let (q, r1) = (rest / left, 100 * (rest % left) / left);
+        let step = if r1 > r0 { q + 1 } else { q };
+        self.moved[a] += step;
+        self.frames[a] += 1;
+        v.signum() * step
+    }
 }
 
 /// The wander mover: `FUN_004174c0`, moved by the shared mover `FUN_004172a8` (answers.md
@@ -140,14 +137,40 @@ mod tests {
     use super::*;
     use crate::world::farmer::rig::Rig;
 
-    /// `FUN_004180af`: exactly |v| px per 65 frames, with the remainder spread over the run.
+    /// answers.md "FPS integrator", 600 px/s at F = 65: 9 px a tick, 10 at the listed ticks
+    /// (r0 = trunc(1500 / 65) = 23; tick 4 has r1 = trunc(1500 / 62) = 24 > 23), 600 in all.
     #[test]
-    fn the_integrator_moves_exactly_v_px_per_second() {
-        for v in [69, -130, 5, 0] {
-            let mut rem = 0;
-            let total: i32 = (0..FPS).map(|_| fps_share(v, &mut rem)).sum();
+    fn the_integrator_rounds_by_percent() {
+        let mut run = FpsRun::default();
+        let tens: Vec<i32> = (1..=FPS)
+            .filter(|_| run.step([600, -600]) == (10, -10))
+            .collect();
+        assert_eq!(
+            tens,
+            [4, 8, 12, 16, 21, 25, 29, 33, 37, 41, 46, 50, 54, 58, 62]
+        );
+        assert_eq!(run.step([600, -600]), (9, -9), "a new run after F frames");
+        for v in [69, -130, 5] {
+            let mut run = FpsRun::default();
+            let total: i32 = (0..FPS).map(|_| run.step([v, 0]).0).sum();
             assert_eq!(total, v);
         }
+    }
+
+    /// Each axis keeps its own run: a vx change does not restart y, and v = 0 leaves the axis
+    /// state alone. y at 600 stays on its run (its frame 4 gives 10); x restarts at 130, which
+    /// gives 2 a frame (r0 = 0).
+    #[test]
+    fn the_axes_run_separately() {
+        let mut run = FpsRun::default();
+        for _ in 0..3 {
+            run.step([600, 600]);
+        }
+        assert_eq!(run.step([130, 600]), (2, 10));
+        assert_eq!(run.step([0, 0]), (0, 0));
+        // y resumes at its frame 5 (9 px), not a fresh run.
+        assert_eq!(run.step([130, 600]), (2, 9));
+        assert_eq!(run.frames, [2, 5]);
     }
 
     /// Seed 1, re-roll 0 ms and speed spread 1 (v = ±65), caps 1, no accel. Draws per axis:
