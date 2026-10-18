@@ -571,7 +571,6 @@ mod tests {
 
     /// The farmer catches only from swing frame 3, against (x, trunc(reach), 131, 154).
     #[test]
-    #[ignore = "needs W1: Rect::catches"]
     fn the_farmer_catches_only_in_the_hit_window() {
         use crate::match_state::{MatchConfig, MatchState, Players};
         let mut rig = Rig::new(1);

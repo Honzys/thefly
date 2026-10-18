@@ -370,7 +370,6 @@ mod tests {
 
     /// Thirty midges under an open swatter: 20 are stunned, then retired 700 ms later.
     #[test]
-    #[ignore = "needs W1: Rect::catches"]
     fn a_swat_kills_at_most_20() {
         let mut rig = Rig::new(1);
         let mut w = world(&mut rig);
@@ -388,7 +387,6 @@ mod tests {
 
     /// Midges in the farmer's box (x, y, 181, 178; gaps §8.1 step 2.4) slow him: r = 30/30 caps the speed at 0 and stops vy.
     #[test]
-    #[ignore = "needs W1: Rect::catches"]
     fn the_farmer_slows_while_midges_touch_him() {
         let mut rig = Rig::new(1);
         let mut w = world(&mut rig);
