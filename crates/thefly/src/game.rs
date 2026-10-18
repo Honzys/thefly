@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use thefly_platform::{Audio, Error, Input, Key, Renderer};
-use thefly_sim::event::{Event, SoundOp, SoundSlot};
+use thefly_sim::event::{Effect, Event, SoundOp, SoundSlot};
 use thefly_sim::input::{KeyState, Scancode};
 use thefly_sim::screen::{MatchScreen, Screen};
 use thefly_sim::shop::TARGET_OFFSET;
@@ -81,6 +81,24 @@ impl FlyGame {
     fn handle(&mut self, e: Event, audio: &mut Audio) {
         self.mixer.apply(&e, audio);
         match e {
+            Event::Effect(Effect::Spark {
+                x,
+                y,
+                frame,
+                vx,
+                vy,
+                life_ms,
+            }) => {
+                let x = x + draw::spark_shift(self.sim.state(), x) as i32;
+                self.fx.effect(Effect::Spark {
+                    x,
+                    y,
+                    frame,
+                    vx,
+                    vy,
+                    life_ms,
+                });
+            }
             Event::Effect(fx) => self.fx.effect(fx),
             Event::ScreenChanged => {
                 self.fx.clear();
