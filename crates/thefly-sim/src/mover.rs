@@ -56,8 +56,8 @@ fn fps_share(v: i32, rem: &mut i32) -> i32 {
 /// between steps; one that only needs the integrator calls [`Wander::integrate`]. Bounds belong
 /// to the caller: clamp the position and leave the velocity, there is no bounce.
 ///
-/// Not modelled, as no user sets them: the accel flags (+0xa8, +0xac; set, an axis never
-/// re-rolls) and true gravity (+0x130; v += accel instead of sign(v) × accel).
+/// [`Wander::with_gravity`] is true gravity (+0x130): v += accel instead of sign(v) × accel. Not
+/// modelled, as no user sets them: the accel flags (+0xa8, +0xac; set, an axis never re-rolls).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Wander {
     reroll_ms: i32,
@@ -68,6 +68,7 @@ pub struct Wander {
     timers: [Timer; 2],
     /// (vx, vy) in px/s.
     pub v: [i32; 2],
+    gravity: bool,
     fps: FpsRun,
 }
 
@@ -90,13 +91,21 @@ impl Wander {
         }
     }
 
+    pub fn with_gravity(self) -> Self {
+        Self {
+            gravity: true,
+            ..self
+        }
+    }
+
     /// One tick: re-roll the expired axes, accelerate, integrate; returns (dx, dy) in px.
     pub fn step(&mut self, cx: &mut Ctx) -> (i32, i32) {
         for a in 0..2 {
             if self.timers[a].expired(cx.now) {
                 self.reroll(a, cx);
             }
-            self.v[a] += self.v[a].signum() * self.accel[a];
+            let dir = if self.gravity { 1 } else { self.v[a].signum() };
+            self.v[a] += dir * self.accel[a];
         }
         self.integrate()
     }
@@ -152,5 +161,21 @@ mod tests {
             })
             .collect();
         assert_eq!(v, [[65, 65], [65, 65], [-65, -65], [-65, 65]]);
+    }
+
+    /// True gravity (+0x130) adds the accel whatever the sign of v. Seed 1, re-roll 0, spread 1,
+    /// caps 1, accel 5: d is x 7, 8, 7 and y 9, 5, 5, so both axes run +1 for two ticks (65 + 5)
+    /// and pass the cap on tick 2: −65 + 5 = −60, where sign(v) × accel would give −70.
+    #[test]
+    fn true_gravity_always_adds_the_accel() {
+        let mut rig = Rig::new(1);
+        let mut w = Wander::new(0, (1, 1), (1, 1), (5, 5)).with_gravity();
+        let v: Vec<[i32; 2]> = (0..3)
+            .map(|tick| {
+                w.step(&mut rig.at(tick));
+                w.v
+            })
+            .collect();
+        assert_eq!(v, [[70, 70], [70, 70], [-60, -60]]);
     }
 }

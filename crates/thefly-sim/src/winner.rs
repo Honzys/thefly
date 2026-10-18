@@ -6,6 +6,7 @@ use crate::ctx::Ctx;
 use crate::event::{Event, Music, PlayParams, SoundOp, SoundSlot};
 use crate::input::KeyState;
 use crate::match_state::MatchState;
+use crate::mover::Wander;
 use crate::screen::{FADE_END_MS, Fade, MatchFlow, MatchScreen};
 use crate::stats::StatsScreen;
 
@@ -36,6 +37,8 @@ pub struct Winner {
     pub wait: Timer,
     pub fly_counter: i32,
     pub farmer_counter: i32,
+    /// 50 when the fly won, 430 when the farmer won: it falls on the loser. Hops move it.
+    pub trophy_x: i32,
     pub trophy_y: f64,
     /// px/s; +90 every falling tick (`FUN_004172a8` with +0x130 = 1).
     pub trophy_vy: i32,
@@ -44,6 +47,8 @@ pub struct Winner {
     /// The rest between hops, or the hop itself while `hopping`.
     pub hop: Timer,
     pub hopping: bool,
+    /// The hop motion, on only while `hopping`.
+    pub mover: Wander,
 }
 
 /// `FUN_0044aedb` / `FUN_0044b431` (answers.md "Winner trophy").
@@ -65,6 +70,14 @@ const REST_MS: u64 = 1000;
 const REST_RAND: i32 = 5000;
 const LAND_VOLUME_CB: i32 = 2000;
 const HOP_LAND_VOLUME_CB: i32 = -550;
+/// Hop wander (answers.md "Winner trophy"): true gravity, bounds right = x + w + 2, top = y − 5,
+/// bottom 587; the left bound is never applied.
+const HOP_REROLL_MS: i32 = 100;
+const HOP_SPEED: (i32, i32) = (10, 50);
+const HOP_RUNS: (i32, i32) = (1, 2);
+const HOP_ACCEL: (i32, i32) = (5, 5);
+const HOP_RIGHT_SLACK: i32 = 2;
+const HOP_TOP_SLACK: f64 = 5.0;
 
 impl Winner {
     /// Applies [`crate::economy::Economy::top_up`] and decides the winner.
@@ -81,18 +94,15 @@ impl Winner {
             wait: Timer::UNARMED,
             fly_counter: 0,
             farmer_counter: 0,
+            trophy_x: home_x(fly_score >= farmer_score),
             trophy_y: TROPHY_START_Y,
             trophy_vy: 0,
             loser_crushed: false,
             keys_armed: Timer::UNARMED,
             hop: Timer::UNARMED,
             hopping: false,
+            mover: Wander::new(HOP_REROLL_MS, HOP_SPEED, HOP_RUNS, HOP_ACCEL).with_gravity(),
         }
-    }
-
-    /// x 50 when the fly won, 430 when the farmer won: it falls on the loser.
-    pub fn trophy_x(&self) -> i32 {
-        if self.fly_won { 50 } else { 430 }
     }
 
     /// Enter/Esc → stats.
@@ -173,22 +183,29 @@ impl Winner {
         self.stage = Stage::Hops;
     }
 
-    /// Rest, hop (three draws: length, parity, frequency), rest R(5000) + 1000, …
-    /// shortcut: the hop motion is the shared Wander mover (reroll 100, speeds 10/50, runs 1/2,
-    /// accel 5, bounds around the landing spot), which draws rand every hopping tick
-    /// (answers.md "Winner trophy"); not modelled until the wander mover lands, so the trophy
-    /// stays put and those draws are missing.
+    /// Rest, hop (three draws: length, parity, frequency), rest R(5000) + 1000, … The trophy
+    /// wanders while hopping.
+    // shortcut: the mover steps after the choreography in a tick, so a hop's first wander draws
+    // follow the cheer's; answers.md "Winner trophy" gives no order [I]. Revisit with a capture.
     fn hops(&mut self, keys: &KeyState, cx: &mut Ctx) {
         if self.keys_armed.expired(cx.now) && keys.skip() {
             self.stage = Stage::FadeOut;
             self.fade = Fade::new(true, FADE_END_MS);
             return;
         }
-        if !self.hop.expired(cx.now) {
-            return;
+        if self.hop.expired(cx.now) {
+            self.toggle_hop(cx);
         }
+        if self.hopping {
+            self.hop_step(cx);
+        }
+    }
+
+    fn toggle_hop(&mut self, cx: &mut Ctx) {
         self.hopping = !self.hopping;
         if !self.hopping {
+            self.mover.v = [0, 0];
+            self.trophy_y = f64::from(TROPHY_FLOOR - trophy_h(cx));
             let rest = REST_MS + cx_rand(cx, REST_RAND) as u64;
             self.hop.arm(cx.now, rest);
             cx.sound(SoundSlot::TROPHY, play_at(None, HOP_LAND_VOLUME_CB));
@@ -201,6 +218,21 @@ impl Winner {
         let freq = 20_500 + cx_rand(cx, 2000);
         cx.sound(SoundSlot(slot), play_at(Some(freq), 0));
     }
+
+    fn hop_step(&mut self, cx: &mut Ctx) {
+        let (dx, dy) = self.mover.step(cx);
+        self.trophy_x = (self.trophy_x + dx).min(home_x(self.fly_won) + HOP_RIGHT_SLACK);
+        let floor = f64::from(TROPHY_FLOOR - trophy_h(cx));
+        self.trophy_y = (self.trophy_y + f64::from(dy)).clamp(floor - HOP_TOP_SLACK, floor);
+    }
+}
+
+fn home_x(fly_won: bool) -> i32 {
+    if fly_won { 50 } else { 430 }
+}
+
+fn trophy_h(cx: &Ctx) -> i32 {
+    cx.data.sizes.get("winnercoupe").map_or(TROPHY_H, |s| s.h)
 }
 
 fn cx_rand(cx: &mut Ctx, n: i32) -> u32 {
@@ -221,6 +253,8 @@ mod tests {
     use crate::match_state::{MatchConfig, Players};
     use crate::rng::MsvcRand;
     use crate::screen::rig::Rig;
+
+    const TICK_CAP: usize = 1000;
 
     fn two_player(rig: &mut Rig) -> MatchState {
         let config = MatchConfig {
@@ -314,8 +348,8 @@ mod tests {
     }
 
     /// Seed 1 from the landing tick: rest R(1000) + 1000 = 1041; hop R(500) + 500 = 967, parity
-    /// 6334 even, R(2000) + 20500 = 21000 → slot 57 (fly won); then rest 19169 % 5000 + 1000 =
-    /// 5169 and slot 54 at −550.
+    /// 6334 even, R(2000) + 20500 = 21000 → slot 57 (fly won); then slot 54 at −550 when the hop
+    /// ends (the rest it draws follows the hop's wander draws).
     #[test]
     fn the_hops_draw_length_parity_and_frequency() {
         let mut rig = Rig::new(1);
@@ -325,7 +359,7 @@ mod tests {
         (w.stage, w.trophy_y) = (Stage::TrophyFall, 467.0);
         rig.rng = MsvcRand::new(1);
         let landed = rig.now();
-        let got = run(&mut rig, &mut w, &mut m, 200);
+        let got = run(&mut rig, &mut w, &mut m, 150);
         assert_eq!(got[0], (landed, 54, play_at(None, 2000)));
         assert_eq!(got[1], (landed, 51, SoundOp::Play(PlayParams::default())));
         let (hop_at, slot, op) = got[2];
@@ -341,6 +375,69 @@ mod tests {
             "{rest_at}"
         );
         assert_eq!(got.len(), 4);
-        assert_eq!(w.hop.remaining_ms(rest_at), 5169);
+    }
+
+    /// A Hops-stage winner (fly won, x 50) resting on the floor, rand at seed 1.
+    fn resting(rig: &mut Rig, m: &mut MatchState) -> Winner {
+        m.economy.fly.score = 30;
+        let mut w = rig.cx(|cx| Winner::new(m, cx));
+        (w.stage, w.trophy_y) = (Stage::Hops, 467.0);
+        rig.rng = MsvcRand::new(1);
+        w
+    }
+
+    /// answers.md "Winner trophy" and "Wander mover internals", seed 1: the hop draws 541 ms,
+    /// parity 18467 odd, 6334 % 2000 → slot 58 at 20834; then the mover x: timer 26500, d 9 (+1),
+    /// 15724 % 10 + 65 = 69, gravity + 5 = 74; y: timer 11478, d 8 (+1), 26962 % 50 + 65 = 77,
+    /// + 5 = 82. Both move 1 px: x 51 ≤ 50 + 2, y 468 clamped to the floor 467.
+    #[test]
+    fn a_hop_steps_the_trophy_through_the_wander_mover() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig);
+        let mut w = resting(&mut rig, &mut m);
+        let got = run(&mut rig, &mut w, &mut m, 1);
+        assert_eq!(got, [(0, 58, play_at(Some(20_834), 0))]);
+        assert!(w.hopping);
+        assert_eq!(w.hop.remaining_ms(0), 541);
+        assert_eq!(w.mover.v, [74, 82]);
+        assert_eq!((w.trophy_x, w.trophy_y), (51, 467.0));
+        assert_eq!(rig.rng.rand(), 24464);
+    }
+
+    /// Bounds: right = x + w + 2, top = y − 5, bottom 587; the left bound is never applied.
+    /// Each hop ends with v = 0 back on the floor.
+    #[test]
+    fn hops_stay_inside_the_bounds_and_end_on_the_floor() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig);
+        let mut w = resting(&mut rig, &mut m);
+        let mut moved = false;
+        for _ in 0..TICK_CAP {
+            let was_hopping = w.hopping;
+            run(&mut rig, &mut w, &mut m, 1);
+            assert!(w.trophy_x <= 52, "{}", w.trophy_x);
+            assert!((462.0..=467.0).contains(&w.trophy_y), "{}", w.trophy_y);
+            moved |= w.trophy_x != 50 || w.trophy_y != 467.0;
+            if was_hopping && !w.hopping {
+                assert_eq!((w.mover.v, w.trophy_y), ([0, 0], 467.0));
+            }
+        }
+        assert!(moved);
+    }
+
+    /// The hop's end, seed 1: v = 0, y = 587 − h, rest 41 % 5000 + 1000 = 1041, slot 54 at −550.
+    #[test]
+    fn a_hop_ends_at_rest_on_the_floor() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig);
+        let mut w = resting(&mut rig, &mut m);
+        (w.hopping, w.trophy_y, w.mover.v) = (true, 463.0, [-80, 30]);
+        w.hop.arm(0, 0);
+        rig.clock.advance();
+        let now = rig.now();
+        let got = run(&mut rig, &mut w, &mut m, 1);
+        assert_eq!(got, [(now, 54, play_at(None, -550))]);
+        assert_eq!((w.hopping, w.mover.v, w.trophy_y), (false, [0, 0], 467.0));
+        assert_eq!(w.hop.remaining_ms(now), 1041);
     }
 }
