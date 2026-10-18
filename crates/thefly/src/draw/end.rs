@@ -89,15 +89,21 @@ const ROW_DY: f32 = 23.0;
 const LABEL_W: f32 = 245.0;
 const VALUE_W: f32 = 260.0;
 
-/// One size for the whole block, so the rows stay level: the largest at which every label and
-/// value fits its column.
-fn rows(g: &mut Gfx, y0: f32, rows: &[(&str, String)]) -> Result<(), Error> {
-    let values: Vec<String> = rows.iter().map(|(_, v)| format!(": {v}")).collect();
+type Row = (&'static str, String);
+
+/// One size for every row of the page, so the blocks stay level: the largest at which every label
+/// and value fits its column.
+fn rows_size(g: &mut Gfx, blocks: &[&[Row]]) -> Result<u16, Error> {
     let mut size = 22;
-    for ((label, _), value) in rows.iter().zip(&values) {
+    for (label, value) in blocks.iter().flat_map(|b| b.iter()) {
         size = g.fit_size(ARIAL_BLACK, size, label, LABEL_W)?;
-        size = g.fit_size(ARIAL_BLACK, size, value, VALUE_W)?;
+        size = g.fit_size(ARIAL_BLACK, size, &format!(": {value}"), VALUE_W)?;
     }
+    Ok(size)
+}
+
+fn rows(g: &mut Gfx, y0: f32, size: u16, rows: &[Row]) -> Result<(), Error> {
+    let values: Vec<String> = rows.iter().map(|(_, v)| format!(": {v}")).collect();
     for (i, ((label, _), value)) in rows.iter().zip(&values).enumerate() {
         let y = y0 + ROW_DY * i as f32;
         g.text(ARIAL_BLACK, size, label, 280.0, y, WHITE)?;
@@ -136,35 +142,32 @@ pub fn stats(g: &mut Gfx, _v: &View, m: &MatchState, s: &StatsScreen) -> Result<
     // SR §5.2 cuts `tapette-8` to 134 × 187: the handle ends at y 527 (68-stats-2p)
     g.spr_part("tapette-8", 0, (0.0, 0.0, 134.0, 187.0), 100.0, 340.0)?;
     let p = &s.page;
-    rows(
-        g,
-        153.0,
-        &[
-            ("Objects saved", p.delivered.to_string()),
-            (
-                "Average objects saved",
-                format!("{:.0} %", p.delivered_percent),
-            ),
-            (
-                "Average price of saved obj",
-                format!("{:.0}", p.avg_price.trunc()),
-            ),
-            ("Maximum life time", format!("{:.0} s", p.max_survival_s)),
-            ("Average life time", format!("{:.0} s", p.avg_survival_s)),
-        ],
-    )?;
-    if m.config.players == Players::Two {
-        rows(
-            g,
-            363.0,
-            &[
-                ("Flies killed", p.kills.to_string()),
-                ("Average Flies killed", format!("{:.2}", p.kills_per_period)),
-                ("Fly swater Hits", p.swings.to_string()),
-                ("Average damage done", format!("{:.0}", p.avg_damage)),
-                ("Ratio", format!("{:.0} %", p.hit_ratio_percent)),
-            ],
-        )?;
+    let fly = [
+        ("Objects saved", p.delivered.to_string()),
+        (
+            "Average objects saved",
+            format!("{:.0} %", p.delivered_percent),
+        ),
+        (
+            "Average price of saved obj",
+            format!("{:.0}", p.avg_price.trunc()),
+        ),
+        ("Maximum life time", format!("{:.0} s", p.max_survival_s)),
+        ("Average life time", format!("{:.0} s", p.avg_survival_s)),
+    ];
+    let farmer = [
+        ("Flies killed", p.kills.to_string()),
+        ("Average Flies killed", format!("{:.2}", p.kills_per_period)),
+        ("Fly swater Hits", p.swings.to_string()),
+        ("Average damage done", format!("{:.0}", p.avg_damage)),
+        ("Ratio", format!("{:.0} %", p.hit_ratio_percent)),
+    ];
+    let two = m.config.players == Players::Two;
+    let blocks: &[&[Row]] = if two { &[&fly, &farmer] } else { &[&fly] };
+    let size = rows_size(g, blocks)?;
+    rows(g, 153.0, size, &fly)?;
+    if two {
+        rows(g, 363.0, size, &farmer)?;
     }
     if let Some(b) = &s.breakdown {
         frame_box(g, (185.0, 315.0, 450.0, 210.0), 4)?;
