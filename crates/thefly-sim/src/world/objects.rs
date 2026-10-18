@@ -193,6 +193,9 @@ impl Objects {
 
     /// Period start (§5.2): resets the per-type counts in `m`, places up to [`MAX_PLACED`]
     /// objects avoiding each other and the traps, then adds the fan stands.
+    ///
+    /// shortcut: extreme placement (`FUN_0042bdf8`) is undocumented beyond its type table; it
+    /// runs the §5.2 loop over the three extreme types with R(3). Revisit when it is read.
     pub fn place(m: &mut MatchState, meal: Meal, traps: &Traps, cx: &mut Ctx) -> Self {
         let types: &[ObjectType] = if m.config.extreme() {
             &EXTREME_TYPES
@@ -902,6 +905,7 @@ mod tests {
     use crate::event::{Event, SoundSlot};
     use crate::rng::MsvcRand;
     use crate::world::fly::Fly;
+    use crate::world::lift::LiftState;
 
     struct Bench {
         rng: MsvcRand,
@@ -1172,5 +1176,55 @@ mod tests {
         assert!(!fly.carrying);
         // d = |flyX − grip| + 10 = 150; vy += |flyY − (objY + 20)| / 2 = 110.
         assert_eq!((fly.vx, fly.vy), (150, 110));
+    }
+
+    fn two_player_world(b: &mut Bench) -> (MatchState, World) {
+        use crate::match_state::{MatchConfig, Players};
+        b.with(|cx| {
+            let config = MatchConfig {
+                players: Players::Two,
+                ..MatchConfig::default()
+            };
+            let mut m = MatchState::new(config, false, cx);
+            m.economy.start_period(&[true; 22]);
+            let w = World::bare(&m, cx);
+            (m, w)
+        })
+    }
+
+    /// Acceptance W1 9 (AR §7.5): the hoist that takes the lift off the top delivers the
+    /// object: sound 11, saved and delivered + 1, price total + trunc(price), and the period
+    /// ends with nothing left on the table.
+    #[test]
+    fn a_hoisted_object_is_delivered_and_an_empty_table_ends_the_period() {
+        let mut b = Bench::new(1);
+        let (mut m, mut w) = two_player_world(&mut b);
+        let mut o = b.object(1, 1000);
+        o.on_lift = true;
+        w.objects.list.push(o);
+        (w.fly.x, w.fly.y) = (100, 100);
+        let lift = &mut w.lift;
+        (lift.state, lift.hooked, lift.y) = (LiftState::Hoisting, Some(0), -lift.h + 2);
+        let price = m.economy.food_prices[1];
+        b.with(|cx| w.objects_step(&mut m, cx));
+        assert!(b.events.contains(&Event::play(SoundSlot::MONEY)));
+        assert_eq!(m.economy.saved[1], Some(1));
+        assert_eq!((m.stats.delivered, m.stats.price_total), (1, price as i32));
+        assert!(!w.objects.list[0].active && w.objects.all_delivered && w.period_over);
+    }
+
+    #[test]
+    fn the_period_goes_on_while_a_collectible_object_is_left() {
+        let mut b = Bench::new(1);
+        let (mut m, mut w) = two_player_world(&mut b);
+        let (mut o, other) = (b.object(1, 1000), b.object(2, 3000));
+        o.on_lift = true;
+        w.objects.list.extend([o, other]);
+        (w.fly.x, w.fly.y) = (100, 100);
+        let lift = &mut w.lift;
+        (lift.state, lift.hooked, lift.y) = (LiftState::Hoisting, Some(0), -lift.h + 2);
+        b.with(|cx| w.objects_step(&mut m, cx));
+        assert_eq!(m.stats.delivered, 1);
+        assert!(!w.objects.all_delivered && !w.period_over);
     }
 }
