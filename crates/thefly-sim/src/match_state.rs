@@ -542,7 +542,8 @@ mod tests {
         m.record_kill(4);
         assert_eq!((m.economy.kills, m.stats.kills), (2, 2));
         assert_eq!(m.economy.kill_log, [0, 1]);
-        m.economy.pay_farmer();
+        m.economy.pay_kill();
+        m.economy.pay_kill();
         m.record_kill(2);
         m.record_kill(-1);
         assert_eq!(m.economy.kill_log, [2, 1]);

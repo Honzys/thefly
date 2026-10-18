@@ -1,24 +1,21 @@
 //! W3. The goodies shop (0x1e) with payout, purchases and the side switch, and the farmer's traps
 //! shop (0x28) (ai-and-rules §7.2, §7.3, §4.2, §4.3; screens-and-rendering §3.1, §3.2;
 //! answers.md "Goodies shop: purchase and tally are motion-driven", "Goodies shop side order and
-//! exit", "Traps shop: carrying a trap").
-//! shortcut: the shaking machine runs [`crate::mover::Wander`] every shop tick, fades included
-//! (answers.md "Goodies shop: purchase and tally are motion-driven"), but its reroll, speeds, run
-//! caps and accel (presumably set in the shop init `FUN_0042123c`) are not documented: SR §3.1
-//! gives only the start (7, 143) and the box x 3..w + 11, y 139..h + 147. So the shop's RNG
-//! stream lacks those draws. Revisit once the parameters are decoded.
+//! exit", "Traps shop: carrying a trap", "Shop tally: target, food sizes and machine shake",
+//! "Shop tally: kill count drops one per cycle").
 
 use crate::bourse::Bourse;
 use crate::clock::{FPS, Timer};
 use crate::ctx::Ctx;
-use crate::economy::{ITEMS, Item, KILL_VALUE};
+use crate::economy::{Economy, ITEMS, Item, KILL_VALUE};
 use crate::event::{Event, Music, SoundSlot};
 use crate::input::{KeyState, Scancode};
 use crate::match_state::{MatchState, PlaceError, Players};
-use crate::mover::FpsRun;
+use crate::mover::{FpsRun, Wander};
 use crate::screen::{FADE_MS, Fade, Flow, MatchFlow, MatchScreen};
 use crate::shop_ai::{GoodiesShopAi, Press, TrapAction, TrapsShopAi};
 use crate::world::lift::{ANCHOR_GAP, draw_anchors};
+use crate::world::objects::{EXTREME_TYPES, NORMAL_TYPES, ObjectType};
 use crate::world::traps::TrapKind;
 
 /// Item buttons 0..=4, then "done".
@@ -53,13 +50,89 @@ const FALL_SOUND_VY: i32 = 80;
 /// A food sprite stops when its centre passes x 588 and shows "x N" for 2000 ms.
 const LABEL_X: i32 = 588;
 pub const LABEL_MS: u64 = 2000;
-/// shortcut: the target sprite the tally falls onto is not named in the docs; its y is taken as
-/// the money panel's (470). Revisit when `FUN_0042322f`'s target is identified.
-pub const TALLY_TARGET_Y: i32 = 470;
-/// `g_flymort` frames are 100×75; also used for the food sprites. shortcut: the food sprites'
-/// own sizes are not in the sim data; revisit if the fly tally's timing must match exactly.
-const TALLY_SPRITE: (i32, i32) = (100, 75);
+/// `g_flymort` frames are 100×75.
+pub const DEAD_FLY_SIZE: (i32, i32) = (100, 75);
 const DEAD_FLY_FRAMES: i32 = 3;
+/// A food image is scaled uniformly to fit 200 × 150: by 150 / h when h > 150, overridden by
+/// 200 / w when w > 200 and w > h.
+const FOOD_FIT: (i32, i32) = (200, 150);
+
+/// `g_Machine` rests at (7, 143); `g_Machine_cache`, the target the tally falls onto, sits at
+/// machine + (46, 156). Each landing shakes the machine for 4000 ms under the wander rule
+/// (reroll 20 ms, speeds 140 / 150, runs 2 / 4, accel 5) inside x 3..=11, y 139..=147.
+pub const MACHINE_REST: (i32, i32) = (7, 143);
+pub const TARGET_OFFSET: (i32, i32) = (46, 156);
+pub const SHAKE_MS: u64 = 4000;
+const SHAKE_X: (i32, i32) = (3, 11);
+const SHAKE_Y: (i32, i32) = (139, 147);
+const SHAKE_REROLL_MS: i32 = 20;
+const SHAKE_SPEED: (i32, i32) = (140, 150);
+const SHAKE_RUNS: (i32, i32) = (2, 4);
+const SHAKE_ACCEL: (i32, i32) = (5, 5);
+
+/// The shaking machine (+0xac8); its wander is on only while `shake` runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Machine {
+    pub x: i32,
+    pub y: i32,
+    /// Armed by each landing (+0x24a0); the dust effect (+0xca0) starts with it.
+    pub shake: Timer,
+    wander: Wander,
+}
+
+impl Default for Machine {
+    fn default() -> Self {
+        Self {
+            x: MACHINE_REST.0,
+            y: MACHINE_REST.1,
+            shake: Timer::UNARMED,
+            wander: Wander::new(SHAKE_REROLL_MS, SHAKE_SPEED, SHAKE_RUNS, SHAKE_ACCEL),
+        }
+    }
+}
+
+impl Machine {
+    /// The target's top y: 299 at rest, 295..=303 while shaking.
+    pub fn target_y(&self) -> i32 {
+        self.y + TARGET_OFFSET.1
+    }
+
+    /// A tally landing (re-)arms the 4000 ms shake.
+    fn land(&mut self, now: u64) {
+        self.shake.arm(now, SHAKE_MS);
+    }
+
+    /// Wanders (drawing rand) only while the shake runs; at its end, back to rest with v 0.
+    fn step(&mut self, cx: &mut Ctx) {
+        if !self.shake.is_armed() {
+            return;
+        }
+        if self.shake.expired(cx.now) {
+            self.shake.disarm();
+            (self.x, self.y) = MACHINE_REST;
+            self.wander.v = [0, 0];
+            return;
+        }
+        let (dx, dy) = self.wander.step(cx);
+        self.x = (self.x + dx).clamp(SHAKE_X.0, SHAKE_X.1);
+        self.y = (self.y + dy).clamp(SHAKE_Y.0, SHAKE_Y.1);
+    }
+}
+
+/// The tally size of a food image of `w` × `h`: s is a float32, each side trunc(side × s) with
+/// the product in extended precision.
+pub fn tally_size(w: i32, h: i32) -> (i32, i32) {
+    let (fit_w, fit_h) = FOOD_FIT;
+    let mut s = 1.0_f32;
+    if h > fit_h {
+        s = fit_h as f32 / h as f32;
+    }
+    if w > fit_w && w > h {
+        s = fit_w as f32 / w as f32;
+    }
+    let side = |n: i32| (f64::from(n) * f64::from(s)).trunc() as i32;
+    (side(w), side(h))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShopSide {
@@ -101,6 +174,17 @@ pub struct TallyItem {
     pub label: usize,
     /// The saved count shown as "x N" (fly); 1 per kill.
     pub count: i32,
+    /// The sprite's drawn size: [`DEAD_FLY_SIZE`], or the food image fitted by [`tally_size`].
+    pub size: (i32, i32),
+}
+
+/// What one tally tick did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TallyStep {
+    /// A sprite landed and was paid.
+    pub landed: bool,
+    /// Nothing is left to pay.
+    pub done: bool,
 }
 
 /// The payout tally: one sprite per kill or saved type, paying when it lands; Enter skips.
@@ -112,7 +196,7 @@ pub struct Tally {
     pub sprite: Mover,
     /// The "x N" pause (fly), armed when the sprite stops.
     pub label: Timer,
-    /// The money shown: the payout is credited at once, this counts up to it.
+    /// The money shown; each landing credits the economy and this alike.
     pub shown: i32,
 }
 
@@ -139,20 +223,25 @@ impl Tally {
         } else {
             FOOD_VX
         };
-        self.sprite = Mover::at(TALLY_START_X, TALLY_BOTTOM - TALLY_SPRITE.1, vx);
+        self.sprite = Mover::at(TALLY_START_X, TALLY_BOTTOM - item.size.1, vx);
         self.label = Timer::UNARMED;
     }
 
-    /// True when the tally has finished.
-    fn tick(&mut self, skip: bool, cx: &mut Ctx) -> bool {
+    /// `FUN_0042322f`: the sprite lands on the first tick its top y ≥ `target_y` once it is past
+    /// x 372, and pays that cycle (a kill also drops the kill count by one). Skip pays the rest.
+    fn tick(&mut self, skip: bool, target_y: i32, e: &mut Economy, cx: &mut Ctx) -> TallyStep {
         if skip {
-            self.shown += self.pending.iter().map(|i| i.value).sum::<i32>();
-            self.pending.clear();
+            while !self.pending.is_empty() {
+                self.pay(e);
+            }
         }
         let Some(&item) = self.pending.first() else {
-            return true;
+            return TallyStep {
+                landed: false,
+                done: true,
+            };
         };
-        let w = TALLY_SPRITE.0;
+        let w = item.size.0;
         let s = &mut self.sprite;
         s.step();
         if self.side == ShopSide::Fly && !self.label.is_armed() && s.x + w / 2 < LABEL_X {
@@ -163,19 +252,36 @@ impl Tally {
         if s.vx == 0 && self.label.expired(cx.now) {
             s.vx = FOOD_VX;
         }
-        if s.x + w < FALL_X {
-            s.vy += FALL_ACCEL;
-            if s.vy < FALL_SOUND_VY {
-                cx.emit(Event::play(SoundSlot::SHOP_MACHINE));
-            }
+        let moving = TallyStep {
+            landed: false,
+            done: false,
+        };
+        if s.x + w >= FALL_X {
+            return moving;
         }
-        if s.y < TALLY_TARGET_Y {
-            return false;
+        s.vy += FALL_ACCEL;
+        if s.vy < FALL_SOUND_VY {
+            cx.emit(Event::play(SoundSlot::SHOP_MACHINE));
         }
-        self.shown += item.value;
-        self.pending.remove(0);
+        if s.y < target_y {
+            return moving;
+        }
+        self.pay(e);
         self.start(cx);
-        self.pending.is_empty()
+        TallyStep {
+            landed: true,
+            done: self.pending.is_empty(),
+        }
+    }
+
+    /// Credits the first pending item.
+    fn pay(&mut self, e: &mut Economy) {
+        let item = self.pending.remove(0);
+        self.shown += item.value;
+        match self.side {
+            ShopSide::Farmer => e.pay_kill(),
+            ShopSide::Fly => e.pay_saved(item.value),
+        }
     }
 }
 
@@ -201,26 +307,36 @@ pub struct GoodiesShop {
     pub ai: Option<GoodiesShopAi>,
     pub fade: Fade,
     pub leaving: bool,
+    pub machine: Machine,
 }
 
 impl GoodiesShop {
     /// Opens on the fly side with the fly's payout tally.
     pub fn new(m: &mut MatchState, cx: &mut Ctx) -> Self {
         cx.emit(Event::Music(Music::Goodies));
+        let types: &[ObjectType] = if m.config.extreme() {
+            &EXTREME_TYPES
+        } else {
+            &NORMAL_TYPES
+        };
         let e = &mut m.economy;
         let before = e.fly.money;
         let saved: Vec<(usize, i32)> = (0..e.saved.len())
             .filter_map(|t| e.saved[t].filter(|&n| n > 0).map(|n| (t, n)))
             .collect();
-        // pay_fly returns the non-zero lines in type order: one per type with a saved count.
+        // fly_payout returns the non-zero lines in type order: one per type with a saved count.
         let items: Vec<TallyItem> = e
-            .pay_fly(cx)
+            .fly_payout(cx)
             .into_iter()
             .zip(saved)
             .map(|(value, (label, count))| TallyItem {
                 value,
                 label,
                 count,
+                size: types.get(label).map_or(DEAD_FLY_SIZE, |t| {
+                    let image = cx.data.size(t.name);
+                    tally_size(image.w, image.h)
+                }),
             })
             .collect();
         let tally = (!items.is_empty()).then(|| Tally::new(ShopSide::Fly, items, before, cx));
@@ -233,12 +349,20 @@ impl GoodiesShop {
             ai: None,
             fade: Fade::new(false, FADE_MS),
             leaving: false,
+            machine: Machine::default(),
         }
     }
 
     /// Fly done → farmer; farmer done → traps shop, or the bourse without tokens; Esc → quit
-    /// dialog (game-spec §2.2).
+    /// dialog (game-spec §2.2). The machine steps after the tally, so the tally compares against
+    /// the previous tick's target.
     pub fn tick(&mut self, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
+        let flow = self.update(keys, m, cx);
+        self.machine.step(cx);
+        flow
+    }
+
+    fn update(&mut self, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
         let faded = self.fade.step();
         if self.leaving {
             if !faded {
@@ -254,7 +378,12 @@ impl GoodiesShop {
             return MatchFlow::Leave(Flow::Quit);
         }
         if let Some(t) = &mut self.tally {
-            if t.tick(keys.pressed(Scancode::RETURN), cx) {
+            let target_y = self.machine.target_y();
+            let step = t.tick(keys.pressed(Scancode::RETURN), target_y, &mut m.economy, cx);
+            if step.landed {
+                self.machine.land(cx.now);
+            }
+            if step.done {
                 self.tally = None;
                 if let Some(ai) = self.ai.as_mut() {
                     ai.unpause(cx.now);
@@ -347,14 +476,16 @@ impl GoodiesShop {
         // AR §3.1 step 1: the plan counts the payout before it is paid.
         self.ai = (m.config.players == Players::One)
             .then(|| GoodiesShopAi::new(m.config.ai_level, m, cx));
-        let e = &mut m.economy;
+        // Each landing pays one kill and lowers the count (answers.md "Shop tally: kill count
+        // drops one per cycle").
+        let e = &m.economy;
         let kills = e.kills;
         let before = e.farmer.money;
-        e.pay_farmer();
         let kill = TallyItem {
             value: KILL_VALUE,
             label: 0,
             count: 1,
+            size: DEAD_FLY_SIZE,
         };
         let items = vec![kill; usize::try_from(kills).unwrap_or(0)];
         self.tally = (kills > 0).then(|| Tally::new(ShopSide::Farmer, items, before, cx));
@@ -522,6 +653,7 @@ fn carry_clamp(x: i32, w: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::economy::Setup;
     use crate::match_state::MatchConfig;
     use crate::rng::MsvcRand;
     use crate::screen::rig::Rig;
@@ -632,33 +764,43 @@ mod tests {
         assert!(shop.conveyor.is_none());
     }
 
-    /// Seed 1: the dead-fly frames are 41 % 3 + 1 = 3, then 18467 % 3 + 1 = 3. At −500 px/s the
-    /// sprite covers 500 px in 65 ticks (x 305), then 7, 8, 8, 7, 8 → x 267 on tick 70, past
-    /// 372 − 100: it falls (sound 10 once, at vy 50). From y 164 the drop on fall tick k is
-    /// trunc(50k / 65): Σ 64 after 13, 258 after 26, 299 after 28 and 321 after 29, past the 306
-    /// to y 470, so it pays on tick 99.
-    #[test]
-    fn a_dead_fly_pays_42_when_it_lands() {
-        let mut rig = Rig::new(1);
-        let kill = TallyItem {
+    fn kill() -> TallyItem {
+        TallyItem {
             value: KILL_VALUE,
             label: 0,
             count: 1,
-        };
-        let mut t = rig.cx(|cx| Tally::new(ShopSide::Farmer, vec![kill; 2], 0, cx));
+            size: DEAD_FLY_SIZE,
+        }
+    }
+
+    /// Seed 1: the dead-fly frames are 41 % 3 + 1 = 3, then 18467 % 3 + 1 = 3. At −500 px/s the
+    /// sprite covers 500 px in 65 ticks (x 305), then 7, 8, 8, 7, 8 → x 267 on tick 70, past
+    /// 372 − 100: it falls (sound 10 once, at vy 50). From y 164 the drop on fall tick k is
+    /// trunc(50k / 65): Σ 64 after 13, 123 after 18 (y 287) and 137 after 19 (y 301 ≥ the
+    /// target's 299), so it lands on tick 89 and pays one kill.
+    #[test]
+    fn a_dead_fly_pays_42_when_it_lands_on_the_target() {
+        let mut rig = Rig::new(1);
+        let mut e = Economy::new(Setup::Normal, false);
+        e.kills = 2;
+        let mut t = rig.cx(|cx| Tally::new(ShopSide::Farmer, vec![kill(); 2], 0, cx));
         assert_eq!(t.pending[0].label, 3);
-        for tick in 1..=99 {
+        let target = Machine::default().target_y();
+        assert_eq!(target, 299);
+        for tick in 1..=89 {
             let before = rig.events.len();
-            let done = rig.step(&[], |_, cx| t.tick(false, cx));
+            let step = rig.step(&[], |_, cx| t.tick(false, target, &mut e, cx));
             let rang = rig.events[before..].contains(&Event::play(SoundSlot::SHOP_MACHINE));
             assert_eq!(rang, tick == 70, "tick {tick}");
-            assert!(!done);
+            assert_eq!(step.landed, tick == 89, "tick {tick}");
+            assert!(!step.done);
             if tick == 70 {
                 assert_eq!((t.sprite.x, t.sprite.y, t.sprite.vy), (267, 164, 50));
             }
-            assert_eq!(t.shown, if tick < 99 { 0 } else { 42 }, "tick {tick}");
+            let paid = if tick < 89 { 0 } else { 42 };
+            assert_eq!((t.shown, e.farmer.money), (paid, paid), "tick {tick}");
         }
-        assert_eq!((t.pending.len(), t.pending[0].label), (1, 3));
+        assert_eq!((t.pending.len(), t.pending[0].label, e.kills), (1, 3, 1));
         assert_eq!(t.sprite, Mover::at(805, 164, -500));
         let mut probe = MsvcRand::new(1);
         probe.rand();
@@ -666,18 +808,35 @@ mod tests {
         assert_eq!(rig.rng, probe);
     }
 
+    /// The landing test runs only once x + w < 372: a sprite already below the target but still
+    /// right of that line does not land.
+    #[test]
+    fn the_landing_waits_for_the_fall_line() {
+        let mut rig = Rig::new(1);
+        let mut e = Economy::new(Setup::Normal, false);
+        let mut t = rig.cx(|cx| Tally::new(ShopSide::Farmer, vec![kill()], 0, cx));
+        t.sprite.y = 400;
+        let step = rig.step(&[], |_, cx| t.tick(false, 299, &mut e, cx));
+        assert!(!step.landed);
+        t.sprite.x = 200;
+        let step = rig.step(&[], |_, cx| t.tick(false, 299, &mut e, cx));
+        assert_eq!((step.landed, step.done), (true, true));
+    }
+
     /// A food sprite stops when its centre passes x 588 and shows "x N" for 2000 ms.
     #[test]
     fn a_food_sprite_stops_for_its_label() {
         let mut rig = Rig::new(1);
+        let mut e = Economy::new(Setup::Normal, false);
         let food = TallyItem {
             value: 90,
             label: 4,
             count: 3,
+            size: (100, 75),
         };
         let mut t = rig.cx(|cx| Tally::new(ShopSide::Fly, vec![food], 0, cx));
         for _ in 0..200 {
-            rig.step(&[], |_, cx| t.tick(false, cx));
+            rig.step(&[], |_, cx| t.tick(false, 299, &mut e, cx));
             if t.label.is_armed() {
                 break;
             }
@@ -685,15 +844,111 @@ mod tests {
         let stop = (t.sprite.x, rig.now());
         assert!(stop.0 + 50 < 588 && stop.0 + 50 >= 588 - 4, "{stop:?}");
         while rig.now() < stop.1 + LABEL_MS - 20 {
-            rig.step(&[], |_, cx| t.tick(false, cx));
+            rig.step(&[], |_, cx| t.tick(false, 299, &mut e, cx));
         }
         assert_eq!(t.sprite.x, stop.0);
         for _ in 0..300 {
-            if rig.step(&[], |_, cx| t.tick(false, cx)) {
+            if rig.step(&[], |_, cx| t.tick(false, 299, &mut e, cx)).done {
                 break;
             }
         }
-        assert_eq!(t.shown, 90);
+        assert_eq!((t.shown, e.fly.money, e.fly.score), (90, 90, 90));
+    }
+
+    /// answers.md "Shop tally: target, food sizes and machine shake": the table rows, scaled to
+    /// fit 200 × 150 with a float32 scale.
+    #[test]
+    fn food_sprites_are_scaled_to_fit_200_by_150() {
+        let rows = [
+            ((152, 217), (105, 150)),
+            ((220, 135), (200, 122)),
+            ((148, 107), (148, 107)),
+            ((160, 48), (160, 48)),
+            ((160, 49), (160, 49)),
+            ((180, 43), (180, 43)),
+            ((340, 157), (200, 92)),
+            ((140, 60), (140, 60)),
+            ((107, 53), (107, 53)),
+            ((140, 160), (131, 150)),
+            ((209, 300), (104, 150)),
+            ((160, 132), (160, 132)),
+            ((201, 182), (199, 181)),
+            ((100, 50), (100, 50)),
+            ((468, 270), (200, 115)),
+            ((240, 76), (199, 63)),
+            ((280, 109), (200, 77)),
+            ((118, 171), (103, 149)),
+            ((180, 165), (163, 150)),
+            ((164, 154), (159, 149)),
+            ((134, 61), (134, 61)),
+            ((430, 130), (200, 60)),
+        ];
+        for ((w, h), want) in rows {
+            assert_eq!(tally_size(w, h), want, "{w}×{h}");
+        }
+    }
+
+    /// Seed 1, from rest: x timer 41 % 20, d 18467 % 10 = 7 (+1), 6334 % 140 + 65 = 99; y timer
+    /// 26500 % 20, d 9 (+1), 15724 % 150 + 65 = 189; accel 5 → (104, 194), 1 and 2 px: (8, 145).
+    /// Unshaken, the machine draws nothing; past 4000 ms it snaps back to (7, 143) with v 0.
+    #[test]
+    fn the_machine_shakes_only_for_4000_ms_after_a_landing() {
+        let mut rig = Rig::new(1);
+        let mut machine = Machine::default();
+        rig.cx(|cx| machine.step(cx));
+        assert_eq!(
+            (machine.x, machine.y, rig.rng.clone()),
+            (7, 143, MsvcRand::new(1))
+        );
+        let now = rig.now();
+        machine.land(now);
+        rig.cx(|cx| machine.step(cx));
+        assert_eq!(
+            (machine.x, machine.y, machine.wander.v),
+            (8, 145, [104, 194])
+        );
+        assert_eq!(machine.target_y(), 301);
+        let mut probe = MsvcRand::new(1);
+        (0..6).for_each(|_| {
+            probe.rand();
+        });
+        assert_eq!(rig.rng, probe);
+        for _ in 0..1000 {
+            rig.step(&[], |_, cx| machine.step(cx));
+            assert!((3..=11).contains(&machine.x) && (295..=303).contains(&machine.target_y()));
+            if !machine.shake.is_armed() {
+                break;
+            }
+        }
+        assert!(rig.now() > now + SHAKE_MS);
+        assert_eq!((machine.x, machine.y, machine.wander.v), (7, 143, [0, 0]));
+        let still = rig.rng.clone();
+        rig.step(&[], |_, cx| machine.step(cx));
+        assert_eq!(rig.rng, still);
+    }
+
+    /// answers.md "Shop tally: kill count drops one per cycle": through the shop, each landing
+    /// pays 42 and lowers the kill count by one, and shakes the machine.
+    #[test]
+    fn the_kill_tally_pays_and_counts_down_per_cycle() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig, 0, 3);
+        let mut shop = rig.cx(|cx| GoodiesShop::new(&mut m, cx));
+        to_farmer_side(&mut rig, &mut shop, &mut m);
+        assert_eq!((m.economy.kills, m.economy.farmer.money), (3, 0));
+        let mut seen = Vec::new();
+        for _ in 0..1000 {
+            step(&mut rig, &mut shop, &mut m, &[]);
+            let e = &m.economy;
+            if seen.last() != Some(&(e.kills, e.farmer.money)) {
+                seen.push((e.kills, e.farmer.money));
+                assert!(e.kills == 3 || shop.machine.shake.is_armed());
+            }
+            if shop.tally.is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen, [(3, 0), (2, 42), (1, 84), (0, 126)]);
     }
 
     /// AR §7.3: 3 kills pay 126 whether the tally runs or Enter skips it.

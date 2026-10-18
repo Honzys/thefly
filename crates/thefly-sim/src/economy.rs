@@ -269,10 +269,10 @@ impl Economy {
         self.saved = present.iter().map(|&p| p.then_some(0)).collect();
     }
 
-    /// The fly's payout (ai-and-rules §7.3): fluctuates every present type in order and pays
-    /// the old price × saved. Returns the non-zero lines in type order, for the animated
-    /// tally; their sum is already credited to money and score.
-    pub fn pay_fly(&mut self, cx: &mut Ctx) -> Vec<i32> {
+    /// The fly's payout lines (ai-and-rules §7.3): fluctuates every present type in order and
+    /// returns the old price × saved, the non-zero lines in type order. The tally credits each
+    /// line when its sprite lands ([`Economy::pay_saved`]).
+    pub fn fly_payout(&mut self, cx: &mut Ctx) -> Vec<i32> {
         let mut lines = Vec::new();
         for (price, saved) in self.food_prices.iter_mut().zip(&self.saved) {
             let Some(n) = *saved else { continue };
@@ -281,19 +281,21 @@ impl Economy {
                 lines.push(value);
             }
         }
-        let total: i32 = lines.iter().sum();
-        self.fly.money += total;
-        self.fly.score += total;
         lines
     }
 
-    /// The farmer's payout: 42 × kills, then kills = 0. The kill-type list is not cleared.
-    pub fn pay_farmer(&mut self) -> i32 {
-        let total = KILL_VALUE * self.kills;
-        self.farmer.money += total;
-        self.farmer.score += total;
-        self.kills = 0;
-        total
+    /// One fly tally landing: `value` to money and score.
+    pub fn pay_saved(&mut self, value: i32) {
+        self.fly.money += value;
+        self.fly.score += value;
+    }
+
+    /// One farmer tally cycle (`FUN_0042322f` state 3): 42 to money and score, and the kill
+    /// count drops by one, clamped at 0. The kill-type list is not cleared.
+    pub fn pay_kill(&mut self) {
+        self.farmer.money += KILL_VALUE;
+        self.farmer.score += KILL_VALUE;
+        self.kills = (self.kills - 1).max(0);
     }
 
     /// Σ price × saved over saved > 0, accumulated as total = trunc(total + price·saved)
@@ -408,12 +410,14 @@ mod tests {
         e.start_period(&[true, true, false]);
         e.saved[0] = Some(2);
         let lines = with_cx(1, |cx| {
-            let lines = e.pay_fly(cx);
+            let lines = e.fly_payout(cx);
             // Type 0 draws 41, 18467; type 1 draws 6334, 26500; type 2 is absent.
             assert_eq!(cx.rng.rand(), 19169);
             lines
         });
         assert_eq!(lines, [160]);
+        assert_eq!((e.fly.money, e.fly.score), (0, 0));
+        e.pay_saved(160);
         assert_eq!((e.fly.money, e.fly.score), (160, 160));
         // Type 1: 6334 % 10 = 4 → −1, 26500 % 30 = 10 → 50 − 0.1 × 50.
         assert_eq!(e.food_prices[1], 50.0_f32 - (10.0_f32 / 100.0) * 50.0_f32);
@@ -421,12 +425,17 @@ mod tests {
     }
 
     #[test]
-    fn the_farmer_payout_is_42_per_kill_and_keeps_the_type_list() {
+    fn each_kill_cycle_pays_42_and_drops_the_count_by_one() {
         let mut e = Economy::new(Setup::Normal, false);
         e.kills = 3;
         e.kill_log = vec![3, 2, 1];
-        assert_eq!(e.pay_farmer(), 126);
+        e.pay_kill();
+        assert_eq!((e.farmer.money, e.farmer.score, e.kills), (42, 42, 2));
+        e.pay_kill();
+        e.pay_kill();
         assert_eq!((e.farmer.money, e.farmer.score, e.kills), (126, 126, 0));
+        e.pay_kill();
+        assert_eq!((e.farmer.money, e.kills), (168, 0));
         assert_eq!(e.kill_log, [3, 2, 1]);
     }
 
