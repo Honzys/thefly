@@ -1,7 +1,7 @@
 name: ci
 on:
   push:
-    branches: [master, "phase*"]
+    branches: ["**"]
   pull_request:
 jobs:
   rust:
