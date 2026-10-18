@@ -109,8 +109,8 @@ pub struct Midge {
     /// Layer x, wrapped into [0, 4000); the motion and the camera delta move it.
     pub layer_x: i32,
     pub y: i32,
-    /// The animation frame period, R(5) + 30 ms (named `size` for the frontend).
-    pub size: i32,
+    /// The animation frame period, R(5) + 30 ms.
+    pub frame_ms: i32,
     /// The facing frame set: +0x186 (left) when the jitter leaves vx < 0, else +0x184.
     pub facing_left: bool,
     /// The velocity is `mover.v`.
@@ -177,7 +177,7 @@ impl Midge {
     fn spawn(cx: &mut Ctx) -> Self {
         let x = cx.rng.r(W - SPAWN_X_MARGIN) + SPAWN_X_BASE;
         let vx = sign_roll(cx) * (cx.rng.r(SPAWN_VX_RAND) + SPAWN_VX_BASE);
-        let size = cx.rng.r(FRAME_MS_RAND) + FRAME_MS_BASE;
+        let frame_ms = cx.rng.r(FRAME_MS_RAND) + FRAME_MS_BASE;
         let y = cx.rng.r(SPAWN_Y_RAND);
         let timer = midge_timer(SPAWN_TIMER_BASE, cx);
         let tol_y = cx.rng.r(TOLERANCE_RAND);
@@ -197,7 +197,7 @@ impl Midge {
             x,
             layer_x: x,
             y,
-            size,
+            frame_ms,
             mover,
             v0: vx,
             home_dx,
@@ -212,7 +212,7 @@ impl Midge {
     /// One ambient midge of the constructor: frame period, y and timer after the caller's x and
     /// vx. x is a screen x, set through the screen-x setter (answers.md "Midge wrap, ...").
     fn ambient(x: i32, vx: i32, cx: &mut Ctx) -> Self {
-        let size = cx.rng.r(FRAME_MS_RAND) + FRAME_MS_BASE;
+        let frame_ms = cx.rng.r(FRAME_MS_RAND) + FRAME_MS_BASE;
         let y = cx.rng.r(SPAWN_Y_RAND);
         let timer = midge_timer(AMBIENT_TIMER_BASE, cx);
         let mut mover = Wander::new(
@@ -227,7 +227,7 @@ impl Midge {
             x,
             layer_x: layer_of(x, AMBIENT_LAYER),
             y,
-            size,
+            frame_ms,
             mover,
             v0: vx,
             timer,
@@ -570,7 +570,7 @@ mod tests {
         let (m, n) = (s.slots[0], s.slots[1]);
         assert!(s.on);
         assert_eq!(
-            (m.x, m.layer_x, m.y, m.mover.v[0], m.size),
+            (m.x, m.layer_x, m.y, m.mover.v[0], m.frame_ms),
             (841, 841, 569, 334, 30)
         );
         assert_eq!((m.home_dx, m.home_dy, m.tol_x, m.tol_y), (29, 58, 18, 18));
@@ -582,7 +582,7 @@ mod tests {
             (3, 334)
         );
         assert!(!m.timer.expired(724) && m.timer.expired(725));
-        assert_eq!((n.x, n.y, n.mover.v[0], n.size), (3315, 361, 281, 32));
+        assert_eq!((n.x, n.y, n.mover.v[0], n.frame_ms), (3315, 361, 281, 32));
         assert_eq!((n.home_dx, n.home_dy, n.tol_x, n.tol_y), (6, 107, 2, 25));
         let active = |s: &Swarm| s.slots.iter().filter(|m| m.active).count();
         assert_eq!((active(&s), s.total), (100, 100));
@@ -759,11 +759,17 @@ mod tests {
         let a = AmbientMidges::spawn(&mut rig.cx(0));
         let (m0, m1) = (a.slots[0], a.slots[1]);
         assert_eq!(a.slots.len(), 10);
-        assert_eq!((m0.x, m0.y, m0.size, m0.mover.v), (900, 467, 31, [60, 0]));
+        assert_eq!(
+            (m0.x, m0.y, m0.frame_ms, m0.mover.v),
+            (900, 467, 31, [60, 0])
+        );
         // Screen x as set; layer x trunc(900 / 1.25) = 720 and trunc(3169 / 1.25) = 2535.
         assert_eq!((m0.layer_x, a.slots[1].layer_x), (720, 2535));
         assert!(!m0.timer.expired(1134) && m0.timer.expired(1135));
-        assert_eq!((m1.x, m1.y, m1.size, m1.mover.v), (3169, 562, 33, [-63, 0]));
+        assert_eq!(
+            (m1.x, m1.y, m1.frame_ms, m1.mover.v),
+            (3169, 562, 33, [-63, 0])
+        );
         assert!(!m1.timer.expired(1264) && m1.timer.expired(1265));
         assert!(a.slots.iter().all(|m| m.active && m.mover.v[0] != 0));
         assert_eq!(rig.rng.rand(), 27529);
