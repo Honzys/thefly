@@ -9,6 +9,7 @@ use thefly_platform::{Audio, Error, Input, Key, Renderer};
 use thefly_sim::event::{Event, SoundOp, SoundSlot};
 use thefly_sim::input::{KeyState, Scancode};
 use thefly_sim::screen::{MatchScreen, Screen};
+use thefly_sim::shop::TARGET_OFFSET;
 use thefly_sim::sim::{Sim, State};
 use thefly_sim::winner::Stage;
 
@@ -114,6 +115,12 @@ impl FlyGame {
             }
             _ => {}
         }
+        if let Some((x, y)) = tally_landed(cur, before) {
+            // SR §3.1: 20 `DUST` puffs at the machine outlet. shortcut: the puff area is not in
+            // the docs; it spans the hopper's mouth. Revisit when `FUN_0042322f` is read.
+            self.fx
+                .dust_burst(x as f32, y as f32 - 30.0, 120, 40, 20, 200.0);
+        }
         if let Some(fly_won) = trophy_landed(cur, before) {
             // SR §5.1 state 2: 30 puffs at (trophyX − 20, 310) over 480 × 100
             let tx = if fly_won { 50.0 } else { 430.0 };
@@ -214,6 +221,20 @@ impl FlyGame {
 const SHOT_SIZE: (u32, u32) = (800, 600);
 /// Sim ticks per frame while `--warp` fast-forwards a scripted run.
 const WARP_TICKS: u32 = 64;
+
+/// A tally landing re-arms the machine shake (answers.md "Shop machine shake"): the outlet.
+fn tally_landed(cur: &State, before: &State) -> Option<(i32, i32)> {
+    let machine = |s: &State| match &s.screen {
+        Screen::Match(m) => match &m.screen {
+            MatchScreen::GoodiesShop(g) => Some(g.machine),
+            _ => None,
+        },
+        _ => None,
+    };
+    let m = machine(cur)?;
+    let landed = m.shake.is_armed() && machine(before).is_some_and(|b| b.shake != m.shake);
+    landed.then_some((m.x + TARGET_OFFSET.0, m.y + TARGET_OFFSET.1))
+}
 
 /// `Some(fly_won)` on the tick the winner screen's trophy lands (falls into the hops stage).
 fn trophy_landed(cur: &State, before: &State) -> Option<bool> {
