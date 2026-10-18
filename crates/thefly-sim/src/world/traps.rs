@@ -31,6 +31,8 @@ pub const FLYPAPER_VARIANT_SPRITE: &str = "colle_mouche2";
 pub const FAN_STRENGTH: i32 = 500;
 /// The fan sheet's frame count: 666 / 3 = 222, the fan width +0x54 (GS §9.3, answers.md O22).
 pub const FAN_FRAMES: i32 = 3;
+/// A fan's top is at this y less its frame height (`FUN_0042699d`).
+pub const FAN_FLOOR_Y: i32 = 570;
 /// A fan hit: vy −= strength + 100; damage R(20) + 40, or R(10) + 20 with SuperFly; slot 45 at
 /// 20000 + R(6000) Hz (FW §7.4, game-spec §4.6).
 pub const FAN_LIFT: i32 = 100;
@@ -142,8 +144,9 @@ impl TrapSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flypaper {
     pub variant2: bool,
-    /// Layer x on the 1.25 layer, and y.
+    /// Layer x on the 1.25 layer, its screen x (see [`Traps::from_layout`]), and y.
     pub x: i32,
+    pub screen_x: i32,
     pub y: i32,
 }
 
@@ -151,7 +154,9 @@ pub struct Flypaper {
 pub struct Fan {
     /// Fan type 1 (+0x918), which pushes right; type 2 pushes left.
     pub facing_right: bool,
+    /// Layer x and screen x, as for [`Flypaper`].
     pub x: i32,
+    pub screen_x: i32,
     pub y: i32,
     /// +0x54, the frame width (222).
     pub w: i32,
@@ -162,7 +167,9 @@ pub struct Fan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zapper {
+    /// Layer x and screen x, as for [`Flypaper`].
     pub x: i32,
+    pub screen_x: i32,
     pub y: i32,
     /// An arc is on (slot 39 played at its start), until `arc_timer` runs out.
     pub arcing: bool,
@@ -208,7 +215,7 @@ impl Fan {
     // port adds the wrap when the cone's base is past it and the point is left of the wrapped
     // base. Revisit when FUN_00429cbc's unwrap is read.
     fn blow(&self, (px, py): (i32, i32)) -> (i32, i32) {
-        let x = screen_x(self.x);
+        let x = self.screen_x;
         let (cone, dir) = if self.facing_right {
             (CONE_RIGHT, 1)
         } else {
@@ -242,7 +249,7 @@ impl Zapper {
     /// `FUN_00428b47` for one target (answers.md "Zapper arc reach and schedule"): column, no
     /// arc on or retry running, reach, then the R(100) chance. True when an arc starts.
     fn arc_at(&mut self, t: Rect, size: Size, cx: &mut Ctx) -> bool {
-        let zx = visible_x(self.x, size.w);
+        let zx = visible_x(self.screen_x, size.w);
         let column = t.x - size.w <= zx && zx <= t.x + t.w;
         let retrying = !self.retry.expired(cx.now);
         let bottom = self.y + size.h;
@@ -273,29 +280,33 @@ impl Traps {
     /// Caps 7/5/2 skip the rest (gaps §8.2); each flypaper built under its cap draws `R(10)` and
     /// uses the `colle_mouche2` sprite when the draw is above 4 (`variant2`), in slot order.
     /// Starts the fan (44) and zapper (40) loops.
+    ///
+    /// answers.md "Fan stands, fan y and trap x": the stored x goes to the screen-x setter, so
+    /// screen x = stored and layer x = trunc(stored / 1.25) until the first [`scroll`]. Fan
+    /// y = 570 − frame h, flypapers and zappers y 0; the stored y is never read.
     pub fn from_layout(layout: &TrapLayout, cx: &mut Ctx) -> Self {
         let mut t = Self::default();
-        let fan_w = fan_frame(cx).w;
+        let fan = fan_frame(cx);
         for slot in &layout.slots {
+            let screen_x = slot.x;
             let x = (f64::from(slot.x) / OBJECT_PARALLAX) as i32;
-            let spec = slot.kind.spec();
-            let h = cx.data.size(spec.sprite).h;
-            let y = if spec.stored_y > 0 {
-                spec.stored_y - h
-            } else {
-                spec.stored_y
-            };
             match slot.kind {
                 TrapKind::Flypaper if t.flypapers.len() < MAX_FLYPAPERS => {
                     let variant2 = cx.rng.r(FLYPAPER_VARIANT_ROLL) > FLYPAPER_VARIANT_ABOVE;
-                    t.flypapers.push(Flypaper { variant2, x, y });
+                    t.flypapers.push(Flypaper {
+                        variant2,
+                        x,
+                        screen_x,
+                        y: 0,
+                    });
                 }
                 TrapKind::FanLeft | TrapKind::FanRight if t.fans.len() < MAX_FANS => {
                     t.fans.push(Fan {
                         facing_right: slot.kind == TrapKind::FanRight,
                         x,
-                        y,
-                        w: fan_w,
+                        screen_x,
+                        y: FAN_FLOOR_Y - fan.h,
+                        w: fan.w,
                         strength: FAN_STRENGTH,
                         rehit: Timer::UNARMED,
                     });
@@ -303,7 +314,8 @@ impl Traps {
                 TrapKind::Zapper if t.zappers.len() < MAX_ZAPPERS => {
                     t.zappers.push(Zapper {
                         x,
-                        y,
+                        screen_x,
+                        y: 0,
                         arcing: false,
                         arc_timer: Timer::UNARMED,
                         retry: Timer::UNARMED,
@@ -339,13 +351,13 @@ impl Traps {
     fn loop_levels(&self, cx: &Ctx) -> (i32, i32) {
         let fan = match self.fans.as_slice() {
             [_] => FAN_LOUD_CB,
-            fans if fans.iter().any(|f| on_screen(f.x, f.w)) => FAN_LOUD_CB,
+            fans if fans.iter().any(|f| on_screen(f.screen_x, f.w)) => FAN_LOUD_CB,
             _ => FAN_QUIET_CB,
         };
         let zw = TrapKind::Zapper.spec_size(cx).w;
         let zapper = match self.zappers.as_slice() {
             [_] => ZAPPER_SINGLE_CB,
-            zs if zs.iter().any(|z| on_screen(z.x, zw)) => ZAPPER_SEEN_CB,
+            zs if zs.iter().any(|z| on_screen(z.screen_x, zw)) => ZAPPER_SEEN_CB,
             _ => ZAPPER_IDLE_CB,
         };
         (fan, zapper)
@@ -388,7 +400,7 @@ impl Traps {
         let h = fan_frame(cx).h;
         self.fans
             .iter()
-            .any(|f| in_span(x, visible_x(f.x, f.w), f.w) && in_span(y, f.y, h))
+            .any(|f| in_span(x, visible_x(f.screen_x, f.w), f.w) && in_span(y, f.y, h))
     }
 
     /// `FUN_00427bb4` (answers.md "Placement test against fans (O22)"): may an object occupy
@@ -397,7 +409,7 @@ impl Traps {
     /// original's second clause (x + w ≥ 6250) never blocks inside the 5000 range.
     pub fn span_free(&self, x: i32, w: i32) -> bool {
         self.fans.iter().all(|f| {
-            let fx = screen_x(f.x);
+            let fx = f.screen_x;
             !(fx - w <= x && x <= fx + f.w)
         })
     }
@@ -405,29 +417,22 @@ impl Traps {
 
 /// `FUN_00418b40`: a trap of a 1.25-layer x is on screen when it straddles the ring end or
 /// starts within the view.
-fn on_screen(layer_x: i32, w: i32) -> bool {
-    let x = screen_x(layer_x);
-    x + w >= SCREEN_WRAP || x <= SCREEN_W
-}
-
-/// A layer x on the 1.25 layer in placement units (FW §4.1 screen x before the wrap).
-fn placement_x(layer_x: i32) -> i32 {
-    (f64::from(layer_x) * OBJECT_PARALLAX) as i32
+fn on_screen(screen_x: i32, w: i32) -> bool {
+    screen_x + w >= SCREEN_WRAP || screen_x <= SCREEN_W
 }
 
 /// The wrapped screen x of a 1.25-layer x (FW §4.1).
 fn screen_x(layer_x: i32) -> i32 {
-    placement_x(layer_x).rem_euclid(SCREEN_WRAP)
+    ((f64::from(layer_x) * OBJECT_PARALLAX) as i32).rem_euclid(SCREEN_WRAP)
 }
 
 /// The drawn x of a trap w wide: its screen x, minus the wrap width when it straddles the ring end
 /// (FW §4.4 step 6), so a trap at 4990 reaches the left edge of the view.
-fn visible_x(layer_x: i32, w: i32) -> i32 {
-    let x = screen_x(layer_x);
-    if x >= SCREEN_WRAP - w {
-        x - SCREEN_WRAP
+fn visible_x(screen_x: i32, w: i32) -> i32 {
+    if screen_x >= SCREEN_WRAP - w {
+        screen_x - SCREEN_WRAP
     } else {
-        x
+        screen_x
     }
 }
 
@@ -435,9 +440,11 @@ fn in_span(v: i32, start: i32, len: i32) -> bool {
     (start..=start + len).contains(&v)
 }
 
-/// layerX += trunc(−delta), wrapped at W (FW §4.1, time-based integrator with v = 0).
-fn scroll(layer_x: &mut i32, delta: f64) {
+/// layerX += trunc(−delta), wrapped at W, and the screen x from it (FW §4.1, time-based
+/// integrator with v = 0).
+fn scroll(layer_x: &mut i32, screen: &mut i32, delta: f64) {
     *layer_x = (*layer_x + (-delta) as i32).rem_euclid(W);
+    *screen = screen_x(*layer_x);
 }
 
 impl TrapKind {
@@ -447,7 +454,7 @@ impl TrapKind {
 }
 
 /// One frame of the fan sheet (`ventilo_*` holds FAN_FRAMES frames side by side).
-fn fan_frame(cx: &Ctx) -> Size {
+pub fn fan_frame(cx: &Ctx) -> Size {
     let sheet = TrapKind::FanLeft.spec_size(cx);
     Size {
         w: sheet.w / FAN_FRAMES,
@@ -462,13 +469,13 @@ impl World {
         let delta = self.camera.delta;
         let t = &mut self.traps;
         for f in &mut t.flypapers {
-            scroll(&mut f.x, delta);
+            scroll(&mut f.x, &mut f.screen_x, delta);
         }
         for f in &mut t.fans {
-            scroll(&mut f.x, delta);
+            scroll(&mut f.x, &mut f.screen_x, delta);
         }
         for z in &mut t.zappers {
-            scroll(&mut z.x, delta);
+            scroll(&mut z.x, &mut z.screen_x, delta);
             z.arcing = !z.arc_timer.expired(cx.now);
         }
         t.update_loops(cx);
@@ -498,7 +505,7 @@ impl World {
                 TrapKind::Flypaper.spec().sprite
             };
             let size = cx.data.size(sprite);
-            Rect::new(visible_x(p.x, size.w), p.y, size.w, size.h).overlaps(&fly)
+            Rect::new(visible_x(p.screen_x, size.w), p.y, size.w, size.h).overlaps(&fly)
         });
         if touching {
             self.fly.vx = (f64::from(self.fly.vx) / FLYPAPER_DRAG) as i32;
@@ -528,7 +535,7 @@ impl World {
             let rehit_running = !f.rehit.expired(cx.now);
             let blades = cx.data.outline(blades_outline(f.facing_right));
             let shape = Shape {
-                x: screen_x(f.x),
+                x: f.screen_x,
                 y: f.y,
                 size,
                 outline: blades,
@@ -567,7 +574,7 @@ impl World {
         let (fx, _) = self.fly.centre();
         let fy = self.fly.y;
         let grill = self.traps.zappers.iter().any(|z| {
-            in_span(fx, visible_x(z.x, size.w), size.w) && fy - z.y <= size.h - GRILL_MARGIN
+            in_span(fx, visible_x(z.screen_x, size.w), size.w) && fy - z.y <= size.h - GRILL_MARGIN
         });
         if grill {
             self.fly.grill(cx);
@@ -588,7 +595,7 @@ impl World {
         }
         if let [f] = self.traps.fans.as_slice() {
             let pan = Pan::ScreenX {
-                x: visible_x(f.x, f.w),
+                x: visible_x(f.screen_x, f.w),
                 w: f.w,
             };
             cx.sound(SoundSlot::FAN, SoundOp::Move(pan));
@@ -596,7 +603,7 @@ impl World {
         if let [z] = self.traps.zappers.as_slice() {
             let w = TrapKind::Zapper.spec_size(cx).w;
             let pan = Pan::ScreenX {
-                x: visible_x(z.x, w),
+                x: visible_x(z.screen_x, w),
                 w,
             };
             cx.sound(SoundSlot::ZAPPER_HUM, SoundOp::Move(pan));
@@ -624,6 +631,7 @@ mod tests {
         Fan {
             facing_right: false,
             x,
+            screen_x: screen_x(x),
             y: 300,
             w: 222,
             strength: FAN_STRENGTH,
@@ -646,6 +654,7 @@ mod tests {
             flypapers: vec![Flypaper {
                 variant2: false,
                 x: 2000,
+                screen_x: 2500,
                 y: 0,
             }],
             ..Traps::default()
@@ -721,8 +730,14 @@ mod layout_tests {
         assert_eq!(variants, [false, true, false, false, true, false, true]);
         assert_eq!((traps.fans.len(), traps.zappers.len()), (5, 2));
         assert_eq!(rig.rng.rand(), 29358);
-        // Stored 1000 is layer x 800; fans stand on the floor (600 − 300).
-        assert_eq!((traps.fans[0].x, traps.fans[0].y), (800, 300));
+        // answers.md "Fan stands, fan y and trap x": stored 1000 is the screen x and layer x
+        // trunc(1000 / 1.25) = 800; fan y = 570 − 300, the others 0.
+        let f = &traps.fans[0];
+        assert_eq!((f.x, f.screen_x, f.y), (800, 1000, 270));
+        let z = &traps.zappers[0];
+        assert_eq!((z.x, z.screen_x, z.y), (3200, 4000, 0));
+        let p = &traps.flypapers[1];
+        assert_eq!((p.x, p.screen_x, p.y), (80, 100, 0));
         assert!(traps.fans[0].facing_right);
         assert_eq!((traps.fans[0].w, traps.fans[0].strength), (222, 500));
     }
@@ -763,7 +778,7 @@ mod layout_tests {
                 .count()
         };
         for tick in 0..=7 {
-            (w.fly.x, w.fly.y, w.fly.damage_total) = (500, 350, 0);
+            (w.fly.x, w.fly.y, w.fly.damage_total) = (500, 320, 0);
             w.traps_step(&mut rig.at(tick));
         }
         assert_eq!(hits(&rig), 2);
@@ -825,14 +840,14 @@ mod layout_tests {
             .collect()
     }
 
-    /// Left fan at stored 500 (screen 500, y 300). A fly centred at (300, 400) is in the cone
+    /// Left fan at stored 500 (screen 500, y 570 − 300 = 270). A fly centred at (300, 370) is in the cone
     /// and clear of the blades: vx −61, vy −20 (see the unit test), no hit. The blow runs on a
     /// dying fly, not on a splatted one (answers.md "Fan strength").
     #[test]
     fn the_blow_field_pushes_the_fly_unless_it_is_splatted() {
         let mut rig = Rig::new(1);
         let mut w = world_with(vec![slot(TrapKind::FanLeft, 500)], &mut rig);
-        let place = |w: &mut World| (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (240, 353, 0, 0);
+        let place = |w: &mut World| (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (240, 323, 0, 0);
         place(&mut w);
         w.fly.dying = true;
         w.traps_step(&mut rig.at(1));
@@ -844,14 +859,14 @@ mod layout_tests {
         assert_eq!((w.fly.vx, w.fly.vy), (0, 0));
     }
 
-    /// Right fan at stored 500: a fly at (500, 350), centre (560, 397), is on the blades and
-    /// in the cone (d = 60, rows 312..528; P = trunc((1 − 75/500) × 200) = 170: +127, −42).
+    /// Right fan at stored 500: a fly at (500, 320), centre (560, 367), is on the blades and
+    /// in the cone (d = 60, rows 282..498; P = trunc((1 − 75/500) × 200) = 170: +127, −42).
     /// The hit adds +500 and −600 (answers.md "Fan strength").
     #[test]
     fn a_fan_hit_adds_500_and_lifts_600() {
         let mut rig = Rig::new(1);
         let mut w = world_with(vec![slot(TrapKind::FanRight, 500)], &mut rig);
-        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (500, 350, 0, 0);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (500, 320, 0, 0);
         w.traps_step(&mut rig.at(1));
         assert_eq!(sounds(&rig, SoundSlot::FAN_HIT).len(), 1);
         assert_eq!((w.fly.vx, w.fly.vy), (127 + 500, -42 - 600));
@@ -981,16 +996,16 @@ mod unit_tests {
     }
 
     /// AR §4.3, FW §5.6: trap and winch x share the stored unit, the 1.25 layer's screen ring
-    /// (0..5000). A fan and a winch at the same stored x meet on screen (±1 px for the trunc
-    /// through the layer x), and so does the fan's stand.
+    /// (0..5000). The stored x goes straight to the screen x (answers.md "Fan stands, fan y and
+    /// trap x"), so a fan, its stand and a winch at the same stored x meet exactly on screen.
     #[test]
     fn a_fan_and_a_winch_at_the_same_stored_x_share_a_screen_x() {
         let w = world_with_fan(1);
-        let fan_x = screen_x(w.traps.fans[0].x);
-        assert_eq!(w.lift.x, STORED);
-        assert!((fan_x - STORED).abs() <= 1, "{fan_x}");
+        assert_eq!((w.lift.x, w.traps.fans[0].screen_x), (STORED, STORED));
         let stand = w.objects.list.iter().find(|o| o.sprite == "piedventi_gc");
-        assert_eq!(stand.map(|o| o.screen_x), Some(fan_x));
+        let stand = stand.map(|o| (o.screen_x, o.layer_x, o.w, o.h, o.y, o.collectible));
+        // Layer trunc(1618 / 1.25) = 1294; the fan frame 666 / 3 × 300 at y 570 − 300.
+        assert_eq!(stand, Some((STORED, 1294, 222, 300, 270, false)));
     }
 
     /// FW §5.2 step 3: placement passes screen-unit x to `span_free`, so no placed object
@@ -1000,7 +1015,7 @@ mod unit_tests {
         for seed in 1..=SEEDS {
             let w = world_with_fan(seed);
             let fan_w = w.traps.fans[0].w;
-            let fx = placement_x(w.traps.fans[0].x);
+            let fx = w.traps.fans[0].screen_x;
             let clash = w
                 .objects
                 .list
