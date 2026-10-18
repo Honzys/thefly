@@ -1,0 +1,288 @@
+//! Between-period screens: goodies shop, traps shop, bourse (SR §3) and the bonus round (SR §6).
+
+use thefly_platform::{Color, Error};
+use thefly_sim::bonus::{BonusPhase, BonusRound, Piece};
+use thefly_sim::bourse::{Bourse, COLUMN_OBJECT, COLUMNS};
+use thefly_sim::match_state::MatchState;
+use thefly_sim::screen::MatchScreen;
+use thefly_sim::shop::{GoodiesShop, ShopSide, TrapsShop};
+
+use super::View;
+use crate::assets::{ARIAL_BLACK, JOINT};
+use crate::gfx::{BLACK, Gfx, WHITE, centred_x};
+
+const GREEN: Color = Color::RGB(0, 255, 0);
+
+/// Goodies-shop slots (SR §3.1); slot 5 is the exit button.
+const SHOP_SLOTS: [f32; 6] = [44.0, 179.0, 309.0, 440.0, 570.0, 713.0];
+const SHOP_SLOT_Y: f32 = 3.0;
+
+fn shop_fade(v: &View, cur: f64) -> f64 {
+    let prev = match v.prev_screen() {
+        Some(MatchScreen::GoodiesShop(s)) => Some(s.fade.alpha),
+        Some(MatchScreen::TrapsShop(s)) => Some(s.fade.alpha),
+        _ => None,
+    };
+    f64::from(v.l.f(prev, cur))
+}
+
+/// SR §3.1. shortcut: open item O4, the counter positions and the purchase animation are not
+/// decoded; owned counts are drawn under each slot and the money at the bottom right.
+pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> Result<(), Error> {
+    g.spr("g_background", 0.0, 0.0, 0)?;
+    let belt = if s.conveyor.is_some() {
+        v.anim(100, 3)
+    } else {
+        0
+    };
+    g.spr("g_TapiRoulant", 346.0, 214.0, belt)?;
+    if s.side == ShopSide::Farmer {
+        g.spr("g_barre_haut_tapette", 0.0, 0.0, 0)?;
+    }
+    g.spr("g_barres_bas", 0.0, 369.0, 0)?;
+    g.spr("g_barres_tapis", 414.0, 67.0, 0)?;
+    // the machine shakes inside its 4 × 4 box (SR §3.1 "wanders inside a small box")
+    let shake = |n: u64| ((v.now / 40 + n) % 5) as f32 - 2.0;
+    let (mx, my) = (7.0 + shake(0), 143.0 + shake(2));
+    g.spr("g_Machine", mx, my, 0)?;
+    g.spr("g_Machine_cache", mx + 46.0, my + 156.0, 0)?;
+    let (_, can_h) = g.size("can1")?;
+    g.spr("can1", 805.0, 239.0 - can_h, 0)?;
+
+    let first = if s.side == ShopSide::Fly { 0 } else { 5 };
+    if let Some(&x) = SHOP_SLOTS.get(s.cursor).filter(|_| s.cursor < 5) {
+        g.spr("Goodies", x, 5.0, first + s.cursor as u32)?;
+    }
+    if let Some(&x) = SHOP_SLOTS.get(s.cursor) {
+        g.spr("g_Selection", x + 5.0, SHOP_SLOT_Y + 52.0, v.anim(30, 3))?;
+    }
+    let e = &m.economy;
+    let (counts, money) = match s.side {
+        ShopSide::Fly => {
+            let f = &e.fly;
+            (
+                [f.strength, f.speed, f.turbo, f.superfly, f.midges],
+                f.money,
+            )
+        }
+        ShopSide::Farmer => {
+            let f = &e.farmer;
+            ([f.level, f.tokens, f.triple, f.nuclear, f.boot], f.money)
+        }
+    };
+    for (x, n) in SHOP_SLOTS.iter().zip(counts) {
+        g.text(ARIAL_BLACK, 30, &format!("x{n}"), x + 5.0, 120.0, GREEN)?;
+    }
+    g.text(ARIAL_BLACK, 30, &format!("{money} $"), 600.0, 540.0, GREEN)?;
+    g.fade(shop_fade(v, s.fade.alpha))
+}
+
+/// Traps-shop items; the last is the done button (SR §3.2).
+const TRAP_ITEMS: [(f32, f32); 4] = [
+    (23.0, 281.0),
+    (265.0, 281.0),
+    (506.0, 281.0),
+    (266.0, 530.0),
+];
+
+/// SR §3.2. shortcut: open item O4, the icons, the cross and the token text positions were not
+/// read; only the backdrop and the cursor are drawn, with the token count bottom right.
+pub fn traps_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &TrapsShop) -> Result<(), Error> {
+    g.spr("p_traps", 0.0, 0.0, 0)?;
+    if let Some(&(x, y)) = TRAP_ITEMS.get(s.cursor) {
+        g.spr("p_fleche", x, y, v.anim(30, 3))?;
+    }
+    let tokens = m.economy.farmer.tokens;
+    g.text(ARIAL_BLACK, 30, &format!("x{tokens}"), 680.0, 540.0, GREEN)?;
+    g.fade(shop_fade(v, s.fade.alpha))
+}
+
+const BAND_COLOURS: [Color; 3] = [
+    Color::RGB(29, 222, 38),
+    Color::RGB(255, 255, 0),
+    Color::RGB(255, 0, 0),
+];
+const BAND: i32 = 100;
+
+/// The bands of a bourse bar of `h` px, bottom up: `(offset from the baseline, height, colour)`.
+/// Green, yellow and red per 100 px, black beyond (SR §3.3).
+pub fn bar_bands(h: i32) -> Vec<(i32, i32, Color)> {
+    const MAX_BANDS: i32 = 40;
+    (0..MAX_BANDS)
+        .map(|k| (k * BAND, (h - k * BAND).min(BAND), k))
+        .take_while(|&(_, len, _)| len > 0)
+        .map(|(off, len, k)| {
+            let c = BAND_COLOURS.get(k as usize).copied().unwrap_or(BLACK);
+            (off, len, c)
+        })
+        .collect()
+}
+
+/// `n` right-aligned the way SR §3.3 shifts the labels: by `three` px for 3 characters and by
+/// `four` for 4 or more.
+fn shift(s: &str, three: f32, four: f32) -> f32 {
+    match s.chars().count() {
+        0..=2 => 0.0,
+        3 => three,
+        _ => four,
+    }
+}
+
+pub fn bourse(g: &mut Gfx, _v: &View, m: &MatchState, b: &Bourse) -> Result<(), Error> {
+    g.spr("g_boursebg", 0.0, 0.0, 0)?;
+    let e = &m.economy;
+    let price = |obj: usize| e.food_prices.get(obj).map_or(0, |p| *p as i32);
+    let in_play = |obj: usize| e.present.get(obj).copied().unwrap_or(false);
+    let blinking = (0..COLUMNS)
+        .filter(|&i| in_play(COLUMN_OBJECT[i]))
+        .max_by_key(|&i| price(COLUMN_OBJECT[i]));
+    for (i, &obj) in COLUMN_OBJECT.iter().enumerate() {
+        let col = (i % 11) as f32;
+        let (base, cover_y) = if i < 11 {
+            (208.0, 98.0)
+        } else {
+            (392.0, 282.0)
+        };
+        let x = 50.0 + 69.0 * col;
+        for (off, len, c) in bar_bands(b.bars[i]) {
+            g.fill(x, base - (off + len) as f32, 9.0, len as f32, c)?;
+        }
+        let hidden = b.blink_on && blinking == Some(i) && b.bars[i] >= price(obj);
+        if !hidden {
+            let (frame, alpha) = if in_play(obj) { (1, 255.0) } else { (0, 150.0) };
+            g.spr_ex(
+                "g_bourse_cache",
+                27.0 + 69.0 * col,
+                cover_y,
+                frame,
+                alpha,
+                false,
+            )?;
+        }
+        let label = format!("{}$", price(obj));
+        let lx = x - 5.0 - shift(&label, 5.0, 10.0);
+        g.text(ARIAL_BLACK, 22, &label, lx, base + 5.0, WHITE)?;
+    }
+    let (left, right) = (e.farmer.score, e.fly.score);
+    let right_leads = right >= left;
+    g.spr("g_classe_bourse", 171.0, 484.0, u32::from(right_leads))?;
+    g.spr("g_classe_bourse", 570.0, 484.0, u32::from(!right_leads))?;
+    for (n, x) in [(left, 183.0), (right, 585.0)] {
+        let s = format!("{n} $");
+        let dx = match s.chars().count() {
+            0..=3 => 0.0,
+            4 => 8.0,
+            _ => 15.0,
+        };
+        g.text(JOINT, 26, &s, x - dx, 554.0, WHITE)?;
+    }
+    Ok(())
+}
+
+fn pieces(
+    g: &mut Gfx,
+    v: &View,
+    name: &str,
+    cur: &[Piece],
+    prev: Option<&[Piece]>,
+    frames: u32,
+) -> Result<(), Error> {
+    for (i, p) in cur.iter().enumerate().filter(|(_, p)| p.active) {
+        let pp = prev.and_then(|ps| ps.get(i)).filter(|p| p.active);
+        let x = v.l.f(pp.map(|p| p.x), p.x);
+        let y = v.l.f(pp.map(|p| p.y), p.y);
+        g.spr(name, x, y, (v.anim(50, frames) + i as u32) % frames)?;
+    }
+    Ok(())
+}
+
+/// SR §6: the layout is open (open item O3). shortcut: the backdrop at the top with the bar
+/// under it, coins as `piece`, farmer targets as `moucheron1`, the bonus swatter as `piecetap`
+/// and the fly as `Face`; the countdown in Joint and the tally in `boitedlg`.
+pub fn bonus(g: &mut Gfx, v: &View, m: &MatchState, b: &BonusRound) -> Result<(), Error> {
+    let _ = m;
+    let prev = match v.prev_screen() {
+        Some(MatchScreen::Bonus(p)) => Some(p.as_ref()),
+        _ => None,
+    };
+    g.spr("bckbonusfond", 0.0, 0.0, 0)?;
+    g.spr("bckbonusbarre", 0.0, 600.0 - 317.0, 0)?;
+    pieces(
+        g,
+        v,
+        "piece",
+        &b.coins,
+        prev.map(|p| p.coins.as_slice()),
+        15,
+    )?;
+    pieces(
+        g,
+        v,
+        "moucheron1",
+        &b.targets,
+        prev.map(|p| p.targets.as_slice()),
+        6,
+    )?;
+    let fx = v.l.f(prev.map(|p| p.fly.x), b.fly.x);
+    let fy = v.l.f(prev.map(|p| p.fly.y), b.fly.y);
+    g.spr("Face", fx, fy, v.anim(50, 10))?;
+    let sx = v.l.f(prev.map(|p| p.swatter.x), b.swatter.x);
+    let sy = v.l.f(prev.map(|p| p.swatter.y), b.swatter.y);
+    g.spr("piecetap", sx, sy, 0)?;
+    g.text(JOINT, 26, &format!("{}", b.coins_taken), 20.0, 10.0, WHITE)?;
+    g.text(JOINT, 26, &format!("{}", b.hits), 740.0, 10.0, WHITE)?;
+    match b.phase {
+        BonusPhase::Countdown { count, .. } => {
+            let s = if count >= 1 {
+                count.to_string()
+            } else {
+                "Go!".to_owned()
+            };
+            let x = centred_x(s.chars().count(), 200.0);
+            let colours = (Color::RGB(5, 55, 255), Color::RGB(255, 255, 0));
+            g.text_outlined(JOINT, 200, &s, (x, 150.0), colours)
+        }
+        BonusPhase::Result => {
+            g.spr("boitedlg", 145.0, 100.0, 0)?;
+            g.text(
+                JOINT,
+                25,
+                &format!("Fly : {} $", 2 * b.coins_taken),
+                265.0,
+                230.0,
+                WHITE,
+            )?;
+            g.text(
+                JOINT,
+                25,
+                &format!("Farmer : {} $", 10 * b.hits),
+                265.0,
+                280.0,
+                WHITE,
+            )
+        }
+        BonusPhase::Play { .. } | BonusPhase::End { .. } => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bars_stack_green_yellow_red_then_black() {
+        assert!(bar_bands(0).is_empty());
+        let b = bar_bands(250);
+        assert_eq!(b.len(), 3);
+        assert_eq!((b[0].0, b[0].1, b[0].2), (0, 100, BAND_COLOURS[0]));
+        assert_eq!((b[2].0, b[2].1, b[2].2), (200, 50, BAND_COLOURS[2]));
+        assert_eq!(bar_bands(350)[3].2, BLACK);
+    }
+
+    #[test]
+    fn labels_shift_left_with_length() {
+        assert_eq!(shift("9$", 5.0, 10.0), 0.0);
+        assert_eq!(shift("99$", 5.0, 10.0), 5.0);
+        assert_eq!(shift("999$", 5.0, 10.0), 10.0);
+    }
+}
