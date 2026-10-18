@@ -29,6 +29,8 @@ pub const IDLE_PERIOD: i32 = 102;
 pub const HOOK_OFF: i32 = 0;
 /// The object layer's wrap (+0x2c): trunc(W × 1.25) = 5000.
 const LIFT_WRAP: i32 = (W as f64 * OBJECT_PARALLAX) as i32;
+/// The winch loop's volume, cb (answers.md "Winch sound: loop start, frequency and volume").
+const WINCH_VOLUME_CB: i32 = -200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LiftState {
@@ -160,6 +162,7 @@ impl Lift {
         cx: &mut Ctx,
     ) -> LiftResult {
         self.transitions(objects, fly_carrying, cx);
+        self.moved = false;
         let result = match self.state {
             LiftState::Idle => {
                 self.bob(cx);
@@ -233,6 +236,7 @@ impl Lift {
 
     /// State 2: feed the ring, approach the object, then the hook test.
     fn track(&mut self, objects: &mut Objects) -> LiftResult {
+        self.moved = false;
         let Some(i) = self.hooked.or(self.waiting) else {
             return LiftResult::Empty;
         };
@@ -294,10 +298,9 @@ impl Lift {
         o.on_lift = true;
     }
 
-    /// Move (`FUN_00431826`).
-    ///
-    /// shortcut: §5.6 does not say what sets `moved`; Move sets it and only the end of the
-    /// approach clears it. Revisit when `FUN_00431826` is re-read.
+    /// Move (`FUN_00431826`) sets `moved`; the update clears it every tick after the
+    /// transitions and again entering state 2, and so does the approach end (answers.md "Lift:
+    /// `moved` is cleared every tick").
     fn step(&mut self) {
         self.y += (f64::from(self.vy) * DT) as i32;
         if self.y >= self.max_y {
@@ -325,10 +328,9 @@ impl Lift {
         self.winch_sound(cx);
     }
 
-    /// Sound 47: stopped while vy is 0, else positional at trunc(vy / 400 × 3000) + 18000 Hz.
-    ///
-    /// shortcut: §5.6 does not say how the loop starts; it is looped the first tick vy ≠ 0
-    /// after a stop, then moved and retuned (as the buzz, open item O14). Revisit with O14.
+    /// Sound 47: stopped while vy is 0, else positional at trunc(vy / 400 × 3000) + 18000 Hz and
+    /// volume −200, looped whenever it is not playing (answers.md "Winch sound: loop start,
+    /// frequency and volume").
     fn winch_sound(&mut self, cx: &mut Ctx) {
         if self.vy == 0 {
             if std::mem::take(&mut self.winching) {
@@ -344,9 +346,9 @@ impl Lift {
         };
         if !std::mem::replace(&mut self.winching, true) {
             let params = PlayParams {
+                volume_cb: WINCH_VOLUME_CB,
                 freq_hz: Some(freq),
                 pan,
-                ..PlayParams::default()
             };
             cx.sound(SoundSlot::WINCH, SoundOp::Loop(params));
             return;
@@ -439,10 +441,10 @@ mod tests {
             (1, 74, 0, -380)
         );
         let params = PlayParams {
+            volume_cb: -200,
             freq_hz: Some(18555),
             // The anchor goes through the layer x (answers.md "Screen-x setter"): 1617.
             pan: Pan::ScreenX { x: lift.x, w: 235 },
-            ..PlayParams::default()
         };
         let op = SoundOp::Loop(params);
         assert_eq!(
@@ -500,14 +502,17 @@ mod tests {
         // Hook y + off below the bottom (400): vy = 450, y = −151 + trunc(450 / 65) = −145.
         assert_eq!((lift.vy, lift.y), (APPROACH_VY, -145));
         assert_eq!(lift.ring[0], 380.min(400 - HOOK_OFF + 30));
-        // Let go of a held object: it is hooked and tracking goes on.
+        // Let go of a held object mid-approach: it is hooked and tracking goes on without the
+        // approach, so nothing moves the lift and the follow reads the ring (answers.md "Lift:
+        // `moved` is cleared every tick").
         objects.carried = None;
         lift.update(&mut objects, false, 0.0, &mut cx);
         assert_eq!(
             (lift.waiting, lift.hooked, lift.state),
             (None, Some(0), LiftState::Tracking)
         );
-        assert!(!lift.approaching);
+        assert!(!lift.approaching && !lift.moved);
+        assert_eq!((lift.read, lift.y), (0, lift.ring[0]));
     }
 
     #[test]
@@ -531,7 +536,7 @@ mod tests {
         let mut lift = Lift::new(ANCHORS, &mut cx);
         let mut objects = one_object(200);
         objects.list[0].state = ObjState::Falling;
-        (lift.state, lift.hooked, lift.y, lift.moved) = (LiftState::Tracking, Some(0), 310, true);
+        (lift.state, lift.hooked, lift.y) = (LiftState::Tracking, Some(0), 310);
         let r = lift.update(&mut objects, false, 0.0, &mut cx);
         assert_eq!(r, LiftResult::Hooked(0));
         assert_eq!(
@@ -566,7 +571,7 @@ mod tests {
         let mut objects = one_object(200);
         objects.list[0].set_screen_x(1618 + 235 - 34);
         objects.list[0].state = ObjState::Falling;
-        (lift.state, lift.hooked, lift.y, lift.moved) = (LiftState::Tracking, Some(0), 310, true);
+        (lift.state, lift.hooked, lift.y) = (LiftState::Tracking, Some(0), 310);
         assert_eq!(
             lift.update(&mut objects, false, 0.0, &mut cx),
             LiftResult::Empty
