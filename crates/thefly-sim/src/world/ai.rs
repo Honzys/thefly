@@ -440,7 +440,7 @@ impl FarmerAi {
         self.controller.spread = self.spread(view);
         let target = self.target_point(view);
         self.controller.refresh(view.swatter_centre, target);
-        self.dwell_step(view, cx);
+        self.dwell_step(cx);
         self.wander_step(cx);
         self.escape_step(view, cx);
         self.chase_step(view, cx);
@@ -475,13 +475,14 @@ impl FarmerAi {
     }
 
     /// A mode change: new target and a fresh offset (AR §2.3).
-    fn retarget(&mut self, target: Target, cx: &mut Ctx) {
+    fn retarget(&mut self, target: Target, view: &AiView, cx: &mut Ctx) {
         self.controller.target = target;
-        self.controller.reroll_offset(cx);
+        self.aim_reroll(view, cx);
     }
 
-    /// The offset re-roll after a dwell or an alignment swing (`FUN_0043e716`, `FUN_0043f8b1`):
-    /// at the aim spread with Triple off and not wandering, only while the fly is alive.
+    /// `FUN_0043f8b1`'s re-roll, after a mode change or an alignment swing (AR §2.3): with Triple
+    /// off and not wandering, only while the fly is alive (answers.md "AI aim offset"). Which
+    /// caller carries the gate is read off those two sections [I].
     fn aim_reroll(&mut self, view: &AiView, cx: &mut Ctx) {
         if !self.wandering && !view.triple_on && !view.fly_alive {
             return;
@@ -490,13 +491,19 @@ impl FarmerAi {
         self.controller.reroll_offset(cx);
     }
 
-    /// Step 2 (answers.md "AI dwell expiry"): re-roll the offset, request a swing, destroy the
-    /// dwell timer. The direction keys and the pending reaction stay.
-    fn dwell_step(&mut self, view: &AiView, cx: &mut Ctx) {
+    /// Step 2 (answers.md "AI dwell expiry", `FUN_0043e716`): re-roll the offset at 700 or the aim
+    /// spread, always, request a swing, destroy the dwell timer. The keys and the pending reaction
+    /// stay.
+    fn dwell_step(&mut self, cx: &mut Ctx) {
         if !self.dwell.is_some_and(|t| t.expired(cx.now)) {
             return;
         }
-        self.aim_reroll(view, cx);
+        self.controller.spread = if self.wandering {
+            WANDER_SPREAD
+        } else {
+            self.params.aim_spread
+        };
+        self.controller.reroll_offset(cx);
         self.swing_request = true;
         self.dwell = None;
     }
@@ -539,10 +546,10 @@ impl FarmerAi {
         if fired && !self.escaping && cx.rng.r(100) < self.params.p_escape {
             timer.arm(cx.now, self.params.escape_ms);
             self.escaping = true;
-            self.retarget(point, cx);
+            self.retarget(point, view, cx);
         } else if fired {
             self.escaping = false;
-            self.retarget(Target::Fly, cx);
+            self.retarget(Target::Fly, view, cx);
         }
         if self.escaping {
             self.controller.target = point;
@@ -556,16 +563,16 @@ impl FarmerAi {
             if self.chasing {
                 self.chasing = false;
                 self.chase_timer.arm(cx.now, self.params.chase_off_ms);
-                self.retarget(Target::Fly, cx);
+                self.retarget(Target::Fly, view, cx);
             } else if view.farmer_goodie.is_some() && cx.rng.r(100) < self.params.p_chase {
                 self.chasing = true;
                 self.chase_timer.arm(cx.now, self.params.chase_on_ms);
-                self.retarget(Target::FlyingGoodie, cx);
+                self.retarget(Target::FlyingGoodie, view, cx);
             }
         }
         if self.chasing && view.farmer_goodie.is_none() {
             self.chasing = false;
-            self.retarget(Target::Fly, cx);
+            self.retarget(Target::Fly, view, cx);
         }
     }
 
@@ -630,7 +637,7 @@ impl FarmerAi {
             self.triple_timer.arm(cx.now, self.params.triple_idle_ms);
         }
         if self.prev_midges_on && !view.midges_on && self.escape_flag {
-            self.end_escape(cx);
+            self.end_escape(view, cx);
         }
         self.prev_triple_on = view.triple_on;
         self.prev_midges_on = view.midges_on;
@@ -642,12 +649,12 @@ impl FarmerAi {
             .or_else(|| self.boot_decision(view, cx))
     }
 
-    fn end_escape(&mut self, cx: &mut Ctx) {
+    fn end_escape(&mut self, view: &AiView, cx: &mut Ctx) {
         self.escape_flag = false;
         self.escape_timer = None;
         if self.escaping {
             self.escaping = false;
-            self.retarget(Target::Fly, cx);
+            self.retarget(Target::Fly, view, cx);
         }
     }
 
@@ -951,14 +958,15 @@ mod farmer_ai_tests {
     }
 
     /// answers.md "AI dwell expiry": the offset is re-rolled (spread 181, so (5, −74) on seed 1),
-    /// a swing is requested and the dwell timer goes; the direction keys stay as they were.
+    /// a swing is requested and the dwell timer goes; the direction keys stay as they were. The
+    /// step takes no view: `FUN_0043e716` has no fly-alive gate and no Triple cut.
     #[test]
     fn dwell_expiry_rerolls_the_offset_and_keeps_the_keys() {
         let mut rig = Rig::new(1);
-        let (mut ai, v) = normal_ai(&mut rig);
+        let (mut ai, _) = normal_ai(&mut rig);
         ai.dwell = Some(Timer::armed(0, 1000));
         (ai.aligner.x_dir, ai.aligner.y_dir, ai.aligner.pending_x_dir) = (1, -1, Some(0));
-        ai.dwell_step(&v, &mut rig.cx(1000));
+        ai.dwell_step(&mut rig.cx(1000));
         assert_eq!((ai.controller.ox, ai.controller.oy), (5, -74));
         assert!(ai.swing_request && ai.dwell.is_none());
         assert_eq!(
@@ -966,6 +974,18 @@ mod farmer_ai_tests {
             (1, -1, Some(0))
         );
         assert_eq!(rig.rng.rand(), 19169);
+    }
+
+    /// AR §2.3: a mode change re-rolls through `FUN_0043f8b1`, so with the fly down it retargets
+    /// without drawing.
+    #[test]
+    fn a_mode_change_retargets_without_a_roll_while_the_fly_is_down() {
+        let mut rig = Rig::new(1);
+        let (mut ai, mut v) = normal_ai(&mut rig);
+        v.fly_alive = false;
+        ai.retarget(Target::FlyingGoodie, &v, &mut rig.cx(0));
+        assert_eq!(ai.controller.target, Target::FlyingGoodie);
+        assert_eq!(rig.rng.rand(), 41);
     }
 
     /// answers.md "AI aim offset": not wandering and Triple off, the offset is only re-rolled
