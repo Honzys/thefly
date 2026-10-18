@@ -319,7 +319,8 @@ fn boot(g: &mut Gfx, v: &View, w: &World, p: Option<&World>) -> Result<(), Error
         return Ok(());
     }
     let pb = p.map(|p| &p.boot).filter(|b| b.active);
-    let x = v.l.i(pb.map(|b| b.x), w.boot.x);
+    // `x` is on the 5000 ring; `rect()` shifts it across the ring end (FW §4.4 step 6)
+    let x = v.l.i(pb.map(|b| b.rect().x), w.boot.rect().x);
     let y = v.l.i(pb.map(|b| b.y), w.boot.y);
     g.spr("i_botte", x, y, 0)
 }
