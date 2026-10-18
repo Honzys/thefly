@@ -20,7 +20,7 @@ use sdl3::render::{Canvas, ScaleMode};
 use sdl3::video::{FullscreenType, Window};
 use sdl3::{EventPump, Sdl};
 
-pub use audio::{Audio, Voice};
+pub use audio::{Audio, PlayParams, Voice};
 pub use error::Error;
 pub use input::{Input, Key, MouseButton};
 pub use render::{Color, FRect, Frame, Renderer};

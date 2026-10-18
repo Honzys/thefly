@@ -46,7 +46,14 @@ pub(crate) struct AssetStore<'tc> {
     data_dir: PathBuf,
     sprites: HashMap<String, Texture<'tc>>,
     fonts: HashMap<(String, u16), Font<'static>>,
+    texts: HashMap<TextKey, Texture<'tc>>,
 }
+
+/// Font file, size, text and RGBA colour of a rasterised string.
+type TextKey = (String, u16, String, [u8; 4]);
+
+/// Rasterised strings kept between frames; the cache is dropped whole when it grows past this.
+const MAX_CACHED_TEXTS: usize = 512;
 
 impl<'tc> AssetStore<'tc> {
     pub(crate) fn new(
@@ -60,6 +67,7 @@ impl<'tc> AssetStore<'tc> {
             data_dir: data_dir.to_path_buf(),
             sprites: HashMap::new(),
             fonts: HashMap::new(),
+            texts: HashMap::new(),
         }
     }
 
@@ -154,15 +162,49 @@ impl Renderer<'_, '_> {
         flip: bool,
         alpha: f32,
     ) -> Result<(), Error> {
-        let tex = self.assets.sprite(name)?;
-        let q = tex.query();
-        let (x, y, w, h) = frame.src_rect((q.width, q.height));
-        tex.set_alpha_mod((alpha.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let (x, y, w, h) = frame.src_rect(self.sprite_size(name)?);
         let src = FRect::new(x as f32, y as f32, w as f32, h as f32);
         let dst = FRect::new(pos.0, pos.1, w as f32, h as f32);
+        self.draw_region(name, src, dst, flip, alpha)
+    }
+
+    /// Draws the `src` part of `name` stretched onto `dst`: scaled sprites, scrolling slices and
+    /// partial bars. Fractional rectangles give sub-pixel placement under the linear filter.
+    pub fn draw_region(
+        &mut self,
+        name: &str,
+        src: FRect,
+        dst: FRect,
+        flip: bool,
+        alpha: f32,
+    ) -> Result<(), Error> {
+        let tex = self.assets.sprite(name)?;
+        tex.set_alpha_mod((alpha.clamp(0.0, 1.0) * 255.0).round() as u8);
         self.canvas
             .copy_ex(&*tex, src, dst, 0.0, None, flip, false)
             .map_err(sdl)
+    }
+
+    /// A line `width` pixels thick, drawn as parallel 1-px lines (SDL lines have no width).
+    pub fn draw_line(
+        &mut self,
+        from: (f32, f32),
+        to: (f32, f32),
+        width: u32,
+        color: Color,
+    ) -> Result<(), Error> {
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let len = dx.hypot(dy).max(f32::EPSILON);
+        let (nx, ny) = (-dy / len, dx / len);
+        self.canvas.set_blend_mode(BlendMode::Blend);
+        self.canvas.set_draw_color(color);
+        for i in 0..width {
+            let o = i as f32 - (width as f32 - 1.0) / 2.0;
+            let a = (from.0 + nx * o, from.1 + ny * o);
+            let b = (to.0 + nx * o, to.1 + ny * o);
+            self.canvas.draw_line(a, b).map_err(sdl)?;
+        }
+        Ok(())
     }
 
     /// Draws `text` in font `font` (a file in `data/rsc/`, e.g. `casual.ttf`) at `size` points.
@@ -177,25 +219,54 @@ impl Renderer<'_, '_> {
         if text.is_empty() {
             return Ok(());
         }
-        let surface = self
-            .assets
-            .font(font, size)?
-            .render(text)
-            .blended(color)
-            .map_err(sdl)?;
-        // shortcut: rasterises every call; cache by (font, size, text) if text gets heavy
-        let tex = self
-            .assets
-            .creator
-            .create_texture_from_surface(&surface)
-            .map_err(sdl)?;
-        let dst = FRect::new(
-            pos.0,
-            pos.1,
-            surface.width() as f32,
-            surface.height() as f32,
+        let key: TextKey = (
+            font.to_owned(),
+            size,
+            text.to_owned(),
+            [color.r, color.g, color.b, color.a],
         );
-        self.canvas.copy(&tex, None, dst).map_err(sdl)
+        if !self.assets.texts.contains_key(&key) {
+            let surface = self
+                .assets
+                .font(font, size)?
+                .render(text)
+                .blended(color)
+                .map_err(sdl)?;
+            let tex = self
+                .assets
+                .creator
+                .create_texture_from_surface(&surface)
+                .map_err(sdl)?;
+            if self.assets.texts.len() >= MAX_CACHED_TEXTS {
+                self.assets.texts.clear();
+            }
+            self.assets.texts.insert(key.clone(), tex);
+        }
+        let Some(tex) = self.assets.texts.get(&key) else {
+            return Ok(());
+        };
+        let q = tex.query();
+        let dst = FRect::new(pos.0, pos.1, q.width as f32, q.height as f32);
+        self.canvas.copy(tex, None, dst).map_err(sdl)
+    }
+
+    /// The logical frame drawn so far as tightly packed RGBA rows, for screenshots.
+    pub fn read_pixels(&mut self, size: (u32, u32)) -> Result<Vec<u8>, Error> {
+        let rect = sdl3::rect::Rect::new(0, 0, size.0, size.1);
+        let surface = self
+            .canvas
+            .read_pixels(rect)
+            .map_err(sdl)?
+            .convert_format(PixelFormat::RGBA32)
+            .map_err(sdl)?;
+        let pitch = surface.pitch() as usize;
+        let row = size.0 as usize * 4;
+        let rows = size.1 as usize;
+        Ok(surface.with_lock(|px| {
+            (0..rows)
+                .flat_map(|y| px[y * pitch..y * pitch + row].iter().copied())
+                .collect()
+        }))
     }
 }
 
