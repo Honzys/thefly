@@ -2222,7 +2222,7 @@ mod tests {
         assert_eq!((fly.y, fly.vy), (420, -55 + 35));
     }
 
-    /// answers.md "Object previous position", the open `objects.rs:1829` case: chips1 dropped
+    /// answers.md "Sliding object without support" (round 5, [C] rules, [I] end): chips1 dropped
     /// at y 200 over chips2 (y 480). W1 makes every resolve go back one tick of fall:
     /// - at y 368, vy 1100 moves it to 384; the probes from 368 reach only y 379, so the forced
     ///   side hit sets vy = 0 and pushes chips2 in mode 2: trunc(1100 / 1.5) = 733, s = 366,
