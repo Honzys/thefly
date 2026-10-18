@@ -345,8 +345,8 @@ impl MatchState {
         let e = &mut self.economy;
         e.kills += 1;
         self.stats.kills += 1;
-        // A kill with no hit (boot, zapper) is taken as the one-hit case [I]: §7.6 lists 1, 2–3
-        // and 4+ only.
+        // shortcut: a kill with no hit (boot, zapper) counts as the one-hit type; AR §7.6 lists
+        // only 1, 2–3 and 4+. Revisit if the kill-type list is re-read.
         let kind = match hits {
             ..=1 => 3,
             2..=3 => 2,
