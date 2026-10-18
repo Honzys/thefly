@@ -4,7 +4,7 @@ use thefly_platform::{Color, Error};
 use thefly_sim::match_state::{MatchState, Players};
 use thefly_sim::screen::MatchScreen;
 use thefly_sim::stats::StatsScreen;
-use thefly_sim::winner::{BAR_MAX, TROPHY_FLOOR, Winner};
+use thefly_sim::winner::{BAR_MAX, Stage, TROPHY_FLOOR, Winner};
 
 use super::View;
 use crate::assets::{ARIAL_BLACK, JOINT};
@@ -40,12 +40,9 @@ pub fn winner(g: &mut Gfx, v: &View, w: &Winner) -> Result<(), Error> {
     if !farmer_crushed {
         g.spr("winnerfarmer", 74.0, 235.0, 0)?;
     }
-    let (_, th) = g.size("winnercoupe")?;
-    let tx = if w.fly_won { 50.0 } else { 430.0 };
-    let ty =
-        v.l.f(prev.map(|p| p.trophy_y), w.trophy_y)
-            .min(TROPHY_FLOOR as f32 - th);
-    g.spr("winnercoupe", tx, ty, 0)?;
+    if !matches!(w.stage, Stage::FadeIn | Stage::CountUp) {
+        trophy(g, v, w, prev)?;
+    }
 
     let top = w.fly_score.max(w.farmer_score);
     let fh = bar_height(w.farmer_counter, top);
@@ -71,6 +68,25 @@ pub fn winner(g: &mut Gfx, v: &View, w: &Winner) -> Result<(), Error> {
     }
     v.fx.draw_particles(g, v.l)?;
     g.fade(w.fade.alpha)
+}
+
+/// A hop's lift and length. shortcut: the sim does not move the trophy while it hops (its
+/// Wander mover is not modelled, answers.md "Winner trophy"); a 20 px arc over the last 500 ms
+/// of the hop stands in. Revisit when the wander mover lands in the sim.
+const HOP_PX: f32 = 20.0;
+const HOP_ARC_MS: u64 = 500;
+
+/// The trophy falls (sim `trophy_y`, +`trophy_vy` px/s per tick) onto the loser, then hops.
+fn trophy(g: &mut Gfx, v: &View, w: &Winner, prev: Option<&Winner>) -> Result<(), Error> {
+    let (_, th) = g.size("winnercoupe")?;
+    let mut ty =
+        v.l.f(prev.map(|p| p.trophy_y), w.trophy_y)
+            .min(TROPHY_FLOOR as f32 - th);
+    if w.hopping {
+        let left = w.hop.remaining_ms(v.now).min(HOP_ARC_MS) as f32 / HOP_ARC_MS as f32;
+        ty -= HOP_PX * (left * std::f32::consts::PI).sin();
+    }
+    g.spr("winnercoupe", w.trophy_x() as f32, ty, 0)
 }
 
 const PANEL: Color = Color::RGB(124, 150, 228);
