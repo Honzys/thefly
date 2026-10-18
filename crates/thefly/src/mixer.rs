@@ -41,10 +41,10 @@ pub fn pan(p: Pan) -> (f32, f32) {
         Pan::Fixed(v) => pan_gains(v),
         Pan::ScreenX { x, w } => {
             let centre = x.saturating_add(w / 2);
-            let off = (centre - centre.clamp(0, SCREEN_W)).abs();
+            let off = i32::try_from(centre.abs_diff(centre.clamp(0, SCREEN_W))).unwrap_or(i32::MAX);
             let fade = gain((-off.saturating_mul(OFFSCREEN_CB_PER_PX)).max(OFFSCREEN_MAX_CB));
             let half = SCREEN_W / 2;
-            let cb = ((centre - half).clamp(-half, half) * EDGE_PAN_CB) / half;
+            let cb = ((centre.clamp(0, SCREEN_W) - half) * EDGE_PAN_CB) / half;
             let (l, r) = pan_gains(cb);
             (l * fade, r * fade)
         }
@@ -208,6 +208,21 @@ mod tests {
         assert!(close(l, 1.0) && close(r, 0.1));
         let (l, r) = pan_gains(500);
         assert!(close(l, gain(-500)) && close(r, 1.0));
+    }
+
+    #[test]
+    fn negative_screen_x_pans_hard_left_and_stays_in_gain_range() {
+        let fade = gain(-300);
+        let (l, r) = pan(Pan::ScreenX { x: -100, w: 0 });
+        assert!(close(l, fade) && close(r, fade * 0.1), "{l} {r}");
+        for x in [-1, i32::MIN, i32::MAX] {
+            let (l, r) = pan(Pan::ScreenX { x, w: 0 });
+            assert!(
+                (0.0..=1.0).contains(&l) && (0.0..=1.0).contains(&r),
+                "x {x}: {l} {r}"
+            );
+        }
+        assert_eq!(pan(Pan::Fixed(-100_000)), pan(Pan::Fixed(-MAX_PAN)));
     }
 
     #[test]
