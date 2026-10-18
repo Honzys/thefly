@@ -172,6 +172,12 @@ impl Lift {
         result
     }
 
+    /// The object manager's +0x1a ≠ 1000: from the hook tick until the delivery tick, which
+    /// clears `hooked` (answers.md "Farmer voice 33").
+    pub fn hoisting(&self) -> bool {
+        self.state == LiftState::Hoisting && self.hooked.is_some()
+    }
+
     fn transitions(&mut self, objects: &Objects, fly_carrying: bool, cx: &mut Ctx) {
         if !fly_carrying && self.state != LiftState::Hoisting {
             self.approaching = false;

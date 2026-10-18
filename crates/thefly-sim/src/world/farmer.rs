@@ -125,7 +125,7 @@ pub struct Farmer {
     pub nuclear: Nuclear,
     pub voice_timer: Timer,
     pub step_counter: i32,
-    /// Rising-edge memories for voices 33 (the fly holds an object) and 30 (the fly is not
+    /// Rising-edge memories for voices 33 (the winch hoists an object) and 30 (the fly is not
     /// alive).
     pub prev_holding: bool,
     pub prev_fly_down: bool,
@@ -454,8 +454,9 @@ impl Farmer {
     }
 
     /// `FUN_0043c730`: voices 31/32/33/30 and footsteps (AR §1.5, answers.md "Farmer voice 33").
-    /// `holding` is the object manager's grabbed index (+0x1a) being set; `fly_down` is the fly's
-    /// life state (`FUN_0043885d`) being non-zero.
+    /// `holding` is the object manager's +0x1a ≠ 1000, the winch hoisting an object
+    /// ([`super::lift::Lift::hoisting`]); `fly_down` is the fly's life state (`FUN_0043885d`)
+    /// being non-zero.
     pub fn voices(&mut self, holding: bool, fly_down: bool, cx: &mut Ctx) {
         if self.voice_timer.expired(cx.now) && cx.rng.r(100) < HATE_PERCENT {
             let ms = VOICE_BASE_MS + cx.rng.r(VOICE_RAND_MS);

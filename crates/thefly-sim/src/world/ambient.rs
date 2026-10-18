@@ -36,11 +36,8 @@ impl World {
     pub fn ambient_step(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let _ = m;
         self.ambient.animal_sound(cx);
-        // shortcut: answers.md "Farmer voice 33" [I], a plain drop clears the port's carried
-        // index, while the original may keep +0x1a until delivery. Revisit with FUN_0042c888's
-        // drop path.
-        let holding = self.objects.carried.is_some();
-        self.farmer.voices(holding, !self.fly.alive(), cx);
+        self.farmer
+            .voices(self.lift.hoisting(), !self.fly.alive(), cx);
     }
 }
 
@@ -93,13 +90,15 @@ mod tests {
         assert_eq!(rig.rng.rand(), 16804);
     }
 
-    /// answers.md "Farmer voice 33": voice 33 plays on the tick the fly grabs an object. Seed 15
-    /// draws 87 (no animal), 5105 % 100 = 5 < 15 (voice 33); the next tick, still holding,
-    /// draws only 27056 for the animal roll, leaving 2938 next.
+    /// answers.md "Farmer voice 33" (round 2): voice 33 plays when the winch hooks an object,
+    /// not when the fly grabs one. Seed 15 draws 87 (no animal); carrying alone draws nothing
+    /// more, so 5105 is next. On the hook tick 5105 % 100 = 5 < 15 plays voice 33; the next
+    /// tick, still hoisting, draws only 27056 for the animal roll, leaving 2938 next.
     #[test]
-    fn voice_33_plays_when_the_fly_grabs_an_object() {
+    fn voice_33_plays_when_the_winch_hooks_an_object() {
         use crate::match_state::{MatchConfig, Players};
         use crate::rng::MsvcRand;
+        use crate::world::lift::LiftState;
         let mut rig = Rig::new(1);
         let config = MatchConfig {
             players: Players::Two,
@@ -108,14 +107,39 @@ mod tests {
         let mut m = MatchState::new(config, false, &mut rig.cx(0));
         let mut w = World::bare(&m, &mut rig.cx(0));
         assert!(w.fly.alive());
+        let voice_33 = |events: &[Event]| {
+            events
+                .iter()
+                .filter(
+                    |e| matches!(e, Event::Sound { slot, .. } if *slot == SoundSlot::VOICE_LOSE),
+                )
+                .count()
+        };
         (rig.rng, rig.events) = (MsvcRand::new(15), Vec::new());
         w.objects.carried = Some(0);
         w.ambient_step(&mut m, &mut rig.cx(0));
-        let voice_33 =
-            |e: &Event| matches!(e, Event::Sound { slot, .. } if *slot == SoundSlot::VOICE_LOSE);
-        assert_eq!(rig.events.iter().filter(|e| voice_33(e)).count(), 1);
+        assert_eq!(voice_33(&rig.events), 0);
+        assert_eq!(rig.rng.clone().rand(), 5105);
+
+        rig.rng = MsvcRand::new(15);
+        (w.lift.state, w.lift.hooked) = (LiftState::Hoisting, Some(0));
         w.ambient_step(&mut m, &mut rig.cx(15));
-        assert_eq!(rig.events.iter().filter(|e| voice_33(e)).count(), 1);
+        assert_eq!(voice_33(&rig.events), 1);
+        w.ambient_step(&mut m, &mut rig.cx(30));
+        assert_eq!(voice_33(&rig.events), 1);
         assert_eq!(rig.rng.rand(), 2938);
+    }
+
+    /// The delivery tick returns −1 and clears the hooked index while the state is still
+    /// hoisting; the flag (+0x1a ≠ 1000) drops on that tick.
+    #[test]
+    fn the_hoist_flag_drops_on_the_delivery_tick() {
+        use crate::world::lift::{Lift, LiftState};
+        let mut rig = Rig::new(1);
+        let mut lift = Lift::new([0; 3], &mut rig.cx(0));
+        (lift.state, lift.hooked) = (LiftState::Hoisting, Some(0));
+        assert!(lift.hoisting());
+        lift.hooked = None;
+        assert!(!lift.hoisting());
     }
 }
