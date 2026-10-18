@@ -8,6 +8,7 @@ use crate::event::{Event, Music, Pan, PlayParams, SaveFile, SoundOp, SoundSlot};
 use crate::highscores::HighScoreScreen;
 use crate::input::{KeyState, Scancode};
 use crate::match_state::{MatchConfig, Mode, Players};
+use crate::mover::Wander;
 use crate::saves::{Options, encode_options};
 use crate::screen::{CLICK, Flow, Screen};
 use crate::world::ai::AiLevel;
@@ -84,7 +85,7 @@ pub struct BootSlide {
     pub target: Page,
 }
 
-/// Credits choreography (scene slide, letterbox, five text pairs at 7000 ms).
+/// Credits choreography (scene slide, letterbox, wandering photos, five text pairs at 7000 ms).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Credits {
     pub scene_y: f64,
@@ -92,6 +93,9 @@ pub struct Credits {
     pub letterbox: i32,
     pub pair: u8,
     pub hold: Timer,
+    /// Top-left of `i_credit_seb` and `i_credit_gaga` in scene space; draw at y + `scene_y`.
+    pub photos: [[i32; 2]; 2],
+    pub movers: [Wander; 2],
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -117,10 +121,21 @@ const PIG_H: i32 = 300;
 const BOOT_H: i32 = 575;
 const BOOT_REST_Y: f64 = 350.0;
 /// Credits: five text pairs held 7000 ms each, looping until Esc (`FUN_0041be05`).
-/// shortcut: the two scene sprites wander during the slide and draw rand through the shared
-/// Wander rule (answers.md "Credits: end and rand"); not modelled until the wander mover lands.
 pub const CREDIT_PAIRS: u8 = 5;
 pub const CREDIT_HOLD_MS: u64 = 7000;
+/// SR §2.3: the scene slides down at 520 px/s, 5 px/s slower each tick; the letterbox grows
+/// 10 px a tick to 120.
+const CREDIT_SLIDE_VY: f64 = 520.0;
+const CREDIT_SLIDE_DECEL: f64 = 5.0;
+const LETTERBOX_STEP: i32 = 10;
+const LETTERBOX_MAX: i32 = 120;
+/// The photos start at (100, −300) and (400, −300) and wander (answers.md "Credits: end and
+/// rand"): reroll 500, speeds 30/30, runs 8/6, accel 0 while sliding, then 5.
+const PHOTO_START: [[i32; 2]; 2] = [[100, -300], [400, -300]];
+const PHOTO_REROLL_MS: i32 = 500;
+const PHOTO_SPEED: (i32, i32) = (30, 30);
+const PHOTO_RUNS: (i32, i32) = (8, 6);
+const PHOTO_ACCEL: (i32, i32) = (5, 5);
 
 /// Top page grid, 3 × 2, cells [−1, 0, −2 / 1, 2, 3].
 const TOP_GRID: [[Option<usize>; 3]; 2] = [[None, Some(0), None], [Some(1), Some(2), Some(3)]];
@@ -367,8 +382,12 @@ impl Menu {
         }
         b.target = page;
         if let Page::Credits(_) = page {
+            let mover = Wander::new(PHOTO_REROLL_MS, PHOTO_SPEED, PHOTO_RUNS, (0, 0));
             self.credits = Credits {
+                scene_vy: CREDIT_SLIDE_VY,
                 hold: Timer::armed(cx.now, CREDIT_HOLD_MS),
+                photos: PHOTO_START,
+                movers: [mover; 2],
                 ..Credits::default()
             };
             self.boot.phase = SlidePhase::Parked;
@@ -478,8 +497,16 @@ impl Menu {
         Flow::Stay
     }
 
+    // shortcut: Esc returns to the top page at once; the slide-out (page 8: the scene rises,
+    // bounces with −v/2, boom at volume 300, SR §2.3) is not modelled, nor which photo steps
+    // first or when the slide ends (taken as vy reaching 0) [I]. Revisit with the page 8 decode.
     fn credits_tick(&mut self, keys: &KeyState, cfg: &MatchConfig, cx: &mut Ctx) -> Flow {
         let c = &mut self.credits;
+        c.slide();
+        for (pos, mover) in c.photos.iter_mut().zip(c.movers.iter_mut()) {
+            let (dx, dy) = mover.step(cx);
+            *pos = [pos[0] + dx, pos[1] + dy];
+        }
         if c.hold.expired_rearm(cx.now) {
             c.pair = (c.pair + 1) % CREDIT_PAIRS;
         }
@@ -489,6 +516,25 @@ impl Menu {
             self.boot.phase = SlidePhase::Parked;
         }
         Flow::Stay
+    }
+}
+
+impl Credits {
+    /// One tick of the scene slide and the letterbox; the photos accelerate once it stops.
+    fn slide(&mut self) {
+        self.letterbox = (self.letterbox + LETTERBOX_STEP).min(LETTERBOX_MAX);
+        if self.scene_vy <= 0.0 {
+            return;
+        }
+        self.scene_vy -= CREDIT_SLIDE_DECEL;
+        if self.scene_vy > 0.0 {
+            self.scene_y += self.scene_vy * DT;
+            return;
+        }
+        self.scene_vy = 0.0;
+        for mover in &mut self.movers {
+            mover.set_accel(PHOTO_ACCEL);
+        }
     }
 }
 
@@ -512,4 +558,77 @@ fn toggle(item: usize, options: &mut Options, cx: &mut Ctx) {
 
 fn pig_h(cx: &Ctx) -> i32 {
     cx.data.sizes.get("i_cochon_corps").map_or(PIG_H, |s| s.h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::MsvcRand;
+    use crate::screen::rig::Rig;
+
+    const TICK_CAP: usize = 400;
+
+    fn in_credits(rig: &mut Rig) -> (Menu, MatchConfig) {
+        let (mut m, cfg) = (Menu::new(false), MatchConfig::default());
+        rig.cx(|cx| m.go(Page::Credits(7), &cfg, cx));
+        rig.rng = MsvcRand::new(1);
+        (m, cfg)
+    }
+
+    fn tick(rig: &mut Rig, m: &mut Menu, cfg: &MatchConfig) {
+        rig.step(&[], |k, cx| m.credits_tick(k, cfg, cx));
+    }
+
+    /// answers.md "Credits: end and rand", seed 1, accel 0 while sliding: seb x d 7 (+1),
+    /// 6334 % 30 + 65 = 69; y d 9 (+1), 15724 % 30 + 65 = 69; gaga x d 8, 26962 % 30 + 65 = 87;
+    /// y d 5, 28145 % 30 + 65 = 70. Each moves 1 px on both axes.
+    #[test]
+    fn the_credit_photos_wander_from_the_first_tick() {
+        let mut rig = Rig::new(1);
+        let (mut m, cfg) = in_credits(&mut rig);
+        tick(&mut rig, &mut m, &cfg);
+        let c = m.credits;
+        assert_eq!(c.movers.map(|w| w.v), [[69, 69], [87, 70]]);
+        assert_eq!(c.photos, [[101, -299], [401, -299]]);
+        assert_eq!(rig.rng.rand(), 23281);
+    }
+
+    /// SR §2.3: vy 520 less 5 per tick moves Σ (520 − 5k) / 65 for k = 1..103 = 26780 / 65 = 412
+    /// px and stops on tick 104; the letterbox reaches 120 after 12 ticks. While sliding no
+    /// photo speed passes R(30) + 65 ≤ 94; after it, accel 5 pushes one past.
+    #[test]
+    fn the_scene_slides_412_px_then_the_photos_accelerate() {
+        let mut rig = Rig::new(1);
+        let (mut m, cfg) = in_credits(&mut rig);
+        let fastest = |m: &Menu| {
+            m.credits
+                .movers
+                .iter()
+                .flat_map(|w| w.v)
+                .map(i32::abs)
+                .max()
+        };
+        for _ in 0..12 {
+            tick(&mut rig, &mut m, &cfg);
+        }
+        assert_eq!(m.credits.letterbox, 120);
+        for _ in 12..103 {
+            tick(&mut rig, &mut m, &cfg);
+            assert!(fastest(&m) <= Some(94));
+        }
+        assert_eq!(m.credits.scene_vy, 5.0);
+        tick(&mut rig, &mut m, &cfg);
+        assert_eq!(m.credits.scene_vy, 0.0);
+        assert!(
+            (m.credits.scene_y - 412.0).abs() < 1e-9,
+            "{}",
+            m.credits.scene_y
+        );
+        let passed = (0..TICK_CAP).any(|_| {
+            tick(&mut rig, &mut m, &cfg);
+            fastest(&m) > Some(94)
+        });
+        assert!(passed);
+        assert_eq!(m.credits.letterbox, 120);
+    }
 }
