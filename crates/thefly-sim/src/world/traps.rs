@@ -210,20 +210,23 @@ const CONE_LEFT: Cone = Cone {
 };
 
 impl Fan {
-    /// `FUN_00429cbc`: the (dvx, dvy) this fan's wind gives a point (the fly's centre).
-    // shortcut: answers.md says type 2 "unwraps cx near the wrap edge" without the rule; the
-    // port adds the wrap when the cone's base is past it and the point is left of the wrapped
-    // base. Revisit when FUN_00429cbc's unwrap is read.
-    fn blow(&self, (px, py): (i32, i32)) -> (i32, i32) {
-        let x = self.screen_x;
+    /// `FUN_00429cbc`: the (dvx, dvy) this fan's wind gives a point x..x + w wide at height py
+    /// (the fly), tested at its centre. answers.md "Fan blow field: type-2 unwrap": a left fan
+    /// whose base is within the reach of the screen's left edge sees a point in the ring's last
+    /// point width at its centre moved by −wrap; a right fan never unwraps.
+    fn blow(&self, x: i32, w: i32, py: i32) -> (i32, i32) {
         let (cone, dir) = if self.facing_right {
             (CONE_RIGHT, 1)
         } else {
             (CONE_LEFT, -1)
         };
-        let (a, m) = (x + cone.base, x + cone.mouth);
-        let wrapped = !self.facing_right && a > SCREEN_WRAP && px < a - SCREEN_WRAP;
-        let px = if wrapped { px + SCREEN_WRAP } else { px };
+        let (a, m) = (self.screen_x + cone.base, self.screen_x + cone.mouth);
+        let unwrap = !self.facing_right && a <= BLOW_REACH && x >= SCREEN_WRAP - w;
+        let px = if unwrap {
+            w / 2 - (SCREEN_WRAP - x).abs()
+        } else {
+            x + w / 2
+        };
         let inside = if self.facing_right {
             a < px && px < m + BLOW_REACH
         } else {
@@ -387,11 +390,11 @@ impl Traps {
         arcs
     }
 
-    /// The summed blow field of every fan at a point.
-    pub fn blow(&self, point: (i32, i32)) -> (i32, i32) {
-        self.fans.iter().fold((0, 0), |(x, y), f| {
-            let (dx, dy) = f.blow(point);
-            (x + dx, y + dy)
+    /// The summed blow field of every fan at a point x..x + w wide at height y.
+    pub fn blow(&self, x: i32, w: i32, y: i32) -> (i32, i32) {
+        self.fans.iter().fold((0, 0), |(sx, sy), f| {
+            let (dx, dy) = f.blow(x, w, y);
+            (sx + dx, sy + dy)
         })
     }
 
@@ -515,7 +518,8 @@ impl World {
 
     /// `FUN_00429cbc`, before the hit test: the wind pushes the fly by its centre.
     fn fan_blow(&mut self) {
-        let (dx, dy) = self.traps.blow(self.fly.centre());
+        let (_, cy) = self.fly.centre();
+        let (dx, dy) = self.traps.blow(self.fly.x, self.fly.size.w, cy);
         self.fly.vx += dx;
         self.fly.vy += dy;
     }
@@ -682,10 +686,15 @@ mod tests {
     #[test]
     fn a_left_fan_blows_left_and_up_inside_its_slanted_cone() {
         let fan = fan_at(400);
-        assert_eq!(fan.blow((300, 400)), (-61, -20));
-        assert_eq!(fan.blow((300, 450)), (0, 0));
-        assert_eq!(fan.blow((93, 400)), (0, 0));
-        assert_eq!(fan.blow((722, 400)), (0, 0));
+        assert_eq!(centred(&fan, 300, 400), (-61, -20));
+        assert_eq!(centred(&fan, 300, 450), (0, 0));
+        assert_eq!(centred(&fan, 93, 400), (0, 0));
+        assert_eq!(centred(&fan, 722, 400), (0, 0));
+    }
+
+    /// The blow at a 120-wide point centred on (cx, cy).
+    fn centred(fan: &Fan, cx: i32, cy: i32) -> (i32, i32) {
+        fan.blow(cx - 60, 120, cy)
     }
 
     /// Type 1 (right) at screen 500, y 300: base 500, mouth 635, rows 342..549. At (801, 350):
@@ -696,8 +705,32 @@ mod tests {
             facing_right: true,
             ..fan_at(400)
         };
-        assert_eq!(fan.blow((801, 350)), (99, -33));
-        assert_eq!(fan.blow((500, 400)), (0, 0));
+        assert_eq!(centred(&fan, 801, 350), (99, -33));
+        assert_eq!(centred(&fan, 500, 400), (0, 0));
+    }
+
+    /// answers.md "Fan blow field: type-2 unwrap": a left fan with base x + 222 ≤ 500 sees a
+    /// point at x ≥ 5000 − w at cx = w/2 − |5000 − x|. Fan at screen 200 (base 422, mouth 293):
+    /// x 4950 → cx 10, d 412, rows 137..434.8, P = trunc((1 − 283/500) × 200) = 86: (−64, −21).
+    /// x 4880 → cx −60, d 482, P = trunc(58.8) = 58: (−43, −14); x 4879 is not unwrapped.
+    /// Screen 278 (base 500) still unwraps: cx 10, P = trunc((1 − 361/500) × 200) = 55: (−41,
+    /// −13); screen 280 (base 502) does not.
+    #[test]
+    fn a_left_fan_near_the_left_edge_sees_a_point_at_the_ring_end() {
+        let fan = fan_at(160);
+        assert_eq!(fan.screen_x, 200);
+        assert_eq!(fan.blow(4950, 120, 300), (-64, -21));
+        assert_eq!(fan.blow(4880, 120, 300), (-43, -14));
+        assert_eq!(fan.blow(4879, 120, 300), (0, 0));
+        assert_eq!(fan_at(223).blow(4950, 120, 300), (-41, -13));
+        assert_eq!(fan_at(224).blow(4950, 120, 300), (0, 0));
+        let right = Fan {
+            facing_right: true,
+            ..fan
+        };
+        assert_eq!(right.blow(4950, 120, 300), (0, 0), "type 1 has no unwrap");
+        // The base is never moved: a left fan at screen 4900 (base 5122) misses a point at 50.
+        assert_eq!(centred(&fan_at(3920), 50, 300), (0, 0));
     }
 }
 #[cfg(test)]
