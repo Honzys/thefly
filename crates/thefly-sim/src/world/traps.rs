@@ -1,7 +1,8 @@
 //! W2. Trap entities on the table: flypapers, fans and zappers (game-spec §4.6, fly-and-world
 //! §7.4). Built each period from the shop's [`TrapLayout`]. Ticks step 13.
 
-use super::World;
+use super::lift::SHOP_SCALE;
+use super::{OBJECT_PARALLAX, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::match_state::TrapLayout;
@@ -79,6 +80,14 @@ impl TrapKind {
     }
 }
 
+impl TrapSpec {
+    /// The spacing width in stored units, trunc(width / 0.152): 52, 223 and 638, which match the
+    /// sprite frame widths (53, 666 / 3, 635).
+    pub fn stored_width(&self) -> i32 {
+        (f64::from(self.width) / SHOP_SCALE) as i32
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flypaper {
     pub variant2: bool,
@@ -124,11 +133,23 @@ impl Traps {
         todo!("W2 game-spec §4.6, ai-and-rules §4.3")
     }
 
-    /// `FUN_00427bb4`: may an object occupy [x, x + w] (object layer px)? Used by placement.
+    /// `FUN_00427bb4`: may an object occupy [x, x + w] (object placement units, the 1.25 layer's
+    /// screen x, FW §5.2 step 3)? Used by placement.
+    // shortcut: O22, the exact test is not decoded. Only fans share the table with the objects
+    // (flypapers and zappers hang from the top, stored y 0), so only a fan's span blocks, inclusive
+    // like the object-object test. Revisit when FUN_00427bb4 is read.
     pub fn span_free(&self, x: i32, w: i32) -> bool {
-        let _ = (x, w);
-        todo!("W2 fly-and-world §5.2 step 3; open item O22")
+        let fan_w = TrapKind::FanLeft.spec().stored_width();
+        self.fans.iter().all(|f| {
+            let fx = placement_x(f.x);
+            x + w < fx || fx + fan_w < x
+        })
     }
+}
+
+/// A layer x on the 1.25 layer in placement units (FW §4.1 screen x before the wrap).
+fn placement_x(layer_x: i32) -> i32 {
+    (f64::from(layer_x) * OBJECT_PARALLAX) as i32
 }
 
 impl World {
@@ -137,5 +158,45 @@ impl World {
     pub fn traps_step(&mut self, cx: &mut Ctx) {
         let _ = cx;
         todo!("W2 game-spec §4.6, fly-and-world §7.4")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fan_at(x: i32) -> Fan {
+        Fan {
+            facing_right: false,
+            x,
+            y: 600,
+            strength: 0,
+            blowing: false,
+            rehit: Timer::UNARMED,
+        }
+    }
+
+    #[test]
+    fn stored_widths_scale_the_shop_widths() {
+        let w = TRAP_TABLE.map(|t| t.stored_width());
+        assert_eq!(w, [52, 223, 223, 638]);
+    }
+
+    /// A fan at layer x 800 sits at placement x 1000 and spans [1000, 1223].
+    #[test]
+    fn only_a_fan_span_blocks_an_object() {
+        let traps = Traps {
+            fans: vec![fan_at(800)],
+            flypapers: vec![Flypaper {
+                variant2: false,
+                x: 2000,
+                y: 0,
+            }],
+            ..Traps::default()
+        };
+        assert!(traps.span_free(899, 100) && traps.span_free(1224, 50));
+        assert!(!traps.span_free(900, 100) && !traps.span_free(1223, 50));
+        assert!(traps.span_free(2500, 100), "flypapers hang above the table");
+        assert!(Traps::default().span_free(0, 5000));
     }
 }

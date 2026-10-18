@@ -19,6 +19,13 @@ pub const FRENZY_DIVISOR_FLOOR: i32 = 1;
 /// UB guard for the Triple roll: with reason 1 and price ≤ 70 the original adds an
 /// uninitialised value. The port adds this.
 pub const TRIPLE_CHEAP_OBJECT_BONUS: i32 = 0;
+/// UB guard: `rand % 0` when a controller's spread is 0 (never with the table values).
+pub const MIN_SPREAD: i32 = 1;
+/// UB guard: `rand % 0` when an aligner is built with no reaction spread (the bonus AI's choice).
+pub const MIN_REACT_RAND: i32 = 1;
+/// An aligned x axis stops when `rand % 5 < 2` (AR §2.4 step 7.1).
+pub const ALIGN_STOP_ROLL: i32 = 5;
+pub const ALIGN_STOP_BELOW: i32 = 2;
 /// The Triple bonus applies above this carried-object price.
 pub const TRIPLE_PRICE_THRESHOLD: f32 = 70.0;
 
@@ -201,15 +208,29 @@ pub struct Controller {
 
 impl Controller {
     /// `FUN_0043baa4`: a fresh offset within the current spread.
+    // shortcut: AR §2.3 gives "±(rand % S) with an independent sign" but not the draw order; the
+    // port draws x magnitude, x sign, y magnitude, y sign. Revisit if a trace shows otherwise.
     pub fn reroll_offset(&mut self, cx: &mut Ctx) {
-        let _ = cx;
-        todo!("W2 ai-and-rules §2.3")
+        let spread = self.spread.max(MIN_SPREAD);
+        self.ox = cx.rng.r(spread) * cx.rng.sign();
+        self.oy = cx.rng.r(spread) * cx.rng.sign();
     }
 
-    /// Refresh dx, dy and distance from the swatter centre and the target's position.
+    /// Refresh dx, dy and distance from the swatter reference point (centre x, trunc(reach + 77))
+    /// and the target's reference point.
     pub fn refresh(&mut self, swatter: (i32, i32), target: (i32, i32)) {
-        let _ = (swatter, target);
-        todo!("W2 ai-and-rules §2.3")
+        self.dx = self.ring_delta(swatter.0, target.0 + self.ox);
+        self.dy = target.1 + self.oy - swatter.1;
+        self.distance = self.ring_delta(swatter.0, target.0).abs();
+    }
+
+    /// Signed distance from `from` to `to`, the shorter way round the ring (AR §2.3 `dx`).
+    fn ring_delta(&self, from: i32, to: i32) -> i32 {
+        let d = to - from;
+        if self.ring > 0 && d.abs() > self.ring / 2 {
+            return d - d.signum() * self.ring;
+        }
+        d
     }
 }
 
@@ -235,14 +256,46 @@ pub struct Alignment {
 }
 
 impl Aligner {
+    /// AR §2.4 step 7.1–7.3. The x direction waits for the reaction timer; y applies at once.
     pub fn step(&mut self, dx: i32, dy: i32, cx: &mut Ctx) -> Alignment {
-        let _ = (dx, dy, cx);
-        todo!("W2 ai-and-rules §2.4 step 7")
+        let x_aligned = dx.abs() <= self.align_tol;
+        let chosen = self.pending_x_dir.unwrap_or(self.x_dir);
+        let want = if !x_aligned {
+            dx.signum()
+        } else if cx.rng.r(ALIGN_STOP_ROLL) < ALIGN_STOP_BELOW {
+            0
+        } else {
+            chosen
+        };
+        if want == self.x_dir {
+            self.pending_x_dir = None;
+        } else if self.pending_x_dir != Some(want) {
+            self.pending_x_dir = Some(want);
+            let delay = self.react_base + cx.rng.r(self.react_rand.max(MIN_REACT_RAND));
+            self.react.arm(cx.now, u64::try_from(delay).unwrap_or(0));
+        }
+        if self.pending_x_dir.is_some() && self.react.expired(cx.now) {
+            self.x_dir = want;
+            self.pending_x_dir = None;
+        }
+        let y_aligned = dy.abs() <= self.align_tol;
+        self.y_dir = if y_aligned { 0 } else { dy.signum() };
+        Alignment {
+            x_aligned,
+            y_aligned,
+        }
     }
 
-    /// The four direction flags for [`super::farmer::Farmer::move_by`].
+    /// The four direction flags for [`super::farmer::Farmer::move_by`]. dy > 0 means the target
+    /// is lower on screen, which the down key (toward full reach) closes.
     pub fn pad(&self) -> FarmerPad {
-        todo!("W2 ai-and-rules §2.4 step 9")
+        FarmerPad {
+            right: self.x_dir > 0,
+            left: self.x_dir < 0,
+            up: self.y_dir < 0,
+            down: self.y_dir > 0,
+            ..FarmerPad::default()
+        }
     }
 }
 
@@ -330,5 +383,87 @@ impl FarmerAi {
     pub fn bump_budget(&mut self, item: usize, owned: i32, cx: &mut Ctx) {
         let _ = (item, owned, cx);
         todo!("W2 ai-and-rules §2.6")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::rng::MsvcRand;
+
+    /// Seed 1 draws 41, 18467, 6334, 26500, 19169, 15724, ...
+    fn with_seed_1<T>(now: u64, f: impl FnOnce(&mut Ctx) -> T) -> (T, i32) {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let mut cx = Ctx::new(now, &mut rng, &data, &mut events);
+        let out = f(&mut cx);
+        let next = cx.rng.rand();
+        (out, next)
+    }
+
+    /// AR §2.3: ox = 41 % 181 = 41, sign of 18467 (> 16383) is +; oy = 6334 % 181 = 180, sign
+    /// of 26500 is +.
+    #[test]
+    fn the_offset_is_a_signed_draw_per_axis() {
+        let mut c = Controller {
+            spread: 181,
+            ..Controller::default()
+        };
+        let ((), next) = with_seed_1(0, |cx| c.reroll_offset(cx));
+        assert_eq!((c.ox, c.oy, next), (41, 180, 19169));
+    }
+
+    #[test]
+    fn dx_takes_the_shorter_way_round_the_ring() {
+        let mut c = Controller {
+            ring: FLY_RING,
+            ox: 10,
+            oy: -5,
+            ..Controller::default()
+        };
+        c.refresh((100, 300), (4000, 250));
+        // 4010 − 100 = 3910 is more than half of 4392, so the way round is 3910 − 4392.
+        assert_eq!((c.dx, c.dy, c.distance), (-482, -55, 492));
+        c.refresh((100, 300), (900, 400));
+        assert_eq!((c.dx, c.dy, c.distance), (810, 95, 800));
+    }
+
+    /// AR §2.4 step 7, gaps §11.1: a new x direction waits 130 + 41 % 100 = 171 ms; an aligned
+    /// axis keeps it while rand % 5 ≥ 2 (18467 % 5 = 2, 6334 % 5 = 4) and drops it on 26500 % 5
+    /// = 0, which waits 130 + 19169 % 100 = 199 ms; y applies at once.
+    #[test]
+    fn the_x_direction_waits_for_the_reaction_delay() {
+        let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
+        let mut a = Aligner {
+            align_tol: 40,
+            react_base: 130,
+            react_rand: 100,
+            ..Aligner::default()
+        };
+        let mut step = |now, dx, dy, a: &mut Aligner| {
+            let mut cx = Ctx::new(now, &mut rng, &data, &mut events);
+            a.step(dx, dy, &mut cx)
+        };
+        let al = step(0, 100, -80, &mut a);
+        assert_eq!(
+            (a.x_dir, a.y_dir, al.x_aligned, al.y_aligned),
+            (0, -1, false, false)
+        );
+        assert!(a.pad().up && !a.pad().right);
+        step(170, 100, 0, &mut a);
+        assert_eq!((a.x_dir, a.y_dir), (0, 0));
+        step(171, 100, 0, &mut a);
+        assert_eq!(a.x_dir, 1);
+        assert!(a.pad().right);
+        let al = step(200, 10, 0, &mut a);
+        assert!(al.x_aligned && al.y_aligned && a.x_dir == 1);
+        step(215, 10, 0, &mut a);
+        assert_eq!(a.x_dir, 1);
+        step(230, 10, 0, &mut a);
+        assert_eq!((a.x_dir, a.pending_x_dir), (1, Some(0)));
+        step(428, -10, 0, &mut a);
+        assert_eq!(a.x_dir, 1);
+        step(429, -10, 0, &mut a);
+        assert_eq!(a.x_dir, 0);
     }
 }
