@@ -158,7 +158,7 @@ const BAR_BRAKE: i32 = 2;
 const BAR_STOP_ABOVE: i32 = -81;
 
 impl Bar {
-    // shortcut: the bar's per-tick split (`FUN_004135c2`) is [I]; the FPS integrator stands in.
+    // The per-tick split is the FPS integrator's (answers.md "FPS integrator: per-axis runs").
     fn tick(&mut self) {
         if self.vx == 0 {
             return;
@@ -308,6 +308,8 @@ const TARGET_Y_SPEED_SPAN: f64 = 500.0;
 const TARGET_RUNS: (i32, i32) = (6, 3);
 const TARGET_ACCEL: (i32, i32) = (5, 5);
 const TARGET_BAND: f64 = 15.0;
+/// The targets' 1.0 layer wraps at 4000; the right bound is wrap + 100, so x + 48 ≤ 4100.
+const TARGET_MAX_X: f64 = 4100.0 - TARGET_W;
 pub const LIFETIME_MS: u64 = 25_000;
 /// Port decision: the `piece` sheet's frame count is passed in code; the port uses 16.
 pub const COIN_FRAMES: i32 = 16;
@@ -551,14 +553,27 @@ impl BonusRound {
     }
 
     /// After the result: match over → winner, else → goodies shop.
+    ///
+    /// answers.md "Bonus round: target right bound and the tick order": the update pass
+    /// (`FUN_00446030`: the end-of-round check, the bar scroll, the fly, the swatter), then the
+    /// items pass outside the countdown (`FUN_004472df`: spawns, targets, coins).
     pub fn tick(&mut self, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
-        // shortcut: the bar and the pieces move first in the tick, before the spawns; the
-        // order inside `FUN_00446030` is [I].
         if matches!(self.phase, BonusPhase::End { .. } | BonusPhase::Result) {
             self.bar.brake();
         }
+        if let BonusPhase::Play { round } = self.phase
+            && round.expired(cx.now)
+        {
+            self.end(m, cx);
+        }
         self.bar.tick();
-        self.scroll(cx.now);
+        let playing = matches!(self.phase, BonusPhase::Play { .. });
+        if playing {
+            self.movers(keys, cx);
+        }
+        if !matches!(self.phase, BonusPhase::Countdown { .. }) {
+            self.items(playing, cx);
+        }
         match self.phase {
             BonusPhase::Countdown { count, mut next } => {
                 if next.expired_rearm(cx.now) {
@@ -567,7 +582,7 @@ impl BonusRound {
                     self.phase = BonusPhase::Countdown { count, next };
                 }
             }
-            BonusPhase::Play { round } => self.play(round, keys, m, cx),
+            BonusPhase::Play { .. } => {}
             BonusPhase::End { sound } => {
                 if sound.expired(cx.now) {
                     let farmer_ahead = 2 * self.coins_taken < 10 * self.hits;
@@ -602,36 +617,48 @@ impl BonusRound {
         self.target_timer.arm(cx.now, target_ms);
     }
 
-    fn play(&mut self, round: Timer, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) {
-        if round.expired(cx.now) {
-            return self.end(m, cx);
-        }
+    /// The fly, then the swatter mover, or the swing while swinging. The human swings on the Tab
+    /// press edge (gaps §2, bonus keys); the AI's request is a level, so in frenzy it swings
+    /// whenever the cooldown allows (AR §8.3 step 7).
+    fn movers(&mut self, keys: &KeyState, cx: &mut Ctx) {
         let step = self.bar.step;
         let (bg_h, fly_h) = (f64::from(self.bg_h), f64::from(self.fly_size.1));
         fly_step(&mut self.fly, &FlyPad::read(keys), step, bg_h, fly_h);
-        let pad = match &mut self.ai {
-            Some(ai) => ai.pad(&self.swatter, &self.targets, self.h_farmer, cx),
-            None => FarmerPad::read(keys),
+        let (pad, start) = match &mut self.ai {
+            Some(ai) => {
+                let pad = ai.pad(&self.swatter, &self.targets, self.h_farmer, cx);
+                (pad, pad.swing)
+            }
+            None => {
+                let pad = FarmerPad::read(keys);
+                (pad, pad.swing && !self.swing_held)
+            }
         };
-        swatter_step(&mut self.swatter, &pad, step);
-        self.move_sound(cx);
-        let edge = pad.swing && !self.swing_held;
         self.swing_held = pad.swing;
-        if self.swing.tick(edge) {
+        if self.swing.frame == 0 {
+            swatter_step(&mut self.swatter, &pad, step);
+            self.move_sound(cx);
+        }
+        if self.swing.tick(start) {
             swing_sounds(cx);
         }
-        if self.coin_timer.expired_rearm(cx.now) {
+    }
+
+    /// `FUN_004472df`: the coin spawn, the target spawn, then each target and each coin in slot
+    /// order. Hits and pickups count only during play (AR §8.3 step 5).
+    fn items(&mut self, counting: bool, cx: &mut Ctx) {
+        if counting && self.coin_timer.expired_rearm(cx.now) {
             self.spawn_coin(cx);
         }
-        if self.target_timer.expired_rearm(cx.now) {
+        if counting && self.target_timer.expired_rearm(cx.now) {
             self.spawn_target(cx);
         }
-        self.drift_targets(cx);
-        self.collect(cx);
-        if self.swing.hitting() {
-            self.swat(cx);
+        for i in 0..TARGETS {
+            self.target_step(i, counting, cx);
         }
-        self.phase = BonusPhase::Play { round };
+        for i in 0..COINS {
+            self.coin_step(i, counting, cx);
+        }
     }
 
     /// `FUN_0044936a`: slot 22 + R(5) once the tick count passes 31, or 21 while vx ≠ 0.
@@ -694,44 +721,54 @@ impl BonusRound {
         };
     }
 
-    /// Each active target's wander step, y clamped to the field less 15 px each side.
-    // shortcut: the right bound (wrap + 100) is not applied, as the wrap of the bonus 1.0 layer is
-    // not documented; and the drift runs after the spawns and before the scroll, an order
-    // answers.md "Bonus round movers" does not give [I]. Revisit with that layer's setup.
-    fn drift_targets(&mut self, cx: &mut Ctx) {
+    /// One target: the lifetime check, Wander then the FPS integrator with the bar step as the
+    /// camera delta, the bounds (x ≤ 4100 − 48 on the 1.0 layer, wrap 4000; y 15 px inside the
+    /// field; the left bound is never applied), the wing removal (x − 24 + 100 < 0), then the
+    /// swatter hit test while hitting.
+    fn target_step(&mut self, i: usize, counting: bool, cx: &mut Ctx) {
         let bottom = f64::from(self.bg_h) - TARGET_BAND - TARGET_H;
-        for t in self.targets.iter_mut().filter(|t| t.active) {
-            let (dx, dy) = t.mover.step(cx);
-            t.x += f64::from(dx);
-            t.y = (t.y + f64::from(dy)).clamp(TARGET_BAND, bottom);
+        let (step, now) = (f64::from(self.bar.step), cx.now);
+        let t = &mut self.targets[i];
+        if !t.active {
+            return;
+        }
+        if t.until.expired(now) {
+            t.active = false;
+            return;
+        }
+        let (dx, dy) = t.mover.step(cx);
+        t.x = (t.x + f64::from(dx) + step).min(TARGET_MAX_X);
+        t.y = (t.y + f64::from(dy)).clamp(TARGET_BAND, bottom);
+        if t.x + WING_DX + WING_W < 0.0 {
+            t.active = false;
+            return;
+        }
+        if counting && self.swing.hitting() {
+            self.swat(i, cx);
         }
     }
 
-    /// Each tick a coin's layer x moves by the bar step, its screen x = trunc(layer x × 1.25)
-    /// (`FUN_004180af` with the bar's camera delta). A coin leaves once x + w < 0, a target once
-    /// its wings (x − 24 + wing w) do, or either at the end of its lifetime.
-    // shortcut: answers.md "Bonus round movers" gives the bar step only for the coins; the
-    // targets (1.0 layer) are moved by it too, or they would hardly enter the screen [I].
-    fn scroll(&mut self, now: u64) {
-        let step = f64::from(self.bar.step);
-        for c in self.coins.iter_mut().filter(|c| c.active) {
-            c.layer_x += step;
-            c.x = (c.layer_x * COIN_LAYER).trunc();
+    /// One coin: its layer x moves by the bar step and its screen x = trunc(layer x × 1.25)
+    /// (`FUN_004180af` with the bar's camera delta); it leaves once x + w < 0 or at the end of
+    /// its lifetime; then the pickup.
+    fn coin_step(&mut self, i: usize, counting: bool, cx: &mut Ctx) {
+        let (step, now) = (f64::from(self.bar.step), cx.now);
+        let c = &mut self.coins[i];
+        if !c.active {
+            return;
         }
-        for t in self.targets.iter_mut().filter(|t| t.active) {
-            t.x += step;
+        c.layer_x += step;
+        c.x = (c.layer_x * COIN_LAYER).trunc();
+        if c.x + f64::from(COIN_H) < 0.0 || c.until.expired(now) {
+            c.active = false;
+            return;
         }
-        let coin_w = f64::from(COIN_H);
-        let pieces = (self.coins.iter_mut().map(|p| (p, coin_w)))
-            .chain(self.targets.iter_mut().map(|p| (p, WING_DX + WING_W)));
-        for (p, right) in pieces {
-            if p.x + right < 0.0 || p.until.expired(now) {
-                p.active = false;
-            }
+        if counting {
+            self.collect(i, cx);
         }
     }
 
-    fn collect(&mut self, cx: &mut Ctx) {
+    fn collect(&mut self, i: usize, cx: &mut Ctx) {
         let (w, h) = self.fly_size;
         let (dx, dy) = FLY_INSET;
         let fly = (
@@ -741,24 +778,21 @@ impl BonusRound {
             f64::from(h - 2 * dy),
         );
         let c = f64::from(COIN_H);
-        for i in 0..COINS {
-            let coin = self.coins[i];
-            if !coin.active || !caught(fly, &coin, (c, c)) {
-                continue;
-            }
-            self.coins[i].active = false;
-            self.coins_taken += 1;
-            // Port decision: 50 plays when 49 is busy and 50 free (`FUN_0040cf55`); no slot state.
-            let freq = 21_500 + cx.rng.r(500) as u32;
-            cx.sound(SoundSlot::RING_A, play_at(freq));
-            if self.coins_taken % 50 == 0 {
-                cx.emit(Event::play(SoundSlot::CHEER_FLY));
-            }
+        if !caught(fly, &self.coins[i], (c, c)) {
+            return;
+        }
+        self.coins[i].active = false;
+        self.coins_taken += 1;
+        // Port decision: 50 plays when 49 is busy and 50 free (`FUN_0040cf55`); no slot state.
+        let freq = 21_500 + cx.rng.r(500) as u32;
+        cx.sound(SoundSlot::RING_A, play_at(freq));
+        if self.coins_taken % 50 == 0 {
+            cx.emit(Event::play(SoundSlot::CHEER_FLY));
         }
     }
 
-    /// While hitting: the box (x + 30, trunc(reach), 121, 154) against each target.
-    fn swat(&mut self, cx: &mut Ctx) {
+    /// The box (x + 30, trunc(reach), 121, 154) against target `i`.
+    fn swat(&mut self, i: usize, cx: &mut Ctx) {
         let s = &self.swatter;
         let sw = (
             s.x + SWAT_INSET,
@@ -766,17 +800,14 @@ impl BonusRound {
             SWATTER_W - 2.0 * SWAT_INSET,
             SWAT_H,
         );
-        for i in 0..TARGETS {
-            let t = self.targets[i];
-            if !t.active || !caught(sw, &t, (TARGET_W, TARGET_H)) {
-                continue;
-            }
-            self.targets[i].active = false;
-            self.hits += 1;
-            cx.emit(Event::play(SoundSlot::FLYING_GOODIE));
-            if self.hits % 10 == 0 {
-                cx.emit(Event::play(SoundSlot::CHEER_FARMER));
-            }
+        if !caught(sw, &self.targets[i], (TARGET_W, TARGET_H)) {
+            return;
+        }
+        self.targets[i].active = false;
+        self.hits += 1;
+        cx.emit(Event::play(SoundSlot::FLYING_GOODIE));
+        if self.hits % 10 == 0 {
+            cx.emit(Event::play(SoundSlot::CHEER_FARMER));
         }
     }
 
@@ -979,7 +1010,7 @@ mod tests {
         b.coins[4] = at(170.0, 255.0);
         rig.rng = MsvcRand::new(1);
         let before = rig.events.len();
-        rig.cx(|cx| b.collect(cx));
+        rig.cx(|cx| (0..5).for_each(|i| b.collect(i, cx)));
         let taken: Vec<bool> = b.coins[..5].iter().map(|c| !c.active).collect();
         assert_eq!(taken, [true, true, false, false, false]);
         let ring = Event::Sound {
@@ -1015,7 +1046,7 @@ mod tests {
         let (_, mut b) = two_player_round(&mut rig);
         rig.rng = MsvcRand::new(1);
         rig.cx(|cx| b.spawn_target(cx));
-        rig.cx(|cx| b.drift_targets(cx));
+        rig.cx(|cx| b.target_step(0, false, cx));
         let t = b.targets[0];
         assert_eq!((t.mover.v, t.x, t.y), ([-70, 312], 826.0, 45.0));
         assert_eq!(rig.rng.rand(), 26962);
@@ -1034,11 +1065,12 @@ mod tests {
                 active: true,
                 x: 500.0,
                 y,
+                until: Timer::armed(0, LIFETIME_MS),
                 mover: target_mover(b.h_farmer),
                 ..Piece::default()
             };
         }
-        rig.cx(|cx| b.drift_targets(cx));
+        rig.cx(|cx| (0..2).for_each(|i| b.target_step(i, false, cx)));
         let got: Vec<_> = b.targets[..2].iter().map(|t| (t.x, t.y)).collect();
         assert_eq!(got, [(501.0, 15.0), (501.0, 381.0)]);
     }
@@ -1061,7 +1093,7 @@ mod tests {
         b.targets[2] = at(381.0, 331.0);
         b.targets[3] = at(552.0, 529.0);
         b.targets[4] = at(551.0, 530.0);
-        rig.cx(|cx| b.swat(cx));
+        rig.cx(|cx| (0..5).for_each(|i| b.swat(i, cx)));
         let hit: Vec<bool> = b.targets[..5].iter().map(|t| !t.active).collect();
         assert_eq!(hit, [true, true, false, false, false]);
         assert_eq!(b.hits, 2);
@@ -1186,10 +1218,11 @@ mod tests {
         assert_eq!(rig.events, [swing]);
     }
 
-    /// A coin's layer x moves by the bar step: 810 − 9 = 801, screen x trunc(801 × 1.25) = 1001;
-    /// a target (1.0 layer) moves 9 screen px.
+    /// A coin's layer x moves by the bar step: 810 − 9 = 801, screen x trunc(801 × 1.25) = 1001.
+    /// A target (1.0 layer) moves by its wander step plus the bar step: seed 1 from rest gives
+    /// vx 70 (x d 7, +1, 65 + 5), 1 px, so 500 + 1 − 9 = 492.
     #[test]
-    fn coins_move_by_the_bar_step_on_their_layer() {
+    fn coins_and_targets_move_by_the_bar_step() {
         let mut rig = Rig::new(1);
         let (_, mut b) = two_player_round(&mut rig);
         b.coins[0] = Piece {
@@ -1202,12 +1235,111 @@ mod tests {
         b.targets[0] = Piece {
             active: true,
             x: 500.0,
+            y: 100.0,
             until: Timer::armed(0, LIFETIME_MS),
+            mover: target_mover(b.h_farmer),
             ..Piece::default()
         };
         b.bar.tick();
-        b.scroll(0);
+        rig.rng = MsvcRand::new(1);
+        rig.cx(|cx| {
+            b.coin_step(0, false, cx);
+            b.target_step(0, false, cx);
+        });
         assert_eq!((b.coins[0].layer_x, b.coins[0].x), (801.0, 1001.0));
-        assert_eq!(b.targets[0].x, 491.0);
+        assert_eq!(b.targets[0].x, 492.0);
+    }
+
+    /// answers.md "Bonus round: target right bound": x ≤ 4100 − 48 = 4052. Seed 1 from rest the
+    /// target moves +1 px (as above) with no bar step, so 4052 stays 4052.
+    #[test]
+    fn a_target_stops_at_the_right_bound() {
+        let mut rig = Rig::new(1);
+        let (_, mut b) = two_player_round(&mut rig);
+        b.targets[0] = Piece {
+            active: true,
+            x: 4052.0,
+            y: 100.0,
+            until: Timer::armed(0, LIFETIME_MS),
+            mover: target_mover(b.h_farmer),
+            ..Piece::default()
+        };
+        rig.rng = MsvcRand::new(1);
+        rig.cx(|cx| b.target_step(0, false, cx));
+        assert_eq!((b.targets[0].x, b.targets[0].y), (4052.0, 103.0));
+    }
+
+    /// A two-player round in play, both spawners far off.
+    fn playing(rig: &mut Rig) -> (MatchState, BonusRound) {
+        let (m, mut b) = two_player_round(rig);
+        let now = rig.now();
+        b.phase = BonusPhase::Play {
+            round: Timer::armed(now, ROUND_MS),
+        };
+        b.coin_timer = Timer::armed(now, 1_000_000);
+        b.target_timer = Timer::armed(now, 1_000_000);
+        (m, b)
+    }
+
+    /// The spawns run after the bar scroll and before the coin movers, so a new coin moves by
+    /// the bar step on its spawn tick: layer x 810 − 9.
+    #[test]
+    fn a_new_coin_moves_on_its_spawn_tick() {
+        let mut rig = Rig::new(1);
+        let (mut m, mut b) = playing(&mut rig);
+        b.coin_timer = Timer::armed(rig.now(), 0);
+        for _ in 0..2 {
+            rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+        }
+        assert_eq!(b.coin_spawns, 1);
+        assert_eq!(b.bar.step, -9);
+        assert_eq!(b.coins[0].layer_x, 801.0);
+    }
+
+    /// "the swatter mover, or the swing while swinging": mid-swing the swatter does not move,
+    /// not even by the bar step.
+    #[test]
+    fn the_swatter_holds_still_while_swinging() {
+        let mut rig = Rig::new(1);
+        let (mut m, mut b) = playing(&mut rig);
+        b.swing = Swing {
+            frame: 2,
+            retract: false,
+            cooldown: 0,
+        };
+        rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+        assert_eq!((b.swatter.x, b.swing.frame), (400.0, 3));
+        rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+        b.swing = Swing::default();
+        rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+        assert!(b.swatter.x < 400.0, "{}", b.swatter.x);
+    }
+
+    /// AR §8.3: in frenzy the AI swings every tick, so its request is a level, not an edge: a
+    /// swing starts on tick 0 and again on tick 29, as soon as the cooldown passes 20.
+    #[test]
+    fn the_frenzy_ai_swings_again_after_the_cooldown() {
+        let mut rig = Rig::new(1);
+        let (mut m, mut b) = playing(&mut rig);
+        let now = rig.now();
+        let mut ai = rig.cx(|cx| BonusAi::new(AiLevel::Normal, b.h_farmer, cx));
+        (ai.frenzy, ai.frenzy_timer) = (true, Timer::armed(now, 1_000_000));
+        b.ai = Some(ai);
+        b.targets[0] = Piece {
+            active: true,
+            x: 3000.0,
+            y: 100.0,
+            until: Timer::armed(now, LIFETIME_MS),
+            mover: target_mover(b.h_farmer),
+            ..Piece::default()
+        };
+        let starts: Vec<usize> = (0..40)
+            .filter(|_| {
+                let idle = b.swing.frame == 0;
+                rig.step(&[], |k, cx| b.tick(k, &mut m, cx));
+                idle && b.swing.frame == 1
+            })
+            .collect();
+        assert_eq!(starts, [0, 29]);
     }
 }
