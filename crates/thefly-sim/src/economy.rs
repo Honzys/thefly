@@ -169,7 +169,7 @@ pub struct Economy {
     pub saved: Vec<Option<i32>>,
     /// data+0x15c: kills since the last farmer payout.
     pub kills: i32,
-    /// Kill types (3/2/1), capped at [`crate::match_state::KILL_LOG_CAP`].
+    /// Kill types (3/2/1, 0 for none yet), capped at [`crate::match_state::KILL_LOG_CAP`].
     pub kill_log: Vec<u8>,
 }
 
@@ -287,13 +287,12 @@ impl Economy {
         lines
     }
 
-    /// The farmer's payout: 42 × kills, then kills = 0 (the kill-type list restarts with them).
+    /// The farmer's payout: 42 × kills, then kills = 0. The kill-type list is not cleared.
     pub fn pay_farmer(&mut self) -> i32 {
         let total = KILL_VALUE * self.kills;
         self.farmer.money += total;
         self.farmer.score += total;
         self.kills = 0;
-        self.kill_log.clear();
         total
     }
 
@@ -422,13 +421,13 @@ mod tests {
     }
 
     #[test]
-    fn the_farmer_payout_is_42_per_kill_and_clears_them() {
+    fn the_farmer_payout_is_42_per_kill_and_keeps_the_type_list() {
         let mut e = Economy::new(Setup::Normal, false);
         e.kills = 3;
         e.kill_log = vec![3, 2, 1];
         assert_eq!(e.pay_farmer(), 126);
         assert_eq!((e.farmer.money, e.farmer.score, e.kills), (126, 126, 0));
-        assert!(e.kill_log.is_empty());
+        assert_eq!(e.kill_log, [3, 2, 1]);
     }
 
     /// AR §8.2.
