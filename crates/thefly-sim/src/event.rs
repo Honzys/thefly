@@ -198,7 +198,8 @@ pub enum Effect {
         scale: i32,
         sparks: bool,
     },
-    /// The fly's crash animation, falling toward (850, 850).
+    /// The fly's crash at its top-left: the 339 × 244 crash sprite scaled 0.3 → 1.0 over 200 ms,
+    /// and a 60-particle `blood` spray at ±0..850 px/s (answers.md "Crash animation length").
     Crash { x: i32, y: i32 },
     /// 60 + 11 splat particles; `dir` is the fan's push direction, 0 for none.
     Splat { x: i32, y: i32, dir: i32 },

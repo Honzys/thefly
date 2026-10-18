@@ -30,9 +30,11 @@ pub const FRICTION: i32 = 9;
 pub const APPEAR_MS: u64 = 500;
 /// [`APPEAR_MS`] in ticks: 33. The tween steps once per tick, so the port counts ticks.
 pub const APPEAR_TICKS: u32 = first_tick_at(APPEAR_MS) as u32;
-/// shortcut: open item O1 (FW §3.6 A, D), the crash animation's length toward (850, 850) is not
-/// decoded; 1000 ms is a placeholder, revisit when `FUN_0043a158` is read.
-pub const CRASH_MS: u64 = 1000;
+/// The crash sprite's scale tween 0.3 → 1.0 (answers.md "Crash animation length"). It steps in
+/// the render pass and ends on the frame the scale passes 1.0.
+/// shortcut: the exact end tick is [I] (answers.md "Crash animation length"); the port ends it on
+/// the first fly update after 200 ms. Revisit if a capture times the respawn.
+pub const CRASH_MS: u64 = 200;
 /// The splat's blood particles and body pieces (gaps §2.1).
 pub const SPLAT_BLOOD: usize = 60;
 pub const SPLAT_PIECES: usize = 11;
@@ -51,8 +53,13 @@ const LOOP_LAST: i32 = 9;
 const FACE_FRAMES: i32 = 10;
 /// Frames of the `blood` sheet, 3 × 2 (screens-and-rendering §4.6); the frame roll is R(n − 3).
 const BLOOD_FRAMES: i32 = 6;
-/// Fade length roll of each zapper blood particle: R(100) + 850 ms (gaps §2.2).
+/// Fade length roll of each blood particle: R(100) + 850 ms (gaps §2.2), re-rolled for the 60
+/// common ones when the crash respawn timer expires.
 const BLOOD_FADE_ROLL: i32 = 100;
+/// The zapper extras' acceleration 13 − k + R(k), k = max(1, trunc(13 / 2.0)) = 6.
+const ZAPPER_ACCEL_ROLL: i32 = 6;
+/// `FUN_0043a158`: the crash's blood spray (answers.md "Crash animation length").
+pub const CRASH_SPRAY: usize = 60;
 /// A zapper splat ends when its 100 blood particles have faded: 64 ticks (gaps §2.2). Boot and
 /// fan splats end when 11 body pieces are below [`SPLAT_FLOOR_Y`]; simulate the pieces.
 pub const ZAPPER_SPLAT_TICKS: u32 = 64;
@@ -333,51 +340,39 @@ impl Fly {
     /// push direction: 0 for the boot, > 0 for a fan pushing right (fan+0x918 == 1, pieces fly
     /// right), < 0 for a fan pushing left (gaps §2.1 burst table). Ignored when already splatted.
     pub fn splat(&mut self, dir: i32, cx: &mut Ctx) {
+        if self.splatted {
+            return;
+        }
         let burst = match dir {
             0 => BOOT_BURST,
             d if d > 0 => FAN_RIGHT_BURST,
             _ => FAN_LEFT_BURST,
         };
-        if self.die_into_pieces(&burst, cx) {
-            cx.emit(Event::play(SoundSlot::SPLASH));
-            cx.emit(Event::Effect(Effect::Splat {
-                x: self.x,
-                y: self.y,
-                dir,
-            }));
-        }
+        self.die_into_pieces(&burst, dir, cx);
     }
 
-    /// `FUN_00439f29`, the zapper's grill: the splat path with kind 13 (gaps §2.1), sound 43.
-    ///
-    /// shortcut: gaps §2.1 gives the 40 extra particles but not their rand draws; each is launched
-    /// like a blood particle, then all 100 draw their R(100) fade in order. Revisit when
-    /// `FUN_00439f29` is read past the launch.
+    /// The zapper's grill: the burst, then sound 43 (answers.md "Zapper arc on the fly").
     pub fn grill(&mut self, cx: &mut Ctx) {
-        if !self.die_into_pieces(&ZAPPER_BURST, cx) {
-            return;
-        }
+        self.zapper_burst(cx);
+        cx.emit(Event::play(SoundSlot::ZAPPER_GRILL));
+    }
+
+    /// `FUN_00439f29(50, 80, 50, 100, 1, 1, 1, 13)` (answers.md "Zapper arc on the fly"): +0x2a8,
+    /// then 40 extra blood particles, each with an R(6) acceleration roll, then the common
+    /// splat. Their fades were drawn at construction, so none are drawn here. It runs even on a
+    /// splatted fly: the zapper does not re-test its entry gate between the grill and the arc.
+    fn zapper_burst(&mut self, cx: &mut Ctx) {
         self.zapper_splat = true;
         for _ in 0..ZAPPER_EXTRA_BLOOD {
             self.throw(&ZAPPER_BURST, Throw::Blood, cx);
+            cx.rng.r(ZAPPER_ACCEL_ROLL);
         }
-        for _ in 0..SPLAT_BLOOD + ZAPPER_EXTRA_BLOOD {
-            cx.rng.r(BLOOD_FADE_ROLL);
-        }
-        cx.emit(Event::play(SoundSlot::ZAPPER_GRILL));
-        cx.emit(Event::Effect(Effect::Splat {
-            x: self.x,
-            y: self.y,
-            dir: 0,
-        }));
+        self.die_into_pieces(&ZAPPER_BURST, 0, cx);
     }
 
     /// The common splat (FW §3.6 Splat, gaps §2.1): state, then 60 blood particles and 11 body
-    /// pieces in rand order. False when the fly was already splatted.
-    fn die_into_pieces(&mut self, burst: &Burst, cx: &mut Ctx) -> bool {
-        if self.splatted {
-            return false;
-        }
+    /// pieces in rand order, then sound 46.
+    fn die_into_pieces(&mut self, burst: &Burst, dir: i32, cx: &mut Ctx) {
         self.splatted = true;
         self.hits_this_life += 1;
         (self.vx, self.vy) = (0, 0);
@@ -391,9 +386,13 @@ impl Fly {
         }
         self.pieces = std::array::from_fn(|_| self.throw(burst, Throw::Piece, cx));
         self.splat_gravity = burst.g;
-        self.zapper_splat = false;
         self.splat_ticks = 0;
-        true
+        cx.emit(Event::play(SoundSlot::SPLASH));
+        cx.emit(Event::Effect(Effect::Splat {
+            x: self.x,
+            y: self.y,
+            dir,
+        }));
     }
 
     /// One particle launch (gaps §2.1): x, y, the blood frame roll, then a sign roll and a speed
@@ -442,17 +441,12 @@ impl Fly {
         self.pieces.iter().all(|p| p.y >= SPLAT_FLOOR_Y)
     }
 
-    /// Damage added straight to the total, bypassing the stun (fan §7.4, zapper arc 1/tick).
-    /// At or below 100 sets the post-stun flag; above it, a fan splats (`dir`) and an arc kills.
-    /// The caller has already applied the SuperFly reduction (the fan's R(10) + 20). Ignored
-    /// while splatted.
-    ///
-    /// shortcut: FW §7.4 says an arc over 100 "splats the fly" without the burst; it uses the
-    /// zapper grill here. Revisit when `FUN_00428b47` is read.
+    /// Damage added straight to the total, bypassing the stun (fan §7.4, zapper arc 1 per arc).
+    /// At or below 100 sets the post-stun flag; above it, a fan splats (`dir`) and an arc runs
+    /// the zapper burst without sound 43 (answers.md "Zapper arc on the fly"). The caller has
+    /// already applied the SuperFly reduction (the fan's R(10) + 20). Both callers gate on the
+    /// fly's state; the arc's gate is not re-tested after a same-tick grill.
     pub fn add_raw_damage(&mut self, damage: i32, source: RawDamage, cx: &mut Ctx) {
-        if self.splatted {
-            return;
-        }
         self.damage_total += damage;
         if self.damage_total <= DEATH_TOTAL {
             self.post_stun = true;
@@ -460,7 +454,7 @@ impl Fly {
         }
         match source {
             RawDamage::Fan { dir } => self.splat(dir, cx),
-            RawDamage::ZapperArc => self.grill(cx),
+            RawDamage::ZapperArc => self.zapper_burst(cx),
         }
     }
 
@@ -731,6 +725,9 @@ impl Fly {
                 self.record_death(m, cx);
                 self.request_respawn(cx);
                 self.respawn_timer.disarm();
+                for _ in 0..SPLAT_BLOOD {
+                    cx.rng.r(BLOOD_FADE_ROLL);
+                }
             }
             return;
         }
@@ -796,7 +793,9 @@ impl Fly {
         self.hit_dir = (hit.dir_x, hit.dir_y);
     }
 
-    /// §3.6 A step 4.
+    /// §3.6 A step 4. `FUN_0043a158` is a blood spray, not the crash motion (answers.md "Crash
+    /// animation length"): per particle one discarded rand (the 200 ms scale-in), then a blood
+    /// launch at speeds 0..850. The frontend draws both from [`Effect::Crash`].
     fn start_dying(&mut self, cx: &mut Ctx) {
         self.dying = true;
         cx.emit(Event::Effect(Effect::Crash {
@@ -806,6 +805,10 @@ impl Fly {
         self.clear_grab();
         self.end_turbo();
         self.end_superfly(cx);
+        for _ in 0..CRASH_SPRAY {
+            cx.rng.rand();
+            self.throw(&CRASH_SPRAY_BURST, Throw::Blood, cx);
+        }
         cx.sound(SoundSlot::FLY_CRASH, SoundOp::SetVolume(CRASH_VOLUME));
         cx.emit(Event::play(SoundSlot::FLY_CRASH));
         self.crash_timer.arm(cx.now, CRASH_MS);
@@ -1058,6 +1061,17 @@ const ZAPPER_BURST: Burst = Burst {
     sign_x: true,
     sign_y: true,
     g: 13,
+};
+
+/// The crash spray: vx = R(851) × sign (+ fly vx, presentation only), vy = R(851) × sign.
+const CRASH_SPRAY_BURST: Burst = Burst {
+    min_x: 0,
+    min_y: 0,
+    range_x: 850,
+    range_y: 850,
+    sign_x: true,
+    sign_y: true,
+    g: 0,
 };
 
 /// The boot splats a fly pushed down below this y (FW §7.3).
@@ -1320,15 +1334,53 @@ mod tests {
         }
     }
 
+    /// answers.md "Zapper arc on the fly": the burst throws 40 extras of 8 draws (7 + the R(6)
+    /// acceleration), then the common splat (60 × 7 + 11 × 6) and its sound 46; no fade draws.
+    /// The grill adds sound 43 after the burst.
     #[test]
-    fn the_grill_adds_40_fading_particles_and_sound_43() {
+    fn the_grill_bursts_40_extras_then_the_common_splat_then_sound_43() {
         let mut b = Bench::new(1);
         let mut fly = b.fly();
         b.with(|cx| fly.grill(cx));
         assert!(fly.zapper_splat && fly.splatted);
-        assert_eq!(b.draws_since(1, 1), 60 * 7 + 11 * 6 + 40 * 7 + 100);
-        assert_eq!(b.sounds(SoundSlot::ZAPPER_GRILL).len(), 1);
-        assert!(b.sounds(SoundSlot::SPLASH).is_empty());
+        assert_eq!(b.draws_since(1, 1), 40 * 8 + 60 * 7 + 11 * 6);
+        let order: Vec<SoundSlot> = b
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Sound { slot, .. } => Some(*slot),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, [SoundSlot::SPLASH, SoundSlot::ZAPPER_GRILL]);
+    }
+
+    /// An arc that takes the total past 100 runs the same burst, without sound 43.
+    #[test]
+    fn an_arc_death_is_the_burst_without_sound_43() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        fly.damage_total = 100;
+        b.with(|cx| fly.add_raw_damage(1, RawDamage::ZapperArc, cx));
+        assert!(fly.splatted && fly.zapper_splat);
+        assert_eq!(b.draws_since(1, 1), 40 * 8 + 60 * 7 + 11 * 6);
+        assert_eq!(b.sounds(SoundSlot::SPLASH).len(), 1);
+        assert!(b.sounds(SoundSlot::ZAPPER_GRILL).is_empty());
+    }
+
+    /// The zapper's entry gate is not re-tested between the grill and the arc test, so a fly
+    /// grilled at a total of 100 that takes the same tick's arc bursts a second time.
+    #[test]
+    fn a_grilled_fly_hit_by_the_same_ticks_arc_bursts_again() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        fly.damage_total = 100;
+        b.with(|cx| {
+            fly.grill(cx);
+            fly.add_raw_damage(1, RawDamage::ZapperArc, cx);
+        });
+        assert_eq!(b.draws_since(1, 1), 2 * (40 * 8 + 60 * 7 + 11 * 6));
+        assert_eq!((fly.damage_total, fly.hits_this_life), (101, 2));
     }
 
     #[test]
@@ -1345,8 +1397,13 @@ mod tests {
         b.with(|cx| fly.add_raw_damage(1, RawDamage::Fan { dir: -1 }, cx));
         assert!(fly.splatted && !fly.zapper_splat);
         assert!(fly.pieces.iter().all(|p| p.vx < 0));
+        let before = b.draws_since(1, 0);
         b.with(|cx| fly.add_raw_damage(50, RawDamage::Fan { dir: -1 }, cx));
-        assert_eq!(fly.damage_total, 101, "ignored while splatted");
+        assert_eq!(
+            b.draws_since(1, before),
+            0,
+            "a splatted fly is not splatted again"
+        );
 
         let mut arc = b.fly();
         arc.damage_total = 100;
@@ -1732,7 +1789,11 @@ mod tests {
         let (mut m, _) = world(&mut b);
         let mut fly = centred(&mut b);
         (fly.carrying, fly.aspirating) = (true, true);
+        let before = b.draws_since(1, 0);
         update(&mut b, &mut m, &mut fly, 101);
+        // answers.md "Crash animation length": the 60-particle spray, 8 draws each.
+        assert_eq!(b.draws_since(1, before), 60 * 8);
+        assert_eq!(CRASH_MS, 200);
         assert!(fly.dying && !fly.stunned && !fly.carrying && !fly.aspirating);
         assert_eq!(fly.life(), Life::DyingOrAppearing);
         assert!(
@@ -1811,7 +1872,10 @@ mod tests {
         b.now = CRASH_MS + 1;
         update(&mut b, &mut m, &mut fly, 0);
         b.now = CRASH_MS + 1 + RESPAWN_DELAY_MS + 1;
+        let before = b.draws_since(1, 0);
         update(&mut b, &mut m, &mut fly, 0);
+        // The respawn x, then the 60 common fades re-rolled (answers.md "Zapper arc on the fly").
+        assert_eq!(b.draws_since(1, before), 1 + 60);
         assert_eq!((m.stats.kills, fly.hits_this_life), (1, 0));
         assert!(fly.respawn_request && !fly.respawn_timer.is_armed());
         assert_eq!(fly.y, (600 - 94) / 2 - 20);
