@@ -9,8 +9,8 @@ use crate::saves::encode_scores;
 use crate::screen::Flow;
 
 pub const ROWS: usize = 10;
-/// Longest name: the field is `name[12]`, NUL-terminated (game-spec §7.1).
-pub const NAME_MAX: usize = 11;
+/// Longest name: a character is stored only while the position is below 10 (`FUN_0041a8d9`).
+pub const NAME_MAX: usize = 10;
 pub const CURSOR_BLINK_MS: u64 = 200;
 pub const ROW_SWEEP_MS: u64 = 200;
 
@@ -61,13 +61,15 @@ const LETTER_A: u8 = 4;
 const DIGIT_1: u8 = 30;
 const DIGIT_0: u8 = 39;
 const BACKSPACE: Scancode = Scancode(42);
+const SPACE: Scancode = Scancode(44);
 
-/// shortcut: letters are typed lowercase (the docs give no case rule); revisit with a capture.
+/// `FUN_0040f8d9` + `toupper`: names are stored in uppercase; Space types a space.
 fn typed(code: u8) -> Option<char> {
     match code {
-        LETTER_A..DIGIT_1 => Some(char::from(b'a' + (code - LETTER_A))),
+        LETTER_A..DIGIT_1 => Some(char::from(b'A' + (code - LETTER_A))),
         DIGIT_1..DIGIT_0 => Some(char::from(b'1' + (code - DIGIT_1))),
         DIGIT_0 => Some('0'),
+        c if c == SPACE.0 => Some(' '),
         _ => None,
     }
 }
@@ -90,7 +92,8 @@ impl HighScoreScreen {
     }
 
     /// A key during the reveal skips it (slot 0x26); confirming a name saves (slot 0x33) and
-    /// emits [`crate::Event::Save`]; Esc → menu. Typing: gaps §1.3 (a-z, 1..0, Enter, Backspace); open item O17 for Space and Esc.
+    /// emits [`crate::Event::Save`]; Esc → menu. Typing: gaps §1.3 and answers.md "Name entry"
+    /// (A-Z, 1..0, Space, Enter, Backspace).
     pub fn tick(&mut self, keys: &KeyState, table: &mut HighScoreTable, cx: &mut Ctx) -> Flow {
         if self.revealed > 0 {
             self.reveal(keys, cx);
@@ -107,7 +110,8 @@ impl HighScoreScreen {
         if entry.cursor.expired_rearm(cx.now) {
             entry.cursor_on = !entry.cursor_on;
         }
-        if keys.pressed(Scancode::RETURN) {
+        // `FUN_0041a8d9`: Enter commits only a typed name; Esc maps to the ignore code.
+        if keys.pressed(Scancode::RETURN) && !entry.name.is_empty() {
             confirm(entry, table, cx);
             self.entry = None;
             return Flow::Stay;
@@ -115,14 +119,13 @@ impl HighScoreScreen {
         if keys.pressed(BACKSPACE) {
             entry.name.pop();
         }
-        // shortcut: open item O17, Space and Esc are ignored; revisit with a capture.
-        for code in LETTER_A..=DIGIT_0 {
-            let Some(c) = typed(code).filter(|_| keys.pressed(Scancode(code))) else {
-                continue;
-            };
-            if entry.name.len() < NAME_MAX {
-                entry.name.push(c);
-            }
+        // One character per tick. shortcut: the original reads the last key event; with several
+        // presses in one tick the lowest scancode wins here.
+        let c = (LETTER_A..=SPACE.0)
+            .filter(|&code| keys.pressed(Scancode(code)))
+            .find_map(typed);
+        if let Some(c) = c.filter(|_| entry.name.len() < NAME_MAX) {
+            entry.name.push(c);
         }
         Flow::Stay
     }
@@ -199,7 +202,8 @@ mod tests {
         assert_eq!(t.rows[9].score, 100);
     }
 
-    /// GS §7.1: skip the reveal, type at most 11 characters, Backspace, Enter saves the row.
+    /// GS §7.1, answers.md "Name entry": skip the reveal, at most 10 characters, typed in
+    /// uppercase, Backspace, Enter saves the row.
     #[test]
     fn a_typed_name_is_capped_and_saved_at_its_row() {
         use crate::screen::rig::Rig;
@@ -213,7 +217,7 @@ mod tests {
         };
         tap(&mut rig, &mut hs, &mut t, Scancode::RETURN.0);
         assert_eq!(hs.revealed, 0);
-        // "abcdefghijkl": twelve letters, the twelfth is dropped.
+        // "abcdefghijkl": twelve letters, the eleventh and twelfth are dropped.
         for code in 4..16 {
             tap(&mut rig, &mut hs, &mut t, code);
         }
@@ -221,10 +225,10 @@ mod tests {
         tap(&mut rig, &mut hs, &mut t, 39);
         assert_eq!(
             hs.entry.as_ref().map(|e| e.name.as_str()),
-            Some("abcdefghij0")
+            Some("ABCDEFGHI0")
         );
         tap(&mut rig, &mut hs, &mut t, Scancode::RETURN.0);
-        assert_eq!(t.rows[2].name, "abcdefghij0");
+        assert_eq!(t.rows[2].name, "ABCDEFGHI0");
         assert_eq!(t.rows[2].score, 750);
         assert_eq!(t.rows.len(), ROWS);
         assert!(rig.events.iter().any(|e| matches!(
@@ -238,5 +242,33 @@ mod tests {
         assert!(matches!(out, Flow::Stay));
         let out = tap(&mut rig, &mut hs, &mut t, Scancode::ESCAPE.0);
         assert!(matches!(out, Flow::Menu));
+    }
+
+    /// answers.md "Name entry: Space, Esc, Enter, length": Enter on an empty name is ignored,
+    /// Esc does nothing, Space types a space; one character per tick.
+    #[test]
+    fn enter_needs_a_character_and_space_types_one() {
+        use crate::screen::rig::Rig;
+        let mut rig = Rig::new(1);
+        let mut t = table(&[900, 800, 700, 600, 500, 400, 300, 200, 100, 0]);
+        let mut hs = rig.cx(|cx| HighScoreScreen::new(Some((0, 950)), cx));
+        let mut tap = |hs: &mut HighScoreScreen, t: &mut HighScoreTable, k: &[Scancode]| {
+            let out = rig.step(k, |keys, cx| hs.tick(keys, t, cx));
+            rig.step(&[], |keys, cx| hs.tick(keys, t, cx));
+            out
+        };
+        tap(&mut hs, &mut t, &[Scancode::RETURN]);
+        tap(&mut hs, &mut t, &[Scancode::RETURN]);
+        assert!(matches!(
+            tap(&mut hs, &mut t, &[Scancode::ESCAPE]),
+            Flow::Stay
+        ));
+        assert_eq!(hs.entry.as_ref().map(|e| e.name.as_str()), Some(""));
+        tap(&mut hs, &mut t, &[SPACE]);
+        tap(&mut hs, &mut t, &[Scancode(4), Scancode(5)]);
+        assert_eq!(hs.entry.as_ref().map(|e| e.name.len()), Some(2));
+        tap(&mut hs, &mut t, &[Scancode::RETURN]);
+        assert!(hs.entry.is_none());
+        assert!(t.rows[0].name.starts_with(' '));
     }
 }
