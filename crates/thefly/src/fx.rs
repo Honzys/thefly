@@ -21,9 +21,17 @@ const SPLAT_PIECES: usize = 11;
 const SHOCK_SPARKS: usize = 10;
 /// SR §4.6: the expanding ring tweens over 600 ms.
 const RING_MS: f32 = 600.0;
-/// shortcut: the crash face's fall toward (850, 850) has no decoded duration; the respawn delay
-/// (fly-and-world §3.6 D, 1500 ms) is used.
-const CRASH_MS: f32 = 1500.0;
+/// answers.md "Crash animation length": the 339 × 244 crash sprite scales 0.3 → 1.0 over 200 ms
+/// (13 ticks at 65 fps), and a 60-particle `blood` spray launches at ±0..850 px/s.
+const CRASH_MS: f32 = 200.0;
+const CRASH_SCALE: f32 = 0.3;
+/// shortcut: when the crash sprite goes is not in the docs; it stays until the 1500 ms respawn
+/// (fly-and-world §3.6 D). Revisit if a capture shows the dying fly.
+const RESPAWN_MS: f32 = 1500.0;
+const CRASH_SPRAY: usize = 60;
+/// The fly frame the spray is spread over (the event carries only the top-left).
+const FLY_SIZE: (i32, i32) = (120, 94);
+const SPRAY_SPEED: i32 = 850;
 
 /// A menu cloud (SR §2.2): drifts and wraps around the screen.
 #[derive(Debug, Clone, Copy)]
@@ -54,8 +62,10 @@ pub struct Particle {
     scale_step: f32,
     alpha: f32,
     alpha_step: f32,
-    /// Fly in a straight line to this point over `life_ms` instead of integrating velocity.
-    target: Option<(f32, f32, f32, f32)>,
+    /// The scale stops here (the crash tween ends when it passes 1.0).
+    scale_max: f32,
+    /// Drawn and scaled from its top-left, as the D3D path does (SR §1.1), not centred.
+    top_left: bool,
 }
 
 impl Particle {
@@ -77,23 +87,22 @@ impl Particle {
             scale_step: 0.0,
             alpha: 255.0,
             alpha_step: 0.0,
-            target: None,
+            scale_max: f32::INFINITY,
+            top_left: false,
         }
     }
 
     fn step(&mut self) {
         self.prev = (self.x, self.y);
         self.age_ms += DT * 1000.0;
-        if let Some((x0, y0, x1, y1)) = self.target {
-            let t = (self.age_ms / self.life_ms).min(1.0);
-            self.x = x0 + (x1 - x0) * t;
-            self.y = y0 + (y1 - y0) * t;
-        } else {
-            self.vy += self.gravity;
-            self.x += self.vx * DT;
-            self.y += self.vy * DT;
-        }
+        self.vy += self.gravity;
+        self.x += self.vx * DT;
+        self.y += self.vy * DT;
         self.scale += self.scale_step;
+        if self.scale > self.scale_max {
+            self.scale = self.scale_max;
+            self.scale_step = 0.0;
+        }
         self.alpha += self.alpha_step;
     }
 
@@ -247,12 +256,40 @@ impl Fx {
                 scale,
                 sparks,
             } => self.shockwave(x, y, scale, sparks),
-            Effect::Crash { x, y } => self.push(Particle {
-                life_ms: CRASH_MS,
-                target: Some((x as f32, y as f32, 850.0, 850.0)),
-                ..Particle::new("crash-face0011", x as f32, y as f32)
-            }),
+            Effect::Crash { x, y } => self.crash(x, y),
             Effect::Splat { x, y, dir } => self.splat(x as f32, y as f32, dir),
+        }
+    }
+
+    /// The crash sprite at the fly's top-left and its blood spray (answers.md "Crash animation
+    /// length"). The spray's rand is the sim's; this one only looks the same: positions over the
+    /// fly frame, frames 1..=3, speeds ±0..850 with no gravity, each fading in R(100) + 850 ms
+    /// (gaps §2.2).
+    fn crash(&mut self, x: i32, y: i32) {
+        let ticks = CRASH_MS / 1000.0 * 65.0;
+        self.push(Particle {
+            life_ms: CRASH_MS + RESPAWN_MS,
+            scale: CRASH_SCALE,
+            scale_step: (1.0 - CRASH_SCALE) / ticks,
+            scale_max: 1.0,
+            top_left: true,
+            ..Particle::new("crash-face0011", x as f32, y as f32)
+        });
+        for _ in 0..CRASH_SPRAY {
+            let px = (x + self.rng.r(FLY_SIZE.0 - 20)) as f32;
+            let py = (y + self.rng.r(FLY_SIZE.1 - 20)) as f32;
+            let frame = self.rng.r(3) as u32 + 1;
+            let vx = self.r(0, SPRAY_SPEED) * self.rng.sign() as f32;
+            let vy = self.r(0, SPRAY_SPEED) * self.rng.sign() as f32;
+            let life = self.r(850, 949);
+            self.push(Particle {
+                frame,
+                vx,
+                vy,
+                life_ms: life,
+                alpha_step: -255.0 / (life / 1000.0 * 65.0),
+                ..Particle::new("blood", px, py)
+            });
         }
     }
 
@@ -330,7 +367,12 @@ impl Fx {
             let x = l.f(Some(f64::from(p.prev.0)), f64::from(p.x));
             let y = l.f(Some(f64::from(p.prev.1)), f64::from(p.y));
             let frame = p.frame + (p.age_ms / p.frame_ms) as u32 % p.frames.max(1);
-            g.spr_centred(p.sprite, x, y, frame, p.scale, p.alpha.clamp(0.0, 255.0))?;
+            let alpha = p.alpha.clamp(0.0, 255.0);
+            if p.top_left {
+                g.spr_scaled(p.sprite, x, y, frame, p.scale, alpha)?;
+            } else {
+                g.spr_centred(p.sprite, x, y, frame, p.scale, alpha)?;
+            }
         }
         Ok(())
     }
@@ -339,6 +381,12 @@ impl Fx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Fx {
+        fn crash_scale(&self) -> Option<f32> {
+            self.particles.iter().find(|p| p.top_left).map(|p| p.scale)
+        }
+    }
 
     #[test]
     fn menu_dust_grows_and_fades_out() {
@@ -367,6 +415,37 @@ mod tests {
         assert_eq!(fx.particles.len(), SPLAT_BLOOD + SPLAT_PIECES);
         const LIMIT: usize = 400;
         for _ in 0..LIMIT {
+            fx.step();
+        }
+        assert!(fx.particles.is_empty());
+    }
+
+    #[test]
+    fn a_crash_scales_in_from_its_top_left_and_sprays_blood_that_fades() {
+        let mut fx = Fx::new(1);
+        fx.effect(Effect::Crash { x: 300, y: 200 });
+        let crash: Vec<&Particle> = fx.particles.iter().filter(|p| p.top_left).collect();
+        assert_eq!(crash.len(), 1);
+        assert_eq!(
+            (crash[0].sprite, crash[0].x, crash[0].y),
+            ("crash-face0011", 300.0, 200.0)
+        );
+        assert!((crash[0].scale - 0.3).abs() < 1e-6);
+        let blood = fx.particles.iter().filter(|p| p.sprite == "blood").count();
+        assert_eq!(blood, CRASH_SPRAY);
+        // answers.md "Crash animation length": the scale passes 1.0 on the 13th step at 65 fps
+        for _ in 0..12 {
+            fx.step();
+        }
+        assert!(fx.crash_scale().is_some_and(|s| s <= 1.0));
+        fx.step();
+        assert_eq!(fx.crash_scale(), Some(1.0));
+        // the blood fades in at most 949 ms, the crash stays until the 1500 ms respawn
+        for _ in 0..62 {
+            fx.step();
+        }
+        assert!(fx.particles.iter().all(|p| p.top_left));
+        for _ in 0..50 {
             fx.step();
         }
         assert!(fx.particles.is_empty());

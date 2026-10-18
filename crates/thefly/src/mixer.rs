@@ -59,7 +59,10 @@ fn positional(x: f64, w: f64) -> (i32, i32) {
     let (d, side) = if x > SCREEN_W && x <= half {
         (((x - SCREEN_W) / (half - SCREEN_W) * 100.0).trunc(), -1.0)
     } else if x > half && x <= WRAP - w {
-        (((1.0 - (x - half) / ((WRAP - w) - half)) * 100.0).trunc(), 1.0)
+        (
+            ((1.0 - (x - half) / ((WRAP - w) - half)) * 100.0).trunc(),
+            1.0,
+        )
     } else {
         return (0, 0);
     };
@@ -67,7 +70,10 @@ fn positional(x: f64, w: f64) -> (i32, i32) {
         ((d * 100.0 / 50.0 * 30.0 * side).trunc(), 0.0)
     } else {
         let behind = (d - 50.0) / 50.0;
-        (((1.0 - behind) * OFF_PAN_CB * side).trunc(), -(behind * BEHIND_CB).trunc())
+        (
+            ((1.0 - behind) * OFF_PAN_CB * side).trunc(),
+            -(behind * BEHIND_CB).trunc(),
+        )
     };
     (-p as i32, offset as i32)
 }
@@ -82,11 +88,7 @@ fn buzz(x: f64, w: f64) -> (i32, i32) {
     } else {
         0.0
     };
-    let off = if x < 0.0 {
-        -x
-    } else {
-        (x - SCREEN_W).max(0.0)
-    };
+    let off = if x < 0.0 { -x } else { (x - SCREEN_W).max(0.0) };
     // `as` saturates, so i32::MIN / MAX sources stay in range
     (p as i32, BUZZ_CB.saturating_sub(off as i32))
 }
@@ -268,7 +270,10 @@ mod tests {
     }
 
     fn assert_gains(got: (f32, f32), want: (f32, f32)) {
-        assert!(close(got.0, want.0) && close(got.1, want.1), "{got:?} != {want:?}");
+        assert!(
+            close(got.0, want.0) && close(got.1, want.1),
+            "{got:?} != {want:?}"
+        );
     }
 
     #[test]
