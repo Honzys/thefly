@@ -70,6 +70,14 @@ pub const ARC_LEN_RAND: i32 = 80;
 pub const ARC_LEN_BASE_MS: i32 = 30;
 pub const ARC_HZ_RAND: i32 = 800;
 pub const ARC_HZ: i32 = 11_025;
+/// The grill column is the zapper's span less 60 px on each side (answers.md "Zapper arc on the
+/// fly"); the fly's arc target sits 45 px below its top.
+pub const GRILL_INSET: i32 = 60;
+pub const ARC_TARGET_DY: i32 = 45;
+/// An arc on the fly throws 10 sparks (`FUN_00428ffc`) of 8 draws each: R(5), R(5), the frame,
+/// R(10) sign, R(181) + 70, R(10) sign, R(181) + 70, R(60) + 100 ms life.
+pub const ARC_SPARKS: u32 = 10;
+pub const SPARK_DRAWS: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrapKind {
@@ -523,11 +531,7 @@ impl World {
             self.fan_blow();
             self.fan_hits(cx);
         }
-        // answers.md "Zapper arc reach": the fly is tested while +0x288, +0x2a4, +0x2a8 are 0.
-        let f = &self.fly;
-        if !(f.dying || f.splatted || f.zapper_splat) {
-            self.zapper_hits(cx);
-        }
+        self.zapper_hits(cx);
     }
 
     /// FW §7.4 flypaper: both velocity components / 1.4 per overlapping tick, no sound.
@@ -585,22 +589,34 @@ impl World {
         self.fly.add_raw_damage(damage, RawDamage::Fan { dir }, cx);
     }
 
-    /// FW §7.4 zapper: grill near the top of a column, else each arc that starts on the fly
-    /// pushes it up 180 and adds 1.
+    /// `FUN_004288fe` per zapper in index order (answers.md "Zapper arc on the fly"), each only
+    /// while the fly is not dying, splatted or zapped: the grill near the top of the column, then,
+    /// grilled or not, that zapper's arc test on (x, y + 45, w). An arc pushes the fly up 180,
+    /// throws its sparks and adds 1.
+    ///
+    /// shortcut: the off-column branch `FUN_00428003` is open in answers.md "Port decisions";
+    /// the sparks' 30-slot pool is not modelled, so every arc draws all 80. Revisit when read.
     fn zapper_hits(&mut self, cx: &mut Ctx) {
         let size = TrapKind::Zapper.spec_size(cx);
-        let (fx, _) = self.fly.centre();
-        let fy = self.fly.y;
-        let grill = self.traps.zappers.iter().any(|z| {
-            in_span(fx, visible_x(z.screen_x, size.w), size.w) && fy - z.y <= size.h - GRILL_MARGIN
-        });
-        if grill {
-            self.fly.grill(cx);
-            return;
-        }
-        let arcs = self.traps.arcs_at(self.fly_rect(), cx);
-        for _ in 0..arcs {
+        for i in 0..self.traps.zappers.len() {
+            let f = &self.fly;
+            if f.dying || f.splatted || f.zapper_splat {
+                return;
+            }
+            let zx = visible_x(self.traps.zappers[i].screen_x, size.w);
+            let column = f.x <= zx + size.w - GRILL_INSET && f.x + f.size.w >= zx + GRILL_INSET;
+            if column && f.y <= self.traps.zappers[i].y + size.h - GRILL_MARGIN {
+                self.fly.grill(cx);
+            }
+            let f = &self.fly;
+            let target = Rect::new(f.x, f.y + ARC_TARGET_DY, f.size.w, f.size.h);
+            if !self.traps.zappers[i].arc_at(target, size, cx) {
+                continue;
+            }
             self.fly.vy -= ARC_PUSH;
+            for _ in 0..ARC_SPARKS * SPARK_DRAWS {
+                let _ = cx.rng.rand();
+            }
             self.fly
                 .add_raw_damage(ARC_DAMAGE, RawDamage::ZapperArc, cx);
         }
@@ -942,16 +958,17 @@ mod layout_tests {
         assert_eq!((w.fly.vx, w.fly.vy), (127 + 500, -42 - 600));
     }
 
-    /// Zapper at stored 1000 (screen 1000, 635 × 131 from y 0); a fly at (1000, 131) is below
-    /// the grill zone (y ≤ 51), d = 0 so the chance is 100. Seed 1: R(100) = 41 ≤ 100 arcs,
-    /// 18467 % 80 + 30 = 97 ms, slot 39 at 6334 % 800 + 11025 = 11759 Hz; vy −180, damage 1.
-    /// The next tick the arc is still on and nothing is drawn.
+    /// Zapper at stored 1000 (screen 1000, 635 × 131 from y 0); a fly at (1000, 86) is below
+    /// the grill zone (y ≤ 51) and its arc target y 86 + 45 = 131 is at d = 0, so the chance is
+    /// 100. Seed 1: R(100) = 41 ≤ 100 arcs, 18467 % 80 + 30 = 97 ms, slot 39 at
+    /// 6334 % 800 + 11025 = 11759 Hz; vy −180, then 10 sparks of 8 draws (rands 4..=83), then
+    /// damage 1. The next tick the arc is still on and nothing is drawn: rand 84 is 19954.
     #[test]
     fn an_arc_starts_on_the_chance_roll_and_lasts_r80_plus_30_ms() {
         let mut rig = Rig::new(7);
         let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
         let mut rig = Rig::new(1);
-        (w.fly.x, w.fly.y, w.fly.vy) = (1000, 131, 0);
+        (w.fly.x, w.fly.y, w.fly.vy) = (1000, 86, 0);
         w.traps_step(&mut rig.at(1));
         let z = w.traps.zappers[0];
         assert!(z.arcing && !w.fly.splatted);
@@ -964,23 +981,23 @@ mod layout_tests {
         assert_eq!(sounds(&rig, SoundSlot::ZAPPER_ARC), [SoundOp::Play(freq)]);
         w.traps_step(&mut rig.at(2));
         assert_eq!(w.fly.vy, -180);
-        assert_eq!(rig.rng.rand(), 26500);
+        assert_eq!(rig.rng.rand(), 19_954);
     }
 
-    /// d = 200: chance trunc((1 − 0.8) × 100) = trunc(19.99…) = 19 < 41, so a 100 ms retry and
-    /// no draw on the next tick; past 250 below the bottom nothing is drawn at all.
+    /// Target d = 200 (fly y 286): chance trunc((1 − 0.8) × 100) = trunc(19.99…) = 19 < 41, so a
+    /// 100 ms retry and no draw on the next tick; past 250 below the bottom nothing is drawn.
     #[test]
     fn a_failed_roll_waits_100_ms_and_the_reach_is_250() {
         let mut rig = Rig::new(7);
         let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
         let mut rig = Rig::new(1);
-        (w.fly.x, w.fly.y) = (1000, 331);
+        (w.fly.x, w.fly.y) = (1000, 286);
         w.traps_step(&mut rig.at(1));
         w.traps_step(&mut rig.at(2));
         assert!(!w.traps.zappers[0].arcing);
         assert_eq!(rig.rng.rand(), 18467);
         w.traps.zappers[0].retry = Timer::UNARMED;
-        w.fly.y = 131 + 251;
+        w.fly.y = 131 + 251 - 45;
         w.traps_step(&mut rig.at(3));
         assert_eq!(rig.rng.rand(), 6334);
     }
@@ -991,12 +1008,43 @@ mod layout_tests {
         let mut rig = Rig::new(7);
         let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
         let mut rig = Rig::new(1);
-        (w.fly.x, w.fly.y, w.fly.dying) = (1000, 131, true);
+        (w.fly.x, w.fly.y, w.fly.dying) = (1000, 86, true);
         w.traps_step(&mut rig.at(1));
         assert_eq!(rig.rng.rand(), 41);
         (w.fly.dying, w.fly.stunned) = (false, true);
         w.traps_step(&mut rig.at(2));
         assert!(w.traps.zappers[0].arcing);
+    }
+
+    /// answers.md "Zapper arc on the fly": the grill does not return, so the same zapper's arc
+    /// test still runs (it arcs or arms its retry), but the entry gate is tested again at the
+    /// next zapper, which a grilled fly no longer reaches.
+    #[test]
+    fn a_grilled_fly_meets_the_same_zappers_arc_but_not_the_next_zapper() {
+        let mut rig = Rig::new(7);
+        let z = slot(TrapKind::Zapper, 1000);
+        let mut w = world_with(vec![z, z], &mut rig);
+        let mut rig = Rig::new(1);
+        (w.fly.x, w.fly.y) = (1000, 40);
+        let at = rig.at(1).now;
+        w.traps_step(&mut rig.at(1));
+        assert!(w.fly.zapper_splat);
+        let [first, second] = [w.traps.zappers[0], w.traps.zappers[1]];
+        assert!(first.arcing || !first.retry.expired(at));
+        assert!(!second.arcing && second.retry.expired(at));
+    }
+
+    /// An arc that takes the total past 100 runs the zapper burst, without sound 43.
+    #[test]
+    fn an_arc_over_100_runs_the_zapper_burst() {
+        let mut rig = Rig::new(7);
+        let mut w = world_with(vec![slot(TrapKind::Zapper, 1000)], &mut rig);
+        let mut rig = Rig::new(1);
+        (w.fly.x, w.fly.y, w.fly.vy, w.fly.damage_total) = (1000, 86, 0, 100);
+        w.traps_step(&mut rig.at(1));
+        assert!(w.fly.zapper_splat && w.fly.splatted);
+        assert_eq!(w.fly.damage_total, 101);
+        assert!(!rig.events.contains(&Event::play(SoundSlot::ZAPPER_GRILL)));
     }
 
     /// answers.md "Trap loop volumes": two fans, one on screen, start at −100; both off screen
