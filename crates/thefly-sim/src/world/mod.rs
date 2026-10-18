@@ -26,7 +26,7 @@ use crate::input::{FarmerPad, FlyPad, KeyState};
 use crate::match_state::{MatchState, PeriodClock, Players};
 
 /// The world's ring width W in fly-layer pixels: the main scenery layer's width (game-spec §4.1).
-/// Open item: not measured from the asset; the arena, `Maison` and `dehors` are all 4000 wide.
+/// `Maison`, `dehors` and `arene` are all 4000 wide (gaps §4.2); `GameData::check` rejects data where they are not.
 pub const W: i32 = 4000;
 
 /// Parallax of the objects, lift and boot layer; its wrap width is trunc(W × 1.25).
@@ -59,7 +59,7 @@ pub struct World {
     pub farmer_swing_memory: i32,
     /// game+0x408ac: every key reads as released.
     pub keys_blocked: bool,
-    /// The quit dialog is open. Open item: which steps freeze besides the boot and the AI.
+    /// The quit dialog is open. Open item O13: which steps freeze besides the boot and the AI.
     pub paused: bool,
     /// game+0x407b8: set by step 12 when the table is cleared or the clock runs out.
     pub period_over: bool,
@@ -173,7 +173,7 @@ impl World {
         self.ambient_step(m, cx);
 
         // Port addition: what the original did in its render pass (`FUN_00403e36`), which ran
-        // once per tick after the update. Open item: the order of these two within that pass.
+        // once per tick after the update. Open item O21: the order of these two within that pass.
         // 18a. Goodie midges: homing, swatter kills, farmer slowdown (fly-and-world §8.2).
         self.midges_step(cx);
         // 18b. Appear animation done → alive; splat done → kill recorded, respawn requested.

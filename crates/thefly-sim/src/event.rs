@@ -58,8 +58,8 @@ impl SoundSlot {
     }
 }
 
-/// Slot to file stem under `data/sons/`. Open item: the on-disk extension case (`.wav`/`.WAV`)
-/// is resolved by the frontend case-insensitively, as `thefly_assets::files_with_ext` does.
+/// Slot to file stem under `data/sons/`. The on-disk extension case (`.wav`/`.WAV`) is resolved
+/// by the frontend case-insensitively, as `thefly_assets::files_with_ext` does.
 pub const SOUND_FILES: [&str; 59] = [
     "i_melody",
     "i_Cowboy",
@@ -123,7 +123,7 @@ pub const SOUND_FILES: [&str; 59] = [
 ];
 
 /// Where a sound sits. The original's positional helpers (`FUN_0040d005`, `FUN_0040d1b2`) pan
-/// and attenuate by screen x; their curve is not decoded (open item), so the frontend maps it.
+/// and attenuate by screen x; their curve is not decoded (open item O14), so the frontend maps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pan {
     #[default]

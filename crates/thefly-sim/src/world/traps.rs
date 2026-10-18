@@ -23,8 +23,6 @@ pub enum TrapKind {
     FanLeft,
     FanRight,
     Zapper,
-    /// `colle_mouche2`. Open item: how a human places it (the AI never does).
-    Flypaper2,
 }
 
 /// A row of the trap table (ai-and-rules §4.1).
@@ -32,8 +30,7 @@ pub enum TrapKind {
 pub struct TrapSpec {
     pub kind: TrapKind,
     pub sprite: &'static str,
-    /// Token cost; None for the variant (no cost known).
-    pub cost: Option<i32>,
+    pub cost: i32,
     /// Cap per type; the two fans share theirs.
     pub cap: usize,
     /// Width for the placement spacing, shop px.
@@ -41,11 +38,11 @@ pub struct TrapSpec {
     pub stored_y: i32,
 }
 
-pub const TRAP_TABLE: [TrapSpec; 5] = [
+pub const TRAP_TABLE: [TrapSpec; 4] = [
     TrapSpec {
         kind: TrapKind::Flypaper,
         sprite: "colle_mouche1",
-        cost: Some(1),
+        cost: 1,
         cap: 7,
         width: 8,
         stored_y: 0,
@@ -53,7 +50,7 @@ pub const TRAP_TABLE: [TrapSpec; 5] = [
     TrapSpec {
         kind: TrapKind::FanLeft,
         sprite: "ventilo_gauche",
-        cost: Some(2),
+        cost: 2,
         cap: 5,
         width: 34,
         stored_y: 600,
@@ -61,7 +58,7 @@ pub const TRAP_TABLE: [TrapSpec; 5] = [
     TrapSpec {
         kind: TrapKind::FanRight,
         sprite: "ventilo_droite",
-        cost: Some(2),
+        cost: 2,
         cap: 5,
         width: 34,
         stored_y: 600,
@@ -69,17 +66,9 @@ pub const TRAP_TABLE: [TrapSpec; 5] = [
     TrapSpec {
         kind: TrapKind::Zapper,
         sprite: "tue_mouche",
-        cost: Some(4),
+        cost: 4,
         cap: 2,
         width: 97,
-        stored_y: 0,
-    },
-    TrapSpec {
-        kind: TrapKind::Flypaper2,
-        sprite: "colle_mouche2",
-        cost: None,
-        cap: 7,
-        width: 8,
         stored_y: 0,
     },
 ];
@@ -103,9 +92,9 @@ pub struct Fan {
     pub facing_right: bool,
     pub x: i32,
     pub y: i32,
-    /// +0x91c. Open item: its value.
+    /// +0x91c. Open item O9: its value.
     pub strength: i32,
-    /// Loud loop (−100) while blowing, else −400. Open item: the blow schedule.
+    /// Loud loop (−100) while blowing, else −400. Open item O9: the blow schedule.
     pub blowing: bool,
     pub rehit: Timer,
 }
@@ -114,7 +103,7 @@ pub struct Fan {
 pub struct Zapper {
     pub x: i32,
     pub y: i32,
-    /// Arc active (loop −200, slot 39). Open item: the arc schedule (`FUN_00428b47`).
+    /// Arc active (loop −200, slot 39). Open item O9: the arc schedule (`FUN_00428b47`).
     pub arcing: bool,
     pub arc_timer: Timer,
 }
@@ -127,7 +116,9 @@ pub struct Traps {
 }
 
 impl Traps {
-    /// The period's traps from the shop slots (stored x is shop px / 0.152).
+    /// The period's traps from the shop slots (stored x is trunc(shop px / 0.152), gaps §11.4).
+    /// Caps 7/5/2 skip the rest (gaps §8.2); each flypaper built under its cap draws `R(10)` and
+    /// uses the `colle_mouche2` sprite when the draw is above 4 (`variant2`), in slot order.
     pub fn from_layout(layout: &TrapLayout, cx: &mut Ctx) -> Self {
         let _ = (layout, cx);
         todo!("W2 game-spec §4.6, ai-and-rules §4.3")
@@ -136,7 +127,7 @@ impl Traps {
     /// `FUN_00427bb4`: may an object occupy [x, x + w] (object layer px)? Used by placement.
     pub fn span_free(&self, x: i32, w: i32) -> bool {
         let _ = (x, w);
-        todo!("W2 fly-and-world §5.2 step 3; open item: the exact test")
+        todo!("W2 fly-and-world §5.2 step 3; open item O22")
     }
 }
 

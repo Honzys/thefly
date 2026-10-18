@@ -191,8 +191,8 @@ pub struct Controller {
     pub ox: i32,
     pub oy: i32,
     pub spread: i32,
-    /// Signed ring distance to the aim point, and its y counterpart. Open item: the exact
-    /// reference points of `dy` (ai-and-rules "Still open" 2).
+    /// Signed ring distance to the aim point, and its y counterpart. dy is the target's top y
+    /// (plus h/2 with the centre flag) minus trunc(reach + 77) (gaps §9.1).
     pub dx: i32,
     pub dy: i32,
     /// Ring distance without the offset (the Nuclear decision).
@@ -222,7 +222,8 @@ pub struct Aligner {
     /// −1, 0, +1 as applied to the keys.
     pub x_dir: i32,
     pub y_dir: i32,
-    /// A changed x direction waiting for the reaction timer. Open item: the hold encoding.
+    /// A changed x direction waiting for the reaction timer. The last chosen x direction stays
+    /// in force until the delay expires [I] (gaps §11.1).
     pub pending_x_dir: Option<i32>,
     pub react: Timer,
 }
@@ -274,8 +275,6 @@ pub struct AiOutput {
     pub pad: FarmerPad,
     pub swing: bool,
     pub goodie: Option<FarmerGoodie>,
-    /// AI+0x08 set: zero the damage output. Open item: the flag's meaning.
-    pub zero_damage: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -302,12 +301,10 @@ pub struct FarmerAi {
     pub nuke_timer: Timer,
     pub nuke_far: Option<Timer>,
     pub boot_timer: Timer,
-    /// Triple, Nuclear, Boot. Open item: whether they reset per period (they live per period
-    /// here because the AI is rebuilt with the world).
+    /// Triple, Nuclear, Boot. Reset every period: the AI is rebuilt with the world (gaps §6.1).
     pub budgets: [i32; 3],
     pub prev_triple_on: bool,
     pub prev_midges_on: bool,
-    pub zero_damage: bool,
 }
 
 impl FarmerAi {

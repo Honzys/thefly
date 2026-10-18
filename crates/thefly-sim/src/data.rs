@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::world::W;
 use crate::world::objects::{EXTREME_TYPES, NORMAL_TYPES};
 
 /// One animation frame's size in pixels.
@@ -64,10 +65,13 @@ pub const OUTLINED_SPRITES: &[&str] = &[
     "tue_mouche",
 ];
 
+/// What [`GameData::check`] found wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Missing {
     Size(String),
     Outline(String),
+    /// A main scenery layer whose width is not [`crate::world::W`] (gaps §4.2).
+    WorldWidth(String, i32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -98,6 +102,12 @@ impl GameData {
         for name in SIZED_SPRITES.iter().copied().chain(objects.clone()) {
             if !self.sizes.contains_key(name) {
                 return Err(Missing::Size(name.to_owned()));
+            }
+        }
+        for name in ["Maison", "dehors", "arene"] {
+            let w = self.size(name).w;
+            if w != W {
+                return Err(Missing::WorldWidth(name.to_owned(), w));
             }
         }
         for name in OUTLINED_SPRITES.iter().copied().chain(objects) {
@@ -180,12 +190,14 @@ mod tests {
 
     #[test]
     fn synthetic_data_passes_the_check() {
-        let d = GameData::synthetic();
+        let mut d = GameData::synthetic();
         assert_eq!(d.check(), Ok(()));
         assert_eq!(d.size("Face"), Size { w: 120, h: 94 });
         assert_eq!(
             GameData::default().check(),
             Err(Missing::Size("Face".into()))
         );
+        d.sizes.insert("dehors".into(), Size { w: 3000, h: 295 });
+        assert_eq!(d.check(), Err(Missing::WorldWidth("dehors".into(), 3000)));
     }
 }

@@ -35,6 +35,6 @@ impl Bourse {
     /// Enter → gameplay ([`crate::screen::Gameplay::enter`]).
     pub fn tick(&mut self, keys: &KeyState, m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
         let _ = (keys, m, cx);
-        todo!("W3 screens-and-rendering §3.3; open item: the scene class mask at 0x4672e8")
+        todo!("W3 screens-and-rendering §3.3; open item O18: the scene class mask at 0x4672e8")
     }
 }

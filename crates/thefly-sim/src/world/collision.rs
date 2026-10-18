@@ -17,8 +17,8 @@ impl Rect {
         Self { x, y, w, h }
     }
 
-    /// Strict box overlap. Open item per call site: some original tests are inclusive (the
-    /// flying-goodie catch, §6.3); those use [`Rect::catches`].
+    /// Strict box overlap. The flying-goodie catch and the midge contact test are inclusive on
+    /// both bounds (gaps §5.1, §8.1); those use [`Rect::catches`].
     pub fn overlaps(&self, o: &Rect) -> bool {
         let _ = o;
         todo!("W1 fly-and-world §4.5")
@@ -48,7 +48,7 @@ pub struct Shape<'a> {
 
 /// `FUN_0042f6de`: boxes first (with the wrap shift when either straddles `wrap_width`), then a
 /// hit when an outline point of `a` coincides with one of `b` at half-x resolution in a shared
-/// row. Open item: the contained-span y quirk (§4.3 step 3); reproduce only if it changes a result.
+/// row. The contained-span y quirk (§4.3 step 3) is reproduced as written, not "fixed" (gaps §11.2).
 pub fn outlines_overlap(a: &Shape<'_>, b: &Shape<'_>, wrap_width: i32) -> bool {
     let _ = (a, b, wrap_width);
     todo!("W1 fly-and-world §4.3")

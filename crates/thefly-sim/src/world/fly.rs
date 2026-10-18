@@ -23,6 +23,13 @@ pub const RESPAWN_TRIES_PERIOD_START: u32 = 3000;
 pub const RICOCHET_END: i32 = 25;
 /// Friction per tick toward 0 when no key on that axis is held.
 pub const FRICTION: i32 = 9;
+/// The appear animation: scale tween 3.0 to 0.1 over 500 ms. The fly is alive when the scale
+/// tween ends, tick 33 at 65 Hz (gaps §2.3, §11.7 [I]); the alpha tween would end at tick 37.
+pub const APPEAR_MS: u64 = 500;
+/// A zapper splat ends when its 100 blood particles have faded: 64 ticks (gaps §2.2). Boot and
+/// fan splats end when 11 body pieces are below [`SPLAT_FLOOR_Y`]; simulate the pieces.
+pub const ZAPPER_SPLAT_TICKS: u32 = 64;
+pub const SPLAT_FLOOR_Y: i32 = 600;
 /// A damage total above this kills; at or below it stuns.
 pub const DEATH_TOTAL: i32 = 100;
 /// The grab animation's loop counter limit before turning out (§3.5).
@@ -148,7 +155,8 @@ pub struct Fly {
     pub crash_timer: Timer,
     /// Port: the appear animation's end (render-driven in the original, §2).
     pub appear_timer: Timer,
-    /// Port: the splat particles' end (render-driven; duration is an open item).
+    /// Port: the splat particles' end (render-driven). Not a constant: the splat ends when all 11
+    /// body pieces are below y 600, or after 64 ticks for a zapper (gaps §2.2).
     pub splat_timer: Timer,
     /// Survival statistic: when this life started, ms.
     pub life_started_ms: Option<u64>,
@@ -262,11 +270,10 @@ impl Fly {
         todo!("W1 fly-and-world §3.6 Splat")
     }
 
-    /// `FUN_00439f29`, the zapper's grill: instant death. Open item: whether it takes the dying
-    /// path (crash, 1500 ms) or the splat path.
+    /// `FUN_00439f29`, the zapper's grill: the splat path with kind 13 (gaps §2.1), sound 43.
     pub fn grill(&mut self, cx: &mut Ctx) {
         let _ = cx;
-        todo!("W1 game-spec §4.6 zapper, open item")
+        todo!("W1 fly-and-world §7.4 Zapper, gaps §2.1 zapper death")
     }
 
     /// Damage added straight to the total, bypassing the stun (fan §7.4, zapper arc 1/tick).

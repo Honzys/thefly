@@ -44,7 +44,7 @@ impl Stats {
     }
 
     pub fn page(&self) -> StatsPage {
-        todo!("W3 ai-and-rules §8.7 page values; open item: the float constant at 0x45debc")
+        todo!("W3 ai-and-rules §8.7 page values; the percentage constant at 0x45debc is 100")
     }
 }
 

@@ -1,9 +1,8 @@
 //! W3. Save files as bytes (game-spec §7). The sim never touches the disk: it decodes what the
 //! frontend read at start-up and emits [`crate::Event::Save`] with the encoded bytes.
 //!
-//! Open item: `docs/formats/btt.md` and `thefly_assets::btt` read a 40-byte name and an f64
-//! score at +40, while game-spec §7.1 says `name[12]`, i32 score at +0x0c and a checksum f64 at
-//! +0x28. W3 settles it and puts the parser/writer in `thefly-assets`; these wrap it.
+//! The `scoot.btt` layout is game-spec §7.1 (`name[12]`, i32 score at +0x0c, f64 checksum at
+//! +0x28), read by `thefly_assets::btt`. W3 adds the writer there; these types wrap both.
 
 use crate::highscores::HighScoreTable;
 use crate::rng::MsvcRand;
@@ -16,7 +15,7 @@ pub struct Options {
 }
 
 impl Default for Options {
-    /// Used when `boite.btt` is missing. Open item: the original's behaviour without the file.
+    /// Used when `boite.btt` is missing. Open item O7: the docs do not say what the original does.
     fn default() -> Self {
         Self {
             music: true,

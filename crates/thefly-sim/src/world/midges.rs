@@ -63,7 +63,7 @@ impl Default for Swarm {
     }
 }
 
-/// The cosmetic population at game+0x15a20 that reacts to the swatter and fans. Open item: its
+/// The cosmetic population at game+0x15a20 that reacts to the swatter and fans. Open item O2: its
 /// count and spawn rule are not in the docs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AmbientMidges {
@@ -74,13 +74,13 @@ impl World {
     /// Step 14.
     pub fn ambient_midges_step(&mut self, cx: &mut Ctx) {
         let _ = cx;
-        todo!("W2 fly-and-world §2 step 14, open item")
+        todo!("W2 fly-and-world §2 step 14, gaps §8.1 contact routine; open item O2")
     }
 
     /// Step 18a (`FUN_00404ef3`, render pass in the original): homing, swatter kills, trap push,
     /// the farmer slowdown pulse, swarm end.
     pub fn midges_step(&mut self, cx: &mut Ctx) {
         let _ = cx;
-        todo!("W2 fly-and-world §8.2; open item: the contact box (ai-and-rules Still open 7)")
+        todo!("W2 fly-and-world §8.2, gaps §8.1 (contact box and the 20-slot count)")
     }
 }

@@ -7,7 +7,7 @@ use crate::input::KeyState;
 use crate::screen::Flow;
 
 pub const ROWS: usize = 10;
-/// Name field bytes including the NUL (game-spec §7.1, pending the format open item).
+/// Longest name: the field is `name[12]`, NUL-terminated (game-spec §7.1).
 pub const NAME_MAX: usize = 11;
 pub const CURSOR_BLINK_MS: u64 = 200;
 pub const ROW_SWEEP_MS: u64 = 200;
@@ -63,7 +63,7 @@ impl HighScoreScreen {
     }
 
     /// A key during the reveal skips it (slot 0x26); confirming a name saves (slot 0x33) and
-    /// emits [`crate::Event::Save`]; Enter/Esc → menu. Open item: text input from scancodes.
+    /// emits [`crate::Event::Save`]; Enter/Esc → menu. Typing: gaps §1.3 (a-z, 1..0, Enter, Backspace); open item O17 for Space and Esc.
     pub fn tick(&mut self, keys: &KeyState, table: &mut HighScoreTable, cx: &mut Ctx) -> Flow {
         let _ = (keys, table, cx);
         todo!("W3 screens-and-rendering §5.3")
