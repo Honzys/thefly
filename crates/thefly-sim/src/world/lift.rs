@@ -37,7 +37,7 @@ pub enum LiftState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiftResult {
     /// −1: hoisted off the top; the object is delivered.
-    Delivered,
+    Delivered(usize),
     /// 1000: nothing on the hook.
     Empty,
     /// The hooked object index.
