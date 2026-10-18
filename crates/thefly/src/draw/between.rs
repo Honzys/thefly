@@ -6,7 +6,7 @@ use thefly_sim::bourse::{Bourse, COLUMN_OBJECT};
 use thefly_sim::economy::ITEMS;
 use thefly_sim::match_state::MatchState;
 use thefly_sim::screen::MatchScreen;
-use thefly_sim::shop::{GoodiesShop, ShopSide, Tally, TrapsShop};
+use thefly_sim::shop::{GoodiesShop, ShopSide, TARGET_OFFSET, Tally, TrapsShop};
 use thefly_sim::world::objects::{EXTREME_TYPES, NORMAL_TYPES};
 use thefly_sim::world::traps::TrapKind;
 
@@ -69,19 +69,22 @@ pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> R
         g.spr("g_barre_haut_tapette", 0.0, 0.0, 0)?;
     }
     g.spr("g_barres_tapis", 414.0, 67.0, 0)?;
-    // the machine shakes inside its 4 × 4 box (SR §3.1 "wanders inside a small box")
-    let shake = |n: u64| ((v.now / 40 + n) % 5) as f32 - 2.0;
-    let (mx, my) = (7.0 + shake(0), 143.0 + shake(2));
-    g.spr("g_Machine", mx, my, 0)?;
     let prev = match v.prev_screen() {
         Some(MatchScreen::GoodiesShop(p)) if p.side == s.side => Some(p.as_ref()),
         _ => None,
     };
+    let pm = prev.map(|p| p.machine);
+    let mx = v.l.i(pm.map(|m| m.x), s.machine.x);
+    let my = v.l.i(pm.map(|m| m.y), s.machine.y);
+    g.spr("g_Machine", mx, my, 0)?;
     // the tally sprite falls into the hopper, behind its cover
     if let Some(t) = &s.tally {
         tally(g, v, m, t, prev.and_then(|p| p.tally.as_ref()))?;
     }
-    g.spr("g_Machine_cache", mx + 46.0, my + 156.0, 0)?;
+    let (dx, dy) = TARGET_OFFSET;
+    g.spr("g_Machine_cache", mx + dx as f32, my + dy as f32, 0)?;
+    // the landing dust (game.rs) rises over the hopper
+    v.fx.draw_particles(g, v.l)?;
     g.spr("g_barres_bas", 0.0, 369.0, u32::from(!fly))?;
     if let Some(d) = &s.conveyor {
         let pd = prev.and_then(|p| p.conveyor.as_ref());
@@ -123,18 +126,11 @@ pub fn goodies_shop(g: &mut Gfx, v: &View, m: &MatchState, s: &GoodiesShop) -> R
         let size = g.fit_size(ARIAL_BLACK, 18, &owned, BOX_W - 4.0)?;
         g.text_centred(ARIAL_BLACK, size, &owned, count, WHITE)?;
     }
-    let money = match (&s.tally, fly) {
-        (Some(t), _) if t.side == s.side => t.shown,
-        (_, true) => e.fly.money,
-        (_, false) => e.farmer.money,
-    };
+    let money = if fly { e.fly.money } else { e.farmer.money };
     g.text(JOINT, 43, &money.to_string(), 140.0, 470.0, WHITE)?;
     g.text(JOINT, 43, "$", 243.0, 470.0, WHITE)?;
     g.fade(shop_fade(v, s.fade.alpha))
 }
-
-/// `g_flymort` and the food sprites share the sim's 100 × 75 tally box, bottom-aligned on it.
-const TALLY_BOX_H: f32 = 75.0;
 
 /// The payout tally's moving sprite: a dead fly (farmer) or the saved food (fly), and the
 /// "x N" of a stopped food. shortcut: the label's place and font are not in the docs (O4); it
@@ -148,11 +144,11 @@ fn tally(g: &mut Gfx, v: &View, m: &MatchState, t: &Tally, p: Option<&Tally>) ->
         ShopSide::Fly if m.config.extreme() => (EXTREME_TYPES[item.label % 3].name, 0),
         ShopSide::Fly => (NORMAL_TYPES[item.label % NORMAL_TYPES.len()].name, 0),
     };
-    let (w, h) = g.size(name)?;
+    let (w, h) = (item.size.0 as f32, item.size.1 as f32);
     let ps = p.map(|p| p.sprite);
     let x = v.l.i(ps.map(|s| s.x), t.sprite.x);
-    let y = v.l.i(ps.map(|s| s.y), t.sprite.y) + TALLY_BOX_H - h;
-    g.spr(name, x, y, frame)?;
+    let y = v.l.i(ps.map(|s| s.y), t.sprite.y);
+    g.spr_stretched(name, frame, (x, y, w, h), 255.0)?;
     if !t.label.is_armed() || t.label.expired(v.now) {
         return Ok(());
     }
