@@ -4,10 +4,10 @@
 use super::collision::Rect;
 use super::goodies::Mystery;
 use super::{SCREEN_H, SCREEN_W, SwatHit, World};
-use crate::clock::{FPS, Timer, first_tick_at};
+use crate::clock::{DT, FPS, Timer, first_tick_at};
 use crate::ctx::Ctx;
 use crate::data::Size;
-use crate::event::{Effect, Event, PlayParams, SoundOp, SoundSlot};
+use crate::event::{Effect, Event, Pan, PlayParams, SoundOp, SoundSlot};
 use crate::input::FlyPad;
 use crate::match_state::MatchState;
 
@@ -38,6 +38,17 @@ pub const SPLAT_BLOOD: usize = 60;
 pub const SPLAT_PIECES: usize = 11;
 /// A zapper death adds 40 fading blood particles to the 60 (gaps §2.1).
 pub const ZAPPER_EXTRA_BLOOD: usize = 40;
+/// DirectSound volume passed for slot 29 before the crash plays; out of range (FW §9).
+const CRASH_VOLUME: i32 = 5000;
+/// The buzz helper's random frequency part, R(1000) (game-spec §4.2 "Buzz").
+const BUZZ_FREQ_ROLL: i32 = 1000;
+/// The hit frame the stun turns around at (§3.6 B).
+const HIT_FRAME_TOP: i32 = 3;
+/// Grab and heading strips: frames 0..=9, the loop runs 4..=9 (§3.5).
+const TURN_IN_END: i32 = 4;
+const LOOP_LAST: i32 = 9;
+/// Frames of the FACE idle cycle.
+const FACE_FRAMES: i32 = 10;
 /// Frames of the `blood` sheet, 3 × 2 (screens-and-rendering §4.6); the frame roll is R(n − 3).
 const BLOOD_FRAMES: i32 = 6;
 /// Fade length roll of each zapper blood particle: R(100) + 850 ms (gaps §2.2).
@@ -177,6 +188,8 @@ pub struct Fly {
     /// fly+0x2a8: a zapper death, which ends after [`ZAPPER_SPLAT_TICKS`] instead.
     pub zapper_splat: bool,
     pub splat_ticks: u32,
+    /// Port: slot 7 is looping (so the next alive tick moves it instead of starting it).
+    pub buzzing: bool,
     /// Survival statistic: when this life started, ms.
     pub life_started_ms: Option<u64>,
 }
@@ -236,6 +249,7 @@ impl Fly {
             splat_gravity: 0,
             zapper_splat: false,
             splat_ticks: 0,
+            buzzing: false,
             life_started_ms: Some(cx.now),
         }
     }
@@ -531,6 +545,461 @@ impl Fly {
     }
 }
 
+/// Physics (§3.4) and update (§3.5, §3.6).
+impl Fly {
+    /// §3.4 steps 1–11; returns the camera delta of step 11.
+    fn physics(&mut self, pad: &FlyPad, cx: &mut Ctx) -> f64 {
+        if self.superfly && self.superfly_timer.expired(cx.now) {
+            self.end_superfly(cx);
+        }
+        self.turbo_tick(cx.now);
+        let mx = self.max_x + i32::from(self.turbo.boost_x);
+        let my = self.max_y + i32::from(self.turbo.boost_y);
+        if !self.dying && self.ricochet == 0 {
+            self.steer(pad, mx, my);
+        }
+        if self.ricochet > 0 {
+            self.ricochet_tick(pad);
+        }
+        let (jx, jy) = self.jitter(cx);
+        (self.prev_x, self.prev_y) = (self.x, self.y);
+        self.x += (f64::from(self.vx - self.scroll) * DT) as i32 + jx;
+        self.y += (f64::from(self.vy) * DT) as i32 + jy;
+        self.x = self.x.clamp(0, SCREEN_W - self.size.w);
+        self.y = self.y.clamp(0, SCREEN_H - self.size.h);
+        self.buzz(cx);
+        self.edge_scroll(mx)
+    }
+
+    /// §3.4 step 2: the expiry tick only switches to the decay.
+    fn turbo_tick(&mut self, now: u64) {
+        if !self.turbo.active {
+            return;
+        }
+        if !self.turbo.decaying {
+            self.turbo.decaying = self.turbo.timer.expired(now);
+            return;
+        }
+        let decay = |b: i16, max: i32| ((f64::from(b) - f64::from(max) * 0.05) as i16).max(0);
+        self.turbo.boost_x = decay(self.turbo.boost_x, self.max_x);
+        self.turbo.boost_y = decay(self.turbo.boost_y, self.max_y);
+        if self.turbo.boost_x == 0 && self.turbo.boost_y == 0 {
+            self.end_turbo();
+        }
+    }
+
+    /// §3.4 step 4.
+    fn climb(&self, my: i32) -> i32 {
+        let tenth = f64::from(my) * TENTH_F32;
+        if !self.carrying {
+            return tenth as i32;
+        }
+        let bonus = if self.superfly { 0.5 } else { 0.0 };
+        let c = (f64::from(self.strength_f) + bonus).min(1.0);
+        (75.0 * c + tenth / 1.6) as i32
+    }
+
+    /// §3.4 step 5.
+    fn steer(&mut self, pad: &FlyPad, mx: i32, my: i32) {
+        let tenth = |m: i32| f64::from(m) * TENTH_F32;
+        let climb = self.climb(my);
+        if pad.right {
+            self.vx = ((f64::from(self.vx) + tenth(mx)) as i32).min(mx);
+        }
+        if pad.left {
+            self.vx = ((f64::from(self.vx) - tenth(mx)) as i32).max(-mx);
+        }
+        if pad.up {
+            self.vy = (self.vy - climb).max(-my);
+        }
+        if pad.down {
+            self.vy = ((f64::from(self.vy) + tenth(my)) as i32).min(my);
+        }
+        if std::mem::take(&mut self.drop_pop) {
+            self.vy = -(self.vy.abs() + 300);
+        }
+        if !pad.left && !pad.right {
+            self.vx = toward_zero(self.vx, FRICTION);
+        }
+        if !pad.up && !pad.down {
+            self.vy = toward_zero(self.vy, FRICTION);
+        }
+    }
+
+    /// §3.4 step 6.
+    fn ricochet_tick(&mut self, pad: &FlyPad) {
+        let dx = if pad.left || pad.right {
+            (f64::from(self.kick_x) / 37.5) as i32
+        } else {
+            self.kick_x / 25
+        };
+        let dy = self.kick_y / 25;
+        self.ricochet += 1;
+        if self.ricochet < RICOCHET_END {
+            self.vx = toward_zero(self.vx, dx);
+            self.vy = toward_zero(self.vy, dy);
+            return;
+        }
+        self.ricochet = 0;
+        let (w, half) = (self.size.w, self.size.w / 2);
+        if self.x + w > SCREEN_W - half {
+            self.x = SCREEN_W - half - w;
+        } else if self.x < half {
+            self.x = half;
+        }
+    }
+
+    /// §3.4 step 7: U, sign, U, sign.
+    fn jitter(&self, cx: &mut Ctx) -> (i32, i32) {
+        if self.heading != Heading::Face || self.dying || self.ricochet != 0 || self.carrying {
+            return (0, 0);
+        }
+        let mut axis = || (cx.rng.u() * 2.0) as i32 * cx.rng.sign();
+        let jx = axis();
+        (jx, axis())
+    }
+
+    /// §3.4 step 10.
+    ///
+    /// shortcut: game-spec §4.2 gives the buzz frequency as 10000 + random 0–999 + a speed term;
+    /// the R(1000) is drawn to keep the stream, but the pitch and the pan curve are open item O14
+    /// (the frontend's). Who first starts the loop is not documented, so the first alive tick
+    /// loops it. Revisit with O14.
+    fn buzz(&mut self, cx: &mut Ctx) {
+        let pan = Pan::ScreenX {
+            x: self.x,
+            w: self.size.w,
+        };
+        if !self.alive() {
+            if std::mem::take(&mut self.buzzing) {
+                cx.sound(SoundSlot::FLY_BUZZ, SoundOp::Stop);
+            }
+            return;
+        }
+        cx.rng.r(BUZZ_FREQ_ROLL);
+        let op = if self.buzzing {
+            SoundOp::Move(pan)
+        } else {
+            SoundOp::Loop(PlayParams {
+                pan,
+                ..PlayParams::default()
+            })
+        };
+        self.buzzing = true;
+        cx.sound(SoundSlot::FLY_BUZZ, op);
+    }
+
+    /// §3.4 step 11: assigns `scroll` and returns this tick's camera delta.
+    fn edge_scroll(&mut self, mx: i32) -> f64 {
+        let (w, half) = (self.size.w, self.size.w / 2);
+        let o = if self.x + w >= SCREEN_W - w {
+            self.x + w - (SCREEN_W - w)
+        } else if self.x <= w {
+            self.x - w
+        } else {
+            0
+        };
+        self.scroll = mx * o / half;
+        f64::from(mx) * f64::from(o) * DT / f64::from(half)
+    }
+
+    /// §3.5 (`FUN_00433ddd`).
+    fn update(
+        &mut self,
+        pad: &FlyPad,
+        hit: SwatHit,
+        action: bool,
+        m: &mut MatchState,
+        cx: &mut Ctx,
+    ) {
+        if self.splatted || self.appearing {
+            return;
+        }
+        if self.dying && self.respawn_timer.is_armed() {
+            if self.respawn_timer.expired(cx.now) {
+                self.record_death(m, cx);
+                self.request_respawn(cx);
+                self.respawn_timer.disarm();
+            }
+            return;
+        }
+        if hit.damage >= 1 || self.dying || self.stunned {
+            self.damage(hit, m, cx);
+            if self.dying {
+                self.aspirating = false;
+            }
+            return;
+        }
+        self.grab_toggle(action, cx);
+        if self.grab_lock {
+            self.grab_step();
+        } else {
+            self.heading_step(pad);
+        }
+    }
+
+    /// §3.6 (`FUN_00437e99`).
+    ///
+    /// shortcut: §3.6 does not say whether a new hit (A) runs B in the same call; it does here,
+    /// so the hit frame reads 1 on the hit tick. Revisit if the stun proves one tick short.
+    fn damage(&mut self, hit: SwatHit, m: &mut MatchState, cx: &mut Ctx) {
+        if hit.damage >= 1 && !self.hit_in_progress {
+            self.new_hit(hit, m, cx);
+        }
+        if self.stunned && self.phase == 0 {
+            self.stun_in(cx);
+        } else if self.stunned {
+            self.stun_out();
+        } else if self.dying && self.phase == 0 && self.crash_timer.expired(cx.now) {
+            self.hit_frame = HIT_FRAME_TOP;
+            (self.vx, self.vy) = (0, 0);
+            self.phase = 1;
+            self.respawn_timer.arm(cx.now, RESPAWN_DELAY_MS);
+            self.crash_timer.disarm();
+        }
+    }
+
+    /// §3.6 A, and the hits and damage statistics (AR §8.7, `FUN_00439156`).
+    ///
+    /// shortcut: AR §8.7 does not say whether the damage sum takes the raw or the SuperFly-cut
+    /// damage; it takes the effective one. Revisit with the stats page check.
+    fn new_hit(&mut self, hit: SwatHit, m: &mut MatchState, cx: &mut Ctx) {
+        self.saved_heading = self.heading;
+        self.hits_this_life += 1;
+        let effective = if self.superfly {
+            (f64::from(hit.damage) / 2.5) as i32
+        } else {
+            hit.damage
+        };
+        self.damage_total += effective;
+        m.stats.hits += 1;
+        m.stats.damage += effective;
+        if self.damage_total <= DEATH_TOTAL {
+            self.stunned = true;
+        } else {
+            self.start_dying(cx);
+        }
+        self.hit_k = hit.damage / 50;
+        self.hit_frame = 0;
+        self.hit_in_progress = true;
+        self.hit_dir = (hit.dir_x, hit.dir_y);
+    }
+
+    /// §3.6 A step 4.
+    fn start_dying(&mut self, cx: &mut Ctx) {
+        self.dying = true;
+        cx.emit(Event::Effect(Effect::Crash {
+            x: self.x,
+            y: self.y,
+        }));
+        self.clear_grab();
+        self.end_turbo();
+        self.end_superfly(cx);
+        cx.sound(SoundSlot::FLY_CRASH, SoundOp::SetVolume(CRASH_VOLUME));
+        cx.emit(Event::play(SoundSlot::FLY_CRASH));
+        self.crash_timer.arm(cx.now, CRASH_MS);
+    }
+
+    /// §3.6 B: the frame climbs to 3, then the kick unless SuperFly is on.
+    fn stun_in(&mut self, cx: &mut Ctx) {
+        self.hit_frame += 1;
+        if self.hit_frame <= HIT_FRAME_TOP {
+            return;
+        }
+        self.hit_frame = HIT_FRAME_TOP;
+        self.phase = 1;
+        if self.superfly {
+            return;
+        }
+        self.vx = kicked(self.vx, self.hit_k, self.hit_dir.0, cx);
+        self.vy = kicked(self.vy, self.hit_k, self.hit_dir.1, cx);
+        (self.kick_x, self.kick_y) = (self.vx.abs(), self.vy.abs());
+        self.ricochet = 1;
+        cx.emit(Event::play(SoundSlot::FLY_RICOCHET));
+    }
+
+    /// §3.6 C.
+    fn stun_out(&mut self) {
+        self.hit_frame -= 1;
+        if self.hit_frame >= 0 {
+            return;
+        }
+        self.hit_frame = 0;
+        self.stunned = false;
+        self.hit_in_progress = false;
+        self.heading = self.saved_heading;
+        self.post_stun = true;
+        self.phase = 0;
+    }
+
+    /// §3.5 normal path: the grab toggle on a fresh action, then the lock.
+    fn grab_toggle(&mut self, action: bool, cx: &mut Ctx) {
+        if action && !self.prev_action {
+            if !self.aspirating {
+                cx.emit(Event::play(SoundSlot::ASPIRATE));
+                self.aspirating = true;
+            } else if self.carrying {
+                self.aspirating = false;
+            }
+        }
+        self.prev_action = action;
+        if self.aspirating && !self.grab_lock && !self.carrying {
+            self.grab_lock = true;
+        }
+    }
+
+    /// §3.5 grab animation: turn in to frame 4, loop 4..=9 for 51 ticks, turn out.
+    fn grab_step(&mut self) {
+        match self.grab_turn {
+            Turn::In => {
+                self.grab_frame += 1;
+                if self.grab_frame > TURN_IN_END {
+                    self.grab_frame = TURN_IN_END;
+                    self.grab_turn = Turn::Loop;
+                }
+            }
+            Turn::Loop => {
+                self.grab_frame = loop_frame(self.grab_frame);
+                self.grab_counter += 1;
+                if self.grab_counter > GRAB_LOOP_TICKS {
+                    self.grab_turn = Turn::Out;
+                }
+            }
+            Turn::Out => {
+                self.grab_frame -= 1;
+                if self.grab_frame >= 0 {
+                    return;
+                }
+                self.heading = Heading::Face;
+                self.grab_counter = 0;
+                self.grab_lock = false;
+                self.grab_frame = 0;
+                self.grab_turn = Turn::In;
+                self.aspirating &= self.carrying;
+            }
+        }
+    }
+
+    /// §3.5 heading animation. Visual, except that FACE gates the jitter.
+    ///
+    /// shortcut: §3.5 gives the rules but not the frame rate or what a key change does mid-turn;
+    /// one frame per tick, a turn-in finishes before it reacts, and a turn-out lands on the
+    /// target held when it ends. Revisit if the idle jitter's rand count drifts from a capture.
+    fn heading_step(&mut self, pad: &FlyPad) {
+        self.heading_target = Heading::from_pad(pad);
+        if self.heading == Heading::Face {
+            self.leave_face();
+            return;
+        }
+        match self.heading_turn {
+            Turn::In => {
+                self.heading_frame += 1;
+                if self.heading_frame >= TURN_IN_END {
+                    self.heading_frame = TURN_IN_END;
+                    self.heading_turn = Turn::Loop;
+                }
+            }
+            Turn::Loop if self.heading_target == self.heading => {
+                self.heading_frame = loop_frame(self.heading_frame);
+            }
+            Turn::Loop if self.heading.shares_a_direction(self.heading_target) => {
+                self.heading = self.heading_target;
+                self.heading_frame = TURN_IN_END;
+            }
+            Turn::Loop => self.heading_turn = Turn::Out,
+            Turn::Out => {
+                self.heading_frame -= 1;
+                if self.heading_frame >= 0 {
+                    return;
+                }
+                self.heading = Heading::Face;
+                self.heading_frame = 0;
+                self.leave_face();
+            }
+        }
+    }
+
+    /// At FACE: cycle the idle frames, or start turning in to the held direction.
+    fn leave_face(&mut self) {
+        if self.heading_target == Heading::Face {
+            self.heading_frame = (self.heading_frame + 1) % FACE_FRAMES;
+            return;
+        }
+        self.heading = self.heading_target;
+        self.heading_frame = 0;
+        self.heading_turn = Turn::In;
+    }
+}
+
+impl Heading {
+    /// shortcut: §3.5 does not say which of two opposite keys wins; Right and Up do.
+    fn from_pad(pad: &FlyPad) -> Self {
+        match (pad.right, pad.left, pad.up, pad.down) {
+            (true, _, true, _) => Heading::NE,
+            (true, _, _, true) => Heading::SE,
+            (true, ..) => Heading::E,
+            (_, true, true, _) => Heading::NW,
+            (_, true, _, true) => Heading::SW,
+            (_, true, ..) => Heading::W,
+            (.., true, _) => Heading::N,
+            (.., true) => Heading::S,
+            _ => Heading::Face,
+        }
+    }
+
+    /// Direction flags (east, west, north, south).
+    fn flags(self) -> [bool; 4] {
+        match self {
+            Heading::Face => [false; 4],
+            Heading::E => [true, false, false, false],
+            Heading::W => [false, true, false, false],
+            Heading::N => [false, false, true, false],
+            Heading::S => [false, false, false, true],
+            Heading::NE => [true, false, true, false],
+            Heading::SE => [true, false, false, true],
+            Heading::NW => [false, true, true, false],
+            Heading::SW => [false, true, false, true],
+        }
+    }
+
+    fn shares_a_direction(self, o: Heading) -> bool {
+        self.flags().iter().zip(o.flags()).any(|(a, b)| *a && b)
+    }
+}
+
+/// `v` moved `d` toward 0 without overshooting.
+fn toward_zero(v: i32, d: i32) -> i32 {
+    if v > 0 {
+        (v - d).max(0)
+    } else {
+        (v + d).min(0)
+    }
+}
+
+/// The loop frames 4..=9: one step, past 9 wraps to 4.
+fn loop_frame(f: i32) -> i32 {
+    if f + 1 > LOOP_LAST {
+        TURN_IN_END
+    } else {
+        f + 1
+    }
+}
+
+/// §3.6 B steps 1–2 for one axis: U first, then the sign roll for direction code 2.
+fn kicked(v: i32, k: i32, dir: KickDir, cx: &mut Ctx) -> i32 {
+    let r = cx.rng.u();
+    let kick = if v == 0 {
+        (r * 500.0) as i32
+    } else {
+        (f64::from(v.abs()) * f64::from(k) * r + 800.0) as i32
+    };
+    match dir {
+        KickDir::Minus => v - kick,
+        KickDir::Plus => v + kick,
+        KickDir::Random => v + cx.rng.sign() * kick,
+    }
+}
+
 /// Splat bursts (gaps §2.1): `FUN_004397c0(minX, minY, rangeX, rangeY, signX, signY, –, g)`.
 #[derive(Debug, Clone, Copy)]
 struct Burst {
@@ -618,9 +1087,18 @@ impl World {
     }
 
     /// Step 5 (`FUN_00437547`), skipped while appearing. Writes the camera delta.
+    /// The delta stays as it was on skipped ticks; the layers scroll by it every tick
+    /// (gaps §4.3).
     pub fn fly_physics(&mut self, pad: &FlyPad, cx: &mut Ctx) {
-        let _ = (pad, cx);
-        todo!("W1 fly-and-world §3.4")
+        let pad = if self.goodies.fly_mystery == Mystery::First {
+            pad.inverted()
+        } else {
+            *pad
+        };
+        if !self.fly.appearing {
+            self.camera.delta = self.fly.physics(&pad, cx);
+        }
+        self.camera.scroll();
     }
 
     /// Step 8 (`FUN_00433ddd`): death timer, damage machine, grab toggle and animations.
@@ -632,8 +1110,7 @@ impl World {
         m: &mut MatchState,
         cx: &mut Ctx,
     ) {
-        let _ = (pad, hit, action, m, cx);
-        todo!("W1 fly-and-world §3.5, §3.6; stats via MatchState")
+        self.fly.update(pad, hit, action, m, cx);
     }
 
     /// Step 9: re-roll while overlapping an object (≤ [`RESPAWN_TRIES`]), then appear.
@@ -1034,5 +1511,260 @@ mod tests {
         assert!(w.fly.respawn_request && w.fly.splatted);
         b.with(|cx| w.respawn_placement(cx));
         assert!(w.fly.appearing && !w.fly.splatted);
+    }
+
+    const RIGHT: FlyPad = FlyPad {
+        up: false,
+        down: false,
+        left: false,
+        right: true,
+        action: false,
+        goodie_cycle: false,
+    };
+    const UP: FlyPad = FlyPad {
+        up: true,
+        right: false,
+        ..RIGHT
+    };
+    const NONE: FlyPad = FlyPad {
+        right: false,
+        ..RIGHT
+    };
+
+    /// A fly mid-screen with jitter off (heading E), so only the velocity rules act.
+    fn centred(b: &mut Bench) -> Fly {
+        let mut fly = b.fly();
+        (fly.x, fly.y, fly.heading) = (340, 250, Heading::E);
+        fly
+    }
+
+    /// Acceptance W1 2.
+    #[test]
+    fn steering_accelerates_by_a_tenth_and_friction_brings_vx_to_exactly_zero() {
+        let mut b = Bench::new(1);
+        let mut fly = centred(&mut b);
+        let mut seen = Vec::new();
+        for _ in 0..11 {
+            b.with(|cx| fly.physics(&RIGHT, cx));
+            fly.x = 340;
+            seen.push(fly.vx);
+        }
+        // trunc(550 × 0.1f) = 55 per tick, capped at 550.
+        assert_eq!(seen, [55, 110, 165, 220, 275, 330, 385, 440, 495, 550, 550]);
+        let mut ticks = 0;
+        while fly.vx != 0 && ticks < 100 {
+            b.with(|cx| fly.physics(&NONE, cx));
+            fly.x = 340;
+            ticks += 1;
+            assert!(fly.vx >= 0, "friction overshot");
+        }
+        // 550 = 61 × 9 + 1: 61 steps of 9 and a last step of 1.
+        assert_eq!((fly.vx, ticks), (0, 62));
+
+        b.with(|cx| fly.physics(&UP, cx));
+        assert_eq!(fly.vy, -55);
+        fly.vy = 0;
+        fly.carrying = true;
+        fly.strength_f = 0.6;
+        b.with(|cx| fly.physics(&UP, cx));
+        // trunc(75 × 0.6f + 550 × 0.1f / 1.6) = trunc(45.0000018 + 34.375) = 79.
+        assert_eq!(fly.vy, -79);
+    }
+
+    /// Acceptance W1 3.
+    #[test]
+    fn turbo_holds_for_1500_ms_then_decays_by_five_percent_of_max() {
+        let mut b = Bench::new(1);
+        let mut fly = centred(&mut b);
+        b.with(|cx| fly.start_turbo(None, cx));
+        let expiry = crate::clock::first_tick_at(TURBO_MS);
+        for tick in 1..expiry {
+            b.now = crate::clock::ms_at(tick);
+            b.with(|cx| fly.physics(&NONE, cx));
+            assert_eq!(fly.turbo.boost_x, 275, "tick {tick}");
+        }
+        b.now = crate::clock::ms_at(expiry);
+        b.with(|cx| fly.physics(&NONE, cx));
+        assert!(fly.turbo.decaying && fly.turbo.boost_x == 275);
+        let mut boosts = Vec::new();
+        for _ in 0..10 {
+            b.with(|cx| fly.physics(&NONE, cx));
+            boosts.push(fly.turbo.boost_y);
+        }
+        // trunc(b − 27.5), the last one clamped from −4 to 0, which ends the turbo.
+        assert_eq!(boosts, [247, 219, 191, 163, 135, 107, 79, 51, 23, 0]);
+        assert!(!fly.turbo.active);
+    }
+
+    /// Acceptance W1 6.
+    #[test]
+    fn the_edge_scroll_sets_the_delta_for_that_tick_only() {
+        let mut b = Bench::new(1);
+        let mut fly = centred(&mut b);
+        assert_eq!(b.with(|cx| fly.physics(&NONE, cx)), 0.0);
+        assert_eq!(fly.scroll, 0);
+        // x + w = 690 ≥ 800 − 120: o = 10, delta = 550 × 10 × dt / 60, scroll = 5500 / 60.
+        fly.x = 570;
+        let delta = b.with(|cx| fly.physics(&NONE, cx));
+        assert_eq!(delta, 550.0 * 10.0 * crate::clock::DT / 60.0);
+        assert_eq!(fly.scroll, 91);
+        // Left edge: x = 100 ≤ w gives o = −20.
+        fly.x = 100;
+        fly.scroll = 0;
+        let delta = b.with(|cx| fly.physics(&NONE, cx));
+        assert_eq!(
+            (delta, fly.scroll),
+            (550.0 * -20.0 * crate::clock::DT / 60.0, -183)
+        );
+    }
+
+    fn update(b: &mut Bench, m: &mut MatchState, fly: &mut Fly, damage: i32) {
+        let hit = SwatHit {
+            damage,
+            dir_x: KickDir::Plus,
+            dir_y: KickDir::Minus,
+        };
+        b.with(|cx| fly.update(&NONE, hit, false, m, cx));
+    }
+
+    /// Acceptance W1 4.
+    #[test]
+    fn a_hit_stuns_kicks_and_ricochets_for_23_ticks() {
+        let mut b = Bench::new(1);
+        let (mut m, _) = world(&mut b);
+        // Fresh stream so the kick's draws are seed 1's 2nd and 3rd values.
+        b.rng = MsvcRand::new(1);
+        let mut fly = centred(&mut b);
+        let mut frames = Vec::new();
+        update(&mut b, &mut m, &mut fly, 40);
+        frames.push(fly.hit_frame);
+        assert!(fly.stunned && fly.hit_in_progress && fly.alive());
+        update(&mut b, &mut m, &mut fly, 40);
+        frames.push(fly.hit_frame);
+        update(&mut b, &mut m, &mut fly, 0);
+        frames.push(fly.hit_frame);
+        assert_eq!(
+            (fly.damage_total, fly.hits_this_life),
+            (40, 1),
+            "second hit ignored"
+        );
+        assert_eq!(fly.ricochet, 0);
+        update(&mut b, &mut m, &mut fly, 0);
+        frames.push(fly.hit_frame);
+        assert_eq!(frames, [1, 2, 3, 3]);
+        // v was 0: kick = trunc(U × 500). 18467 / 32767 × 500 = 281.8 → vx += 281;
+        // 6334 / 32767 × 500 = 96.7 → vy −= 96.
+        assert_eq!(
+            (fly.vx, fly.vy, fly.kick_x, fly.kick_y),
+            (281, -96, 281, 96)
+        );
+        assert_eq!((fly.ricochet, fly.phase), (1, 1));
+        assert_eq!(b.sounds(SoundSlot::FLY_RICOCHET).len(), 1);
+        assert_eq!((m.stats.hits, m.stats.damage), (1, 40));
+
+        for _ in 0..23 {
+            b.with(|cx| fly.physics(&NONE, cx));
+            fly.x = 340;
+        }
+        // 23 decelerations of 281 / 25 = 11 and 96 / 25 = 3.
+        assert_eq!((fly.vx, fly.vy, fly.ricochet), (281 - 253, -96 + 69, 24));
+        b.with(|cx| fly.physics(&NONE, cx));
+        assert_eq!((fly.vx, fly.ricochet), (28, 0));
+
+        // Phase 1: frames 3 → 2 → 1 → 0 → below 0 ends the stun.
+        for _ in 0..3 {
+            update(&mut b, &mut m, &mut fly, 0);
+            assert!(fly.stunned);
+        }
+        update(&mut b, &mut m, &mut fly, 0);
+        assert!(!fly.stunned && !fly.hit_in_progress && fly.post_stun);
+        assert_eq!((fly.phase, fly.hit_frame, fly.heading), (0, 0, Heading::E));
+    }
+
+    #[test]
+    fn superfly_cuts_the_damage_and_skips_the_kick() {
+        let mut b = Bench::new(1);
+        let (mut m, _) = world(&mut b);
+        let mut fly = centred(&mut b);
+        b.with(|cx| fly.start_superfly(cx));
+        let before = b.rng.state();
+        for _ in 0..4 {
+            update(&mut b, &mut m, &mut fly, 40);
+        }
+        assert_eq!(fly.damage_total, 16);
+        assert_eq!((fly.vx, fly.vy, fly.ricochet, fly.phase), (0, 0, 0, 1));
+        assert_eq!(b.rng.state(), before, "no kick draws");
+        assert!(b.sounds(SoundSlot::FLY_RICOCHET).is_empty());
+    }
+
+    /// Acceptance W1 5, up to the respawn timer (the kill itself is W3's).
+    #[test]
+    fn a_total_above_100_dies_then_arms_the_respawn_timer_after_the_crash() {
+        let mut b = Bench::new(1);
+        let (mut m, _) = world(&mut b);
+        let mut fly = centred(&mut b);
+        (fly.carrying, fly.aspirating) = (true, true);
+        update(&mut b, &mut m, &mut fly, 101);
+        assert!(fly.dying && !fly.stunned && !fly.carrying && !fly.aspirating);
+        assert_eq!(fly.life(), Life::DyingOrAppearing);
+        assert!(
+            b.events
+                .iter()
+                .any(|e| matches!(e, Event::Effect(Effect::Crash { .. })))
+        );
+        assert_eq!(
+            b.sounds(SoundSlot::FLY_CRASH),
+            [
+                SoundOp::SetVolume(5000),
+                SoundOp::Play(PlayParams::default())
+            ]
+        );
+        b.now = CRASH_MS - 1;
+        update(&mut b, &mut m, &mut fly, 0);
+        assert!(!fly.respawn_timer.is_armed());
+        b.now = CRASH_MS;
+        fly.vx = 100;
+        update(&mut b, &mut m, &mut fly, 0);
+        assert_eq!((fly.phase, fly.hit_frame, fly.vx), (1, 3, 0));
+        assert!(fly.respawn_timer.expired(CRASH_MS + RESPAWN_DELAY_MS));
+        assert!(!fly.respawn_timer.expired(CRASH_MS + RESPAWN_DELAY_MS - 1));
+    }
+
+    #[test]
+    #[ignore = "needs W3 (MatchState::record_kill, Stats::record_life)"]
+    fn the_respawn_timer_records_the_kill_and_requests_a_respawn() {
+        let mut b = Bench::new(1);
+        let (mut m, _) = world(&mut b);
+        let mut fly = centred(&mut b);
+        update(&mut b, &mut m, &mut fly, 120);
+        b.now = CRASH_MS;
+        update(&mut b, &mut m, &mut fly, 0);
+        b.now = CRASH_MS + RESPAWN_DELAY_MS;
+        update(&mut b, &mut m, &mut fly, 0);
+        assert_eq!((m.stats.kills, fly.hits_this_life), (1, 0));
+        assert!(fly.respawn_request && !fly.respawn_timer.is_armed());
+        assert_eq!(fly.y, (600 - 94) / 2 - 20);
+    }
+
+    #[test]
+    fn a_failed_grab_runs_5_51_and_the_turn_out_then_drops_aspirating() {
+        let mut b = Bench::new(1);
+        let (mut m, _) = world(&mut b);
+        let mut fly = centred(&mut b);
+        let press = |b: &mut Bench, m: &mut MatchState, fly: &mut Fly, action| {
+            b.with(|cx| fly.update(&NONE, SwatHit::default(), action, m, cx));
+        };
+        press(&mut b, &mut m, &mut fly, true);
+        assert!(fly.aspirating && fly.grab_lock);
+        assert_eq!(b.sounds(SoundSlot::ASPIRATE).len(), 1);
+        let mut ticks = 1;
+        while fly.grab_lock && ticks < 200 {
+            press(&mut b, &mut m, &mut fly, true);
+            ticks += 1;
+        }
+        // 5 turn-in ticks, 51 loop ticks, then frames back down past 0.
+        assert!((5 + 51..=5 + 51 + 10).contains(&ticks), "{ticks}");
+        assert!(!fly.aspirating && fly.heading == Heading::Face);
+        assert_eq!(b.sounds(SoundSlot::ASPIRATE).len(), 1, "held, not fresh");
     }
 }
