@@ -324,8 +324,10 @@ dependencies = [
 name = "thefly"
 version = "0.1.0"
 dependencies = [
+ "png",
  "thefly-assets",
  "thefly-platform",
+ "thefly-sim",
 ]
 
 [[package]]
