@@ -2,6 +2,7 @@
 //! and delivery (fly-and-world §4.4, §5). Ticks step 12, which also runs the lift (§5.5 step 9)
 //! and the period clock.
 
+use super::collision::Rect;
 use super::traps::Traps;
 use super::{OBJECT_PARALLAX, W, World};
 use crate::ctx::Ctx;
@@ -165,6 +166,23 @@ impl Objects {
             locked: None,
             lift_loaded: false,
             all_delivered: false,
+        }
+    }
+
+    /// `FUN_0042d459` (FW §4.5): a box test of `r` (screen) against each active object.
+    pub fn box_hit(&self, r: &Rect) -> bool {
+        self.list
+            .iter()
+            .filter(|o| o.active)
+            .any(|o| r.overlaps(&Rect::new(self.screen_left(o), o.y, o.w, o.h)))
+    }
+
+    /// The object's screen x, minus the wrap width when it straddles the ring's end (§4.4 step 6).
+    fn screen_left(&self, o: &Object) -> i32 {
+        if o.screen_x >= self.wrap_width - o.w {
+            o.screen_x - self.wrap_width
+        } else {
+            o.screen_x
         }
     }
 

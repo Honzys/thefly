@@ -69,7 +69,13 @@ pub struct Shape<'a> {
 pub fn outlines_overlap(a: &Shape<'_>, b: &Shape<'_>, wrap_width: i32) -> bool {
     let straddles = |s: &Shape<'_>| s.x + s.size.w > wrap_width;
     let shift = straddles(a) || straddles(b);
-    let ring_x = |x: i32| if shift && x < SCREEN_W { x + wrap_width } else { x };
+    let ring_x = |x: i32| {
+        if shift && x < SCREEN_W {
+            x + wrap_width
+        } else {
+            x
+        }
+    };
     let (ax, bx) = (ring_x(a.x), ring_x(b.x));
     let a_box = Rect::new(ax, a.y, a.size.w, a.size.h);
     if !a_box.overlaps(&Rect::new(bx, b.y, b.size.w, b.size.h)) {
@@ -78,8 +84,10 @@ pub fn outlines_overlap(a: &Shape<'_>, b: &Shape<'_>, wrap_width: i32) -> bool {
     let (top, bottom) = (a.y.max(b.y), (a.y + a.size.h).min(b.y + b.size.h));
     (top..bottom).any(|y| {
         let (ra, rb) = (row(a.outline, y - a.y), row(b.outline, y - b.y));
-        ra.iter()
-            .any(|&va| rb.iter().any(|&vb| i32::from(va) + ax / 2 == i32::from(vb) + bx / 2))
+        ra.iter().any(|&va| {
+            rb.iter()
+                .any(|&vb| i32::from(va) + ax / 2 == i32::from(vb) + bx / 2)
+        })
     })
 }
 
@@ -134,17 +142,37 @@ mod tests {
     fn outlines_hit_only_where_edge_points_coincide() {
         let o = fly_outline();
         // Same place: every edge point coincides.
-        assert!(outlines_overlap(&fly(100, 100, &o), &fly(100, 100, &o), 5000));
+        assert!(outlines_overlap(
+            &fly(100, 100, &o),
+            &fly(100, 100, &o),
+            5000
+        ));
         // Shifted 60 px right: the left edge (15 + 160/2 = 95) meets the right edge
         // (45 + 100/2 = 95) in the shared rows.
-        assert!(outlines_overlap(&fly(100, 100, &o), &fly(160, 100, &o), 5000));
+        assert!(outlines_overlap(
+            &fly(100, 100, &o),
+            &fly(160, 100, &o),
+            5000
+        ));
         // Shifted 2 px down and right: B's top edge (world row 131, x 66..=96) crosses A's
         // sides (65 and 95).
-        assert!(outlines_overlap(&fly(100, 100, &o), &fly(102, 102, &o), 5000));
+        assert!(outlines_overlap(
+            &fly(100, 100, &o),
+            &fly(102, 102, &o),
+            5000
+        ));
         // Boxes overlap, outlines are 70 px apart in x: no shared point.
-        assert!(!outlines_overlap(&fly(100, 100, &o), &fly(170, 100, &o), 5000));
+        assert!(!outlines_overlap(
+            &fly(100, 100, &o),
+            &fly(170, 100, &o),
+            5000
+        ));
         // No box overlap at all.
-        assert!(!outlines_overlap(&fly(100, 100, &o), &fly(100, 194, &o), 5000));
+        assert!(!outlines_overlap(
+            &fly(100, 100, &o),
+            &fly(100, 194, &o),
+            5000
+        ));
     }
 
     #[test]
@@ -165,8 +193,16 @@ mod tests {
     fn the_wrap_shift_joins_both_ends_of_the_ring() {
         let o = fly_outline();
         // A at 4950 covers 4950..5070; B at 10 is compared at 5010, 60 px right of A.
-        assert!(outlines_overlap(&fly(4950, 100, &o), &fly(10, 100, &o), 5000));
+        assert!(outlines_overlap(
+            &fly(4950, 100, &o),
+            &fly(10, 100, &o),
+            5000
+        ));
         // Neither straddles: B at 10 stays at 10, far from A at 4800.
-        assert!(!outlines_overlap(&fly(4800, 100, &o), &fly(10, 100, &o), 5000));
+        assert!(!outlines_overlap(
+            &fly(4800, 100, &o),
+            &fly(10, 100, &o),
+            5000
+        ));
     }
 }

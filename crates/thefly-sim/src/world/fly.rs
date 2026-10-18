@@ -2,10 +2,12 @@
 //! (fly-and-world §3). Ticks steps 1, 5, 8, 9, 11 and 18b.
 
 use super::collision::Rect;
+use super::goodies::Mystery;
 use super::{SCREEN_H, SCREEN_W, SwatHit, World};
-use crate::clock::Timer;
+use crate::clock::{FPS, Timer, first_tick_at};
 use crate::ctx::Ctx;
 use crate::data::Size;
+use crate::event::{Effect, Event, PlayParams, SoundOp, SoundSlot};
 use crate::input::FlyPad;
 use crate::match_state::MatchState;
 
@@ -26,6 +28,20 @@ pub const FRICTION: i32 = 9;
 /// The appear animation: scale tween 3.0 to 0.1 over 500 ms. The fly is alive when the scale
 /// tween ends, tick 33 at 65 Hz (gaps §2.3, §11.7 [I]); the alpha tween would end at tick 37.
 pub const APPEAR_MS: u64 = 500;
+/// [`APPEAR_MS`] in ticks: 33. The tween steps once per tick, so the port counts ticks.
+pub const APPEAR_TICKS: u32 = first_tick_at(APPEAR_MS) as u32;
+/// shortcut: open item O1 (FW §3.6 A, D), the crash animation's length toward (850, 850) is not
+/// decoded; 1000 ms is a placeholder, revisit when `FUN_0043a158` is read.
+pub const CRASH_MS: u64 = 1000;
+/// The splat's blood particles and body pieces (gaps §2.1).
+pub const SPLAT_BLOOD: usize = 60;
+pub const SPLAT_PIECES: usize = 11;
+/// A zapper death adds 40 fading blood particles to the 60 (gaps §2.1).
+pub const ZAPPER_EXTRA_BLOOD: usize = 40;
+/// Frames of the `blood` sheet, 3 × 2 (screens-and-rendering §4.6); the frame roll is R(n − 3).
+const BLOOD_FRAMES: i32 = 6;
+/// Fade length roll of each zapper blood particle: R(100) + 850 ms (gaps §2.2).
+const BLOOD_FADE_ROLL: i32 = 100;
 /// A zapper splat ends when its 100 blood particles have faded: 64 ticks (gaps §2.2). Boot and
 /// fan splats end when 11 body pieces are below [`SPLAT_FLOOR_Y`]; simulate the pieces.
 pub const ZAPPER_SPLAT_TICKS: u32 = 64;
@@ -153,11 +169,14 @@ pub struct Fly {
     pub respawn_timer: Timer,
     /// Port: the crash animation's end, which the original detected in render.
     pub crash_timer: Timer,
-    /// Port: the appear animation's end (render-driven in the original, §2).
-    pub appear_timer: Timer,
-    /// Port: the splat particles' end (render-driven). Not a constant: the splat ends when all 11
-    /// body pieces are below y 600, or after 64 ticks for a zapper (gaps §2.2).
-    pub splat_timer: Timer,
+    /// Port: ticks of the appear tween so far (render-driven in the original, §2).
+    pub appear_ticks: u32,
+    /// The splat's 11 body pieces; the splat ends when all are at y ≥ 600 (gaps §2.2).
+    pub pieces: [SplatPiece; SPLAT_PIECES],
+    pub splat_gravity: i32,
+    /// fly+0x2a8: a zapper death, which ends after [`ZAPPER_SPLAT_TICKS`] instead.
+    pub zapper_splat: bool,
+    pub splat_ticks: u32,
     /// Survival statistic: when this life started, ms.
     pub life_started_ms: Option<u64>,
 }
@@ -212,14 +231,23 @@ impl Fly {
             appearing: false,
             respawn_timer: Timer::UNARMED,
             crash_timer: Timer::UNARMED,
-            appear_timer: Timer::UNARMED,
-            splat_timer: Timer::UNARMED,
+            appear_ticks: 0,
+            pieces: [SplatPiece::default(); SPLAT_PIECES],
+            splat_gravity: 0,
+            zapper_splat: false,
+            splat_ticks: 0,
             life_started_ms: Some(cx.now),
         }
     }
 
     pub fn life(&self) -> Life {
-        todo!("W1 fly-and-world §3.7 FUN_0043885d")
+        if self.splatted {
+            Life::Splatted
+        } else if self.dying || self.appearing {
+            Life::DyingOrAppearing
+        } else {
+            Life::Alive
+        }
     }
 
     pub fn alive(&self) -> bool {
@@ -248,59 +276,326 @@ impl Fly {
 
     /// `FUN_00436fc1(ms)`; None is the goodie's −1 (1500 ms). Plays slot 35.
     pub fn start_turbo(&mut self, ms: Option<u64>, cx: &mut Ctx) {
-        let _ = (ms, cx);
-        todo!("W1 fly-and-world §3.8")
+        self.turbo.timer.arm(cx.now, ms.unwrap_or(TURBO_MS));
+        self.turbo.active = true;
+        self.turbo.decaying = false;
+        let boost = (f64::from(self.max_x) * 0.5) as i16;
+        self.turbo.boost_x = boost;
+        self.turbo.boost_y = boost;
+        let away = |v: i32, b: i16| {
+            if v >= 0 {
+                v + i32::from(b)
+            } else {
+                v - i32::from(b)
+            }
+        };
+        if self.vx.abs() < self.vy.abs() {
+            self.vy = away(self.vy, boost);
+        } else {
+            self.vx = away(self.vx, boost);
+        }
+        cx.emit(Event::play(SoundSlot::TURBO));
     }
 
     /// Turbo off at once (death, splat, mystery expiry with flag 2).
     pub fn end_turbo(&mut self) {
-        todo!("W1 fly-and-world §3.6 A4, §3.8")
+        self.turbo = Turbo::default();
     }
 
     /// `FUN_0043728f`: 8000 ms, looping slot 36.
     pub fn start_superfly(&mut self, cx: &mut Ctx) {
-        let _ = cx;
-        todo!("W1 fly-and-world §3.8")
+        self.superfly = true;
+        self.superfly_timer.arm(cx.now, SUPERFLY_MS);
+        cx.sound(SoundSlot::SUPERFLY, SoundOp::Loop(PlayParams::default()));
+    }
+
+    fn end_superfly(&mut self, cx: &mut Ctx) {
+        self.superfly = false;
+        self.superfly_timer.disarm();
+        cx.sound(SoundSlot::SUPERFLY, SoundOp::Stop);
     }
 
     /// `FUN_004397c0`, from the boot or a fan: instant death into particles. `dir` is the fan's
-    /// push direction (0 for the boot).
+    /// push direction: 0 for the boot, > 0 for a fan pushing right (fan+0x918 == 1, pieces fly
+    /// right), < 0 for a fan pushing left (gaps §2.1 burst table). Ignored when already splatted.
     pub fn splat(&mut self, dir: i32, cx: &mut Ctx) {
-        let _ = (dir, cx);
-        todo!("W1 fly-and-world §3.6 Splat")
+        let burst = match dir {
+            0 => BOOT_BURST,
+            d if d > 0 => FAN_RIGHT_BURST,
+            _ => FAN_LEFT_BURST,
+        };
+        if self.die_into_pieces(&burst, cx) {
+            cx.emit(Event::play(SoundSlot::SPLASH));
+            cx.emit(Event::Effect(Effect::Splat {
+                x: self.x,
+                y: self.y,
+                dir,
+            }));
+        }
     }
 
     /// `FUN_00439f29`, the zapper's grill: the splat path with kind 13 (gaps §2.1), sound 43.
+    ///
+    /// shortcut: gaps §2.1 gives the 40 extra particles but not their rand draws; each is launched
+    /// like a blood particle, then all 100 draw their R(100) fade in order. Revisit when
+    /// `FUN_00439f29` is read past the launch.
     pub fn grill(&mut self, cx: &mut Ctx) {
-        let _ = cx;
-        todo!("W1 fly-and-world §7.4 Zapper, gaps §2.1 zapper death")
+        if !self.die_into_pieces(&ZAPPER_BURST, cx) {
+            return;
+        }
+        self.zapper_splat = true;
+        for _ in 0..ZAPPER_EXTRA_BLOOD {
+            self.throw(&ZAPPER_BURST, Throw::Blood, cx);
+        }
+        for _ in 0..SPLAT_BLOOD + ZAPPER_EXTRA_BLOOD {
+            cx.rng.r(BLOOD_FADE_ROLL);
+        }
+        cx.emit(Event::play(SoundSlot::ZAPPER_GRILL));
+        cx.emit(Event::Effect(Effect::Splat {
+            x: self.x,
+            y: self.y,
+            dir: 0,
+        }));
+    }
+
+    /// The common splat (FW §3.6 Splat, gaps §2.1): state, then 60 blood particles and 11 body
+    /// pieces in rand order. False when the fly was already splatted.
+    fn die_into_pieces(&mut self, burst: &Burst, cx: &mut Ctx) -> bool {
+        if self.splatted {
+            return false;
+        }
+        self.splatted = true;
+        self.hits_this_life += 1;
+        (self.vx, self.vy) = (0, 0);
+        self.clear_grab();
+        self.end_turbo();
+        if self.superfly {
+            self.end_superfly(cx);
+        }
+        for _ in 0..SPLAT_BLOOD {
+            self.throw(burst, Throw::Blood, cx);
+        }
+        self.pieces = std::array::from_fn(|_| self.throw(burst, Throw::Piece, cx));
+        self.splat_gravity = burst.g;
+        self.zapper_splat = false;
+        self.splat_ticks = 0;
+        true
+    }
+
+    /// One particle launch (gaps §2.1): x, y, the blood frame roll, then a sign roll and a speed
+    /// per axis. A negative range relies on C's `rand % n` with n < 0 being `rand % |n|`.
+    fn throw(&self, b: &Burst, kind: Throw, cx: &mut Ctx) -> SplatPiece {
+        let x = self.x + cx.rng.r(self.size.w - 20);
+        let y = self.y + cx.rng.r(self.size.h - 20);
+        let neg_x_below = match kind {
+            Throw::Blood => {
+                cx.rng.r(BLOOD_FRAMES - 3);
+                6
+            }
+            Throw::Piece => 4,
+        };
+        let sx = if cx.rng.r(10) < neg_x_below && b.sign_x {
+            -1
+        } else {
+            1
+        };
+        let vx = (cx.rng.r(b.range_x + 1) + b.min_x) * sx;
+        let sy = if cx.rng.r(10) < 4 && b.sign_y { -1 } else { 1 };
+        let vy = (cx.rng.r(b.range_y + 1) + b.min_y) * sy;
+        SplatPiece { x, y, vx, vy }
+    }
+
+    fn clear_grab(&mut self) {
+        self.aspirating = false;
+        self.carrying = false;
+        self.grab_lock = false;
+        self.grab_counter = 0;
+        self.grab_frame = 0;
+        self.grab_turn = Turn::In;
+    }
+
+    /// One tick of the body pieces (gaps §2.1): v += g, y += sign(v) × floor(|v| / fps).
+    /// True once the splat has ended (gaps §2.2).
+    fn advance_splat(&mut self) -> bool {
+        self.splat_ticks += 1;
+        for p in &mut self.pieces {
+            p.vy += self.splat_gravity;
+            p.y += p.vy.signum() * (p.vy.abs() / FPS);
+        }
+        if self.zapper_splat {
+            return self.splat_ticks >= ZAPPER_SPLAT_TICKS;
+        }
+        self.pieces.iter().all(|p| p.y >= SPLAT_FLOOR_Y)
     }
 
     /// Damage added straight to the total, bypassing the stun (fan §7.4, zapper arc 1/tick).
     /// At or below 100 sets the post-stun flag; above it, a fan splats (`dir`) and an arc kills.
+    /// The caller has already applied the SuperFly reduction (the fan's R(10) + 20). Ignored
+    /// while splatted.
+    ///
+    /// shortcut: FW §7.4 says an arc over 100 "splats the fly" without the burst; it uses the
+    /// zapper grill here. Revisit when `FUN_00428b47` is read.
     pub fn add_raw_damage(&mut self, damage: i32, source: RawDamage, cx: &mut Ctx) {
-        let _ = (damage, source, cx);
-        todo!("W1 fly-and-world §7.4, game-spec §4.6")
+        if self.splatted {
+            return;
+        }
+        self.damage_total += damage;
+        if self.damage_total <= DEATH_TOTAL {
+            self.post_stun = true;
+            return;
+        }
+        match source {
+            RawDamage::Fan { dir } => self.splat(dir, cx),
+            RawDamage::ZapperArc => self.grill(cx),
+        }
     }
 
     /// `FUN_0043734c` mode 2: place the fly against the boot on `side1`, cap y at 600 − h, and
     /// splat it when pushed down below y 249 (§7.3).
     pub fn push_by_boot(&mut self, side1: u8, boot: Rect, cx: &mut Ctx) {
-        let _ = (side1, boot, cx);
-        todo!("W1 fly-and-world §7.3")
+        let (w, h) = (self.size.w, self.size.h);
+        match side1 {
+            0 => self.y = boot.y - (h - 20),
+            1 => self.x = boot.x - (w - 25),
+            2 => self.y = boot.y + boot.h - 20,
+            _ => self.x = boot.x + boot.w - 25,
+        }
+        self.y = self.y.min(SCREEN_H - h);
+        if self.y > BOOT_SPLAT_Y && side1 == 2 {
+            self.splat(0, cx);
+        }
     }
 
     /// `FUN_004385c6`: respawn request with a fresh x and the fixed y (§3.7.1).
     pub fn request_respawn(&mut self, cx: &mut Ctx) {
-        let _ = cx;
-        todo!("W1 fly-and-world §3.7")
+        self.respawn_request = true;
+        (self.vx, self.vy) = (0, 0);
+        self.reroll_position(cx);
+    }
+
+    /// The position part of `FUN_004385c6`, for the placement re-rolls of step 9.
+    fn reroll_position(&mut self, cx: &mut Ctx) {
+        self.x = cx.rng.r(SCREEN_W - self.size.w);
+        self.y = (f64::from(SCREEN_H - self.size.h) / 2.0 - 20.0) as i32;
     }
 
     /// `FUN_00438643(appear)`: clear hit, stun, damage, splat, grab, carrying, Turbo, SuperFly.
+    ///
+    /// shortcut: §3.7.3 says argument 0 is "alive immediately" without saying whether
+    /// `FUN_004387d5` runs; it clears the dying and appearing state silently. Revisit if a caller
+    /// with 0 turns up that needs sound 38 or the survival timer.
     pub fn reset(&mut self, appear: bool, cx: &mut Ctx) {
-        let _ = (appear, cx);
-        todo!("W1 fly-and-world §3.7.3")
+        self.hit_in_progress = false;
+        self.hit_frame = 0;
+        self.stunned = false;
+        self.ricochet = 0;
+        self.damage_total = 0;
+        self.splatted = false;
+        self.zapper_splat = false;
+        self.clear_grab();
+        self.end_turbo();
+        if self.superfly {
+            self.end_superfly(cx);
+        }
+        if !appear {
+            (self.dying, self.appearing, self.phase) = (false, false, 0);
+            return;
+        }
+        self.appearing = true;
+        self.appear_ticks = 0;
+        let (x, y) = self.centre();
+        cx.emit(Event::Effect(Effect::Stardust { x, y }));
     }
+
+    /// `FUN_0040bc5e` with this life's hits, and the survival statistic (AR §8.7).
+    ///
+    /// shortcut: AR §8.7 says survival "stops at death"; the port stops it when the kill is
+    /// recorded (dying: after the respawn delay; splat: when the pieces land). Revisit if the
+    /// stats screen's survival figures disagree with the original.
+    fn record_death(&mut self, m: &mut MatchState, cx: &Ctx) {
+        m.record_kill(self.hits_this_life);
+        self.hits_this_life = 0;
+        if let Some(start) = self.life_started_ms.take() {
+            m.stats.record_life(cx.now.saturating_sub(start));
+        }
+    }
+
+    /// `FUN_004387d5`: alive, sound 38, survival timer started (§3.7.4).
+    fn become_alive(&mut self, cx: &mut Ctx) {
+        self.phase = 0;
+        self.dying = false;
+        self.splatted = false;
+        self.appearing = false;
+        cx.emit(Event::play(SoundSlot::GOODIE_FLY));
+        self.life_started_ms = Some(cx.now);
+    }
+}
+
+/// Splat bursts (gaps §2.1): `FUN_004397c0(minX, minY, rangeX, rangeY, signX, signY, –, g)`.
+#[derive(Debug, Clone, Copy)]
+struct Burst {
+    min_x: i32,
+    min_y: i32,
+    range_x: i32,
+    range_y: i32,
+    sign_x: bool,
+    sign_y: bool,
+    g: i32,
+}
+
+const BOOT_BURST: Burst = Burst {
+    min_x: 0,
+    min_y: 0,
+    range_x: 280,
+    range_y: 200,
+    sign_x: true,
+    sign_y: false,
+    g: 12,
+};
+const FAN_RIGHT_BURST: Burst = Burst {
+    min_x: 550,
+    min_y: -550,
+    range_x: 400,
+    range_y: -400,
+    sign_x: false,
+    sign_y: false,
+    g: 20,
+};
+const FAN_LEFT_BURST: Burst = Burst {
+    min_x: -850,
+    min_y: -550,
+    range_x: -700,
+    range_y: -400,
+    sign_x: false,
+    sign_y: false,
+    g: 20,
+};
+const ZAPPER_BURST: Burst = Burst {
+    min_x: 50,
+    min_y: 80,
+    range_x: 50,
+    range_y: 100,
+    sign_x: true,
+    sign_y: true,
+    g: 13,
+};
+
+/// The boot splats a fly pushed down below this y (FW §7.3).
+const BOOT_SPLAT_Y: i32 = 249;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Throw {
+    Blood,
+    Piece,
+}
+
+/// A splat body piece (gaps §2.1), screen pixels and px/s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SplatPiece {
+    pub x: i32,
+    pub y: i32,
+    pub vx: i32,
+    pub vy: i32,
 }
 
 /// Who adds raw damage to the fly.
@@ -316,8 +611,10 @@ pub enum RawDamage {
 impl World {
     /// Step 1. Returns the action flag; updates [`World::fly_action_memory`].
     pub fn fly_action_edge(&mut self, pad: &FlyPad) -> bool {
-        let _ = pad;
-        todo!("W1 fly-and-world §2 step 1")
+        if !pad.action {
+            self.fly_action_memory = -1;
+        }
+        pad.action && self.fly_action_memory < 0
     }
 
     /// Step 5 (`FUN_00437547`), skipped while appearing. Writes the camera delta.
@@ -341,20 +638,52 @@ impl World {
 
     /// Step 9: re-roll while overlapping an object (≤ [`RESPAWN_TRIES`]), then appear.
     pub fn respawn_placement(&mut self, cx: &mut Ctx) {
-        let _ = cx;
-        todo!("W1 fly-and-world §2 step 9, §4.5")
+        self.place_fly(RESPAWN_TRIES, cx);
+    }
+
+    /// Step 9 with a try cap: [`RESPAWN_TRIES`], or [`RESPAWN_TRIES_PERIOD_START`] from
+    /// [`World::new`]. Reads and clears the request, re-rolls while the inner box (§4.5) touches
+    /// an object, then starts the appear.
+    pub(super) fn place_fly(&mut self, tries: u32, cx: &mut Ctx) {
+        if !std::mem::take(&mut self.fly.respawn_request) {
+            return;
+        }
+        for _ in 0..tries {
+            if !self.objects.box_hit(&self.fly.inner_box()) {
+                break;
+            }
+            self.fly.reroll_position(cx);
+        }
+        self.fly.reset(true, cx);
     }
 
     /// Step 11: fly not alive → both goodie selectors 0, inverted controls off.
     pub fn fly_not_alive_resets(&mut self) {
-        todo!("W1 fly-and-world §2 step 11")
+        if self.fly.alive() {
+            return;
+        }
+        self.goodies.fly_selector = 0;
+        self.goodies.farmer_selector = 0;
+        self.goodies.fly_mystery = Mystery::None;
     }
 
     /// Step 18b: appear done → alive (`FUN_004387d5`, slot 38, survival timer); splat done →
     /// kill recorded and respawn requested.
     pub fn fly_render_driven(&mut self, m: &mut MatchState, cx: &mut Ctx) {
-        let _ = (m, cx);
-        todo!("W1 fly-and-world §2 render-driven state, §3.6 Splat, §3.7.4")
+        let fly = &mut self.fly;
+        if fly.appearing {
+            if fly.appear_ticks >= APPEAR_TICKS {
+                fly.become_alive(cx);
+            } else {
+                fly.appear_ticks += 1;
+            }
+            return;
+        }
+        if !fly.splatted || fly.respawn_request || !fly.advance_splat() {
+            return;
+        }
+        fly.record_death(m, cx);
+        fly.request_respawn(cx);
     }
 }
 
@@ -376,5 +705,334 @@ mod tests {
         let fast = Fly::new(3, 5, data.size("Face"), &mut cx);
         assert_eq!((fast.max_x, fast.max_y), (850, 850));
         assert_eq!(fast.strength_f, 0.6);
+    }
+
+    /// A fresh fly from seed 1 plus a helper to run one call with a context.
+    struct Bench {
+        rng: MsvcRand,
+        data: GameData,
+        events: Vec<Event>,
+        now: u64,
+    }
+
+    impl Bench {
+        fn new(seed: u32) -> Self {
+            Self {
+                rng: MsvcRand::new(seed),
+                data: GameData::synthetic(),
+                events: Vec::new(),
+                now: 0,
+            }
+        }
+
+        fn with<T>(&mut self, f: impl FnOnce(&mut Ctx) -> T) -> T {
+            let mut cx = Ctx::new(self.now, &mut self.rng, &self.data, &mut self.events);
+            f(&mut cx)
+        }
+
+        fn fly(&mut self) -> Fly {
+            self.with(|cx| Fly::new(0, 0, cx.data.size("Face"), cx))
+        }
+
+        fn sounds(&self, slot: SoundSlot) -> Vec<SoundOp> {
+            self.events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Sound { slot: s, op } if *s == slot => Some(*op),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// How many rand() calls the stream is past a fresh stream of the same seed.
+        fn draws_since(&self, seed: u32, from: u32) -> u32 {
+            let mut r = MsvcRand::new(seed);
+            for n in 0..10_000 {
+                if r.state() == self.rng.state() && n >= from {
+                    return n - from;
+                }
+                r.rand();
+            }
+            panic!("rng not reached within 10000 draws");
+        }
+    }
+
+    #[test]
+    fn turbo_boosts_by_half_max_x_and_kicks_the_dominant_axis() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        (fly.vx, fly.vy) = (100, -300);
+        b.with(|cx| fly.start_turbo(None, cx));
+        // FW §3.8: 550 × 0.5 = 275 on both; |vx| < |vy| so vy, which is negative, gets −275.
+        assert_eq!((fly.turbo.boost_x, fly.turbo.boost_y), (275, 275));
+        assert_eq!((fly.vx, fly.vy), (100, -575));
+        assert!(fly.turbo.active && !fly.turbo.decaying);
+        assert!(!fly.turbo.timer.expired(TURBO_MS - 1) && fly.turbo.timer.expired(TURBO_MS));
+        assert_eq!(b.sounds(SoundSlot::TURBO).len(), 1);
+
+        (fly.vx, fly.vy) = (-200, 200);
+        b.with(|cx| fly.start_turbo(Some(MYSTERY_TURBO_MS), cx));
+        assert_eq!((fly.vx, fly.vy), (-475, 200));
+        assert!(fly.turbo.timer.expired(MYSTERY_TURBO_MS) && !fly.turbo.timer.expired(24_999));
+        fly.end_turbo();
+        assert_eq!(fly.turbo, Turbo::default());
+    }
+
+    #[test]
+    fn superfly_loops_slot_36_for_8000_ms() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        b.with(|cx| fly.start_superfly(cx));
+        assert!(fly.superfly && fly.superfly_timer.expired(8000));
+        assert!(!fly.superfly_timer.expired(7999));
+        assert!(matches!(
+            b.sounds(SoundSlot::SUPERFLY)[..],
+            [SoundOp::Loop(_)]
+        ));
+    }
+
+    #[test]
+    fn a_boot_splat_draws_60_blood_and_11_pieces_once() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        (fly.x, fly.y, fly.vx, fly.vy) = (300, 400, 120, -80);
+        (fly.aspirating, fly.carrying) = (true, true);
+        b.with(|cx| fly.start_superfly(cx));
+        b.with(|cx| fly.splat(0, cx));
+        // gaps §2.1: 7 draws per blood particle, 6 per body piece, after Fly::new's one draw.
+        assert_eq!(b.draws_since(1, 1), 60 * 7 + 11 * 6);
+        assert_eq!(fly.life(), Life::Splatted);
+        assert_eq!((fly.vx, fly.vy, fly.hits_this_life), (0, 0, 1));
+        assert!(!fly.carrying && !fly.aspirating && !fly.superfly && !fly.turbo.active);
+        assert_eq!(b.sounds(SoundSlot::SPLASH).len(), 1);
+        assert_eq!(b.sounds(SoundSlot::SUPERFLY).last(), Some(&SoundOp::Stop));
+        for p in fly.pieces {
+            assert!((300..300 + 100).contains(&p.x) && (400..400 + 74).contains(&p.y));
+            assert!((-280..=280).contains(&p.vx) && (0..=200).contains(&p.vy));
+        }
+        assert_eq!(fly.splat_gravity, 12);
+        // Already splatted: nothing more happens.
+        b.with(|cx| fly.splat(0, cx));
+        assert_eq!(b.draws_since(1, 1), 60 * 7 + 11 * 6);
+        assert_eq!(fly.hits_this_life, 1);
+    }
+
+    #[test]
+    fn fan_splats_throw_the_pieces_with_the_push() {
+        for (dir, vx) in [(1, 550..=950), (-1, -850..=-152)] {
+            let mut b = Bench::new(7);
+            let mut fly = b.fly();
+            b.with(|cx| fly.splat(dir, cx));
+            assert!(fly.pieces.iter().all(|p| vx.contains(&p.vx)), "dir {dir}");
+            assert!(fly.pieces.iter().all(|p| (-550..=-152).contains(&p.vy)));
+            assert_eq!(fly.splat_gravity, 20);
+        }
+    }
+
+    #[test]
+    fn the_grill_adds_40_fading_particles_and_sound_43() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        b.with(|cx| fly.grill(cx));
+        assert!(fly.zapper_splat && fly.splatted);
+        assert_eq!(b.draws_since(1, 1), 60 * 7 + 11 * 6 + 40 * 7 + 100);
+        assert_eq!(b.sounds(SoundSlot::ZAPPER_GRILL).len(), 1);
+        assert!(b.sounds(SoundSlot::SPLASH).is_empty());
+    }
+
+    #[test]
+    fn raw_damage_sets_post_stun_until_the_total_passes_100() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        b.with(|cx| fly.add_raw_damage(60, RawDamage::Fan { dir: 1 }, cx));
+        assert_eq!(
+            (fly.damage_total, fly.post_stun, fly.splatted),
+            (60, true, false)
+        );
+        b.with(|cx| fly.add_raw_damage(40, RawDamage::ZapperArc, cx));
+        assert!(!fly.splatted, "100 is still at or below the death total");
+        b.with(|cx| fly.add_raw_damage(1, RawDamage::Fan { dir: -1 }, cx));
+        assert!(fly.splatted && !fly.zapper_splat);
+        assert!(fly.pieces.iter().all(|p| p.vx < 0));
+        b.with(|cx| fly.add_raw_damage(50, RawDamage::Fan { dir: -1 }, cx));
+        assert_eq!(fly.damage_total, 101, "ignored while splatted");
+
+        let mut arc = b.fly();
+        arc.damage_total = 100;
+        b.with(|cx| arc.add_raw_damage(1, RawDamage::ZapperArc, cx));
+        assert!(arc.splatted && arc.zapper_splat);
+    }
+
+    #[test]
+    fn the_boot_places_the_fly_by_side_and_splats_it_low() {
+        let mut b = Bench::new(1);
+        let boot = Rect::new(300, 200, 270, 575);
+        // (side, x, y) with the fly starting at (161, 253).
+        let cases = [
+            (0, 161, 200 - 74),
+            (1, 300 - 95, 253),
+            (3, 300 + 270 - 25, 253),
+        ];
+        for (side, x, y) in cases {
+            let mut fly = b.fly();
+            (fly.x, fly.y) = (161, 253);
+            b.with(|cx| fly.push_by_boot(side, boot, cx));
+            assert_eq!((fly.x, fly.y), (x, y), "side {side}");
+            assert!(!fly.splatted);
+        }
+        // Side 2: y = 200 + 575 − 20, capped at 600 − 94 = 506 > 249, so splat.
+        let mut fly = b.fly();
+        b.with(|cx| fly.push_by_boot(2, boot, cx));
+        assert_eq!(fly.y, 506);
+        assert!(fly.splatted);
+        // Side 2 but high: y = 0 + 150 − 20 = 130, no splat.
+        let mut high = b.fly();
+        b.with(|cx| high.push_by_boot(2, Rect::new(300, 0, 270, 150), cx));
+        assert_eq!(high.y, 130);
+        assert!(!high.splatted);
+    }
+
+    #[test]
+    fn a_respawn_request_draws_x_and_sets_the_fixed_y() {
+        let mut b = Bench::new(1);
+        let mut fly = b.with(|cx| Fly::new(0, 0, cx.data.size("Face"), cx));
+        (fly.vx, fly.vy) = (300, 300);
+        b.with(|cx| fly.request_respawn(cx));
+        // Seed 1's second draw is 18467; 18467 % (800 − 120) = 107.
+        assert_eq!((fly.x, fly.y), (107, (600 - 94) / 2 - 20));
+        assert_eq!((fly.vx, fly.vy), (0, 0));
+        assert!(fly.respawn_request);
+    }
+
+    #[test]
+    fn reset_with_appear_starts_the_appear_and_without_it_is_alive() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        b.with(|cx| fly.splat(0, cx));
+        fly.damage_total = 70;
+        b.with(|cx| fly.reset(true, cx));
+        assert_eq!(fly.life(), Life::DyingOrAppearing);
+        assert_eq!((fly.damage_total, fly.appear_ticks), (0, 0));
+        assert!(
+            b.events
+                .iter()
+                .any(|e| matches!(e, Event::Effect(Effect::Stardust { .. })))
+        );
+        b.with(|cx| fly.reset(false, cx));
+        assert!(fly.alive());
+    }
+
+    fn fall_ticks(fly: &mut Fly, y: i32, vy: i32, g: i32) -> u32 {
+        fly.pieces = [SplatPiece { x: 0, y, vx: 0, vy }; SPLAT_PIECES];
+        fly.splat_gravity = g;
+        fly.splat_ticks = 0;
+        (1..=200).find(|_| fly.advance_splat()).unwrap_or(0)
+    }
+
+    /// gaps §2.2 fall-time table at fps 65.
+    #[test]
+    fn splat_end_follows_the_slowest_piece() {
+        let mut b = Bench::new(1);
+        let mut fly = b.fly();
+        assert_eq!(fall_ticks(&mut fly, 250, 0, 12), 64);
+        assert_eq!(fall_ticks(&mut fly, 323, 200, 12), 43);
+        assert_eq!(fall_ticks(&mut fly, 506, 0, 12), 35);
+        assert_eq!(fall_ticks(&mut fly, 0, -550, 20), 96);
+        assert_eq!(fall_ticks(&mut fly, 250, -550, 20), 83);
+        assert_eq!(fall_ticks(&mut fly, 506, -550, 20), 64);
+        fly.pieces[3].y = 0;
+        fly.pieces[3].vy = -550;
+        fly.splat_ticks = 0;
+        assert!(!fly.advance_splat(), "one slow piece holds the splat");
+        fly.zapper_splat = true;
+        assert_eq!(fall_ticks(&mut fly, 0, -550, 20), ZAPPER_SPLAT_TICKS);
+    }
+
+    fn world(b: &mut Bench) -> (MatchState, World) {
+        use crate::match_state::{MatchConfig, Players};
+        b.with(|cx| {
+            let config = MatchConfig {
+                players: Players::Two,
+                ..MatchConfig::default()
+            };
+            let m = MatchState::new(config, false, cx);
+            let w = World::bare(&m, cx);
+            (m, w)
+        })
+    }
+
+    #[test]
+    fn the_action_is_enter_held_unless_blocked_since_a_goodie_use() {
+        let mut b = Bench::new(1);
+        let (_, mut w) = world(&mut b);
+        let enter = FlyPad {
+            action: true,
+            ..FlyPad::default()
+        };
+        assert!(w.fly_action_edge(&enter) && w.fly_action_edge(&enter));
+        w.fly_action_memory = 10;
+        assert!(!w.fly_action_edge(&enter));
+        assert!(!w.fly_action_edge(&FlyPad::default()));
+        assert_eq!(w.fly_action_memory, -1);
+        assert!(w.fly_action_edge(&enter));
+    }
+
+    /// Acceptance W1 10, the W1 half: a splat in step 10 makes step 11 clear both selectors and
+    /// the inverted controls on the same tick. The boot's own contact test is W2's.
+    #[test]
+    fn a_splat_resets_both_goodie_selectors_in_step_11() {
+        let mut b = Bench::new(1);
+        let (_, mut w) = world(&mut b);
+        (w.goodies.fly_selector, w.goodies.farmer_selector) = (2, 3);
+        w.goodies.fly_mystery = Mystery::First;
+        w.fly_not_alive_resets();
+        assert_eq!((w.goodies.fly_selector, w.goodies.farmer_selector), (2, 3));
+        b.with(|cx| w.fly.splat(0, cx));
+        w.fly_not_alive_resets();
+        assert_eq!((w.goodies.fly_selector, w.goodies.farmer_selector), (0, 0));
+        assert_eq!(w.goodies.fly_mystery, Mystery::None);
+    }
+
+    /// Acceptance W1 14: step 9 starts the appear on tick 0; 18b makes the fly alive on tick 33.
+    #[test]
+    fn the_fly_is_alive_33_ticks_after_the_appear_starts() {
+        let mut b = Bench::new(1);
+        let (mut m, mut w) = world(&mut b);
+        b.with(|cx| w.fly.request_respawn(cx));
+        b.with(|cx| w.respawn_placement(cx));
+        assert!(w.fly.appearing && !w.fly.respawn_request);
+        for tick in 0..=33 {
+            b.now = crate::clock::ms_at(tick);
+            assert!(!w.fly.alive(), "alive too early, tick {tick}");
+            b.with(|cx| w.fly_render_driven(&mut m, cx));
+        }
+        assert!(w.fly.alive());
+        assert_eq!(w.fly.life_started_ms, Some(crate::clock::ms_at(33)));
+        assert_eq!(b.sounds(SoundSlot::GOODIE_FLY).len(), 1);
+    }
+
+    /// Acceptance W1 13: the kill is recorded on the tick the last piece lands, the respawn
+    /// placement runs on the next.
+    #[test]
+    #[ignore = "needs W3 (MatchState::record_kill, Stats::record_life)"]
+    fn a_splat_records_the_kill_when_it_ends_and_respawns_next_tick() {
+        let mut b = Bench::new(1);
+        let (mut m, mut w) = world(&mut b);
+        b.with(|cx| w.fly.splat(0, cx));
+        w.fly.pieces = [SplatPiece {
+            x: 0,
+            y: 506,
+            vx: 0,
+            vy: 0,
+        }; SPLAT_PIECES];
+        for _ in 0..34 {
+            b.with(|cx| w.fly_render_driven(&mut m, cx));
+        }
+        assert_eq!(m.stats.kills, 0);
+        b.with(|cx| w.fly_render_driven(&mut m, cx));
+        assert_eq!(m.stats.kills, 1);
+        assert!(w.fly.respawn_request && w.fly.splatted);
+        b.with(|cx| w.respawn_placement(cx));
+        assert!(w.fly.appearing && !w.fly.splatted);
     }
 }
