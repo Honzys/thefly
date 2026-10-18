@@ -523,6 +523,10 @@ impl World {
         }
         t.update_loops(cx);
         self.single_trap_pan(delta, cx);
+        // answers.md "Banner: the whole world update runs, paused": active = 0 skips the rest.
+        if self.paused {
+            return;
+        }
         if self.fly.alive() {
             self.flypaper_drag(cx);
         }
@@ -1045,6 +1049,23 @@ mod layout_tests {
         assert!(w.fly.zapper_splat && w.fly.splatted);
         assert_eq!(w.fly.damage_total, 101);
         assert!(!rig.events.contains(&Event::play(SoundSlot::ZAPPER_GRILL)));
+    }
+
+    /// answers.md "Banner: the whole world update runs, paused": traps still move with the
+    /// camera, but the flypaper, the fans and the zappers leave the fly alone and draw nothing.
+    #[test]
+    fn paused_traps_move_but_leave_the_fly_alone() {
+        let mut rig = Rig::new(7);
+        let slots = vec![slot(TrapKind::Flypaper, 1000), slot(TrapKind::Zapper, 1000)];
+        let mut w = world_with(slots, &mut rig);
+        let mut rig = Rig::new(1);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (1000, 86, 300, -140);
+        (w.paused, w.camera.delta) = (true, 10.0);
+        let x = w.traps.zappers[0].x;
+        w.traps_step(&mut rig.at(1));
+        assert_eq!((w.fly.vx, w.fly.vy, w.fly.damage_total), (300, -140, 0));
+        assert_eq!(w.traps.zappers[0].x, x - 10);
+        assert_eq!(rig.rng.rand(), 41);
     }
 
     /// answers.md "Trap loop volumes": two fans, one on screen, start at −100; both off screen
