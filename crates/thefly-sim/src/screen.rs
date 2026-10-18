@@ -924,8 +924,14 @@ mod tests {
         let Screen::Menu(m) = &s.screen else {
             panic!("left the menu");
         };
-        assert_eq!(m.credits.pair, 1);
+        assert_eq!(m.credits.pair, 0);
         tap(&mut rig, &mut s, Scancode::ESCAPE);
+        assert_eq!(menu_page(&s), Some(crate::menu::Page::Credits(8)));
+        for _ in 0..116 {
+            rig.step(&[], |k, cx| s.tick(k, cx));
+        }
+        assert_eq!(menu_page(&s), Some(crate::menu::Page::Credits(8)));
+        rig.step(&[], |k, cx| s.tick(k, cx));
         assert_eq!(menu_page(&s), Some(crate::menu::Page::Top));
     }
 
