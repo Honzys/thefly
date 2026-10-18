@@ -1823,7 +1823,8 @@ Verdict: guess wrong on three counts:
 - The port's field frame is consistent for the fly box, the coins and the target spawn and bounds.
   But `swat()` (bonus.rs:795) compares a screen-frame reach with field-frame target y, so its hit
   zone is 80 px too low. Use reach − 80 in the field frame. The same applies to the AI's swatter
-  alignment (bonus.rs:386) and to the swatter-on-fly test once it lands.
+  alignment (bonus.rs:386; amended in round 6: the AI aligns trunc(reach + 77) − 80 and the
+  centre x) and to the swatter-on-fly test once it lands.
 - `FLY_START_Y` = 150 is a screen y. In the port's field frame it is 70; the port draws the fly
   at 230.
 - `SWATTER_START_X` = 400 should be 0, matching the captures [I].
@@ -2092,8 +2093,9 @@ Original (`FUN_0041d3cc`, intro fly DAT_0046c7a8) [C unless marked]:
   off = |x| for x < 0, x − 800 for x > 800, else 0; starts the loop when slot 7 is not playing.
   It also runs on the transition tick.
 - If screen x > 2500: vx = 0 and slot 7 stops. That cannot happen before the 3 s timer (x ≈
-  2001), so slot 7 keeps looping at its last settings into step 3 [I]. The only other stop is the
-  skip handler `FUN_0041e1be` (slots 0, 1, 4 and 7).
+  2001), so slot 7 keeps looping at its last settings into step 3 and the menu (round 6: [C]). The
+  only other intro stop is the skip handler `FUN_0041e1be` (slots 0, 1, 4 and 7), which is gated
+  (round 6).
 
 Verdict: guess wrong.
 - Routine: it is `FUN_0040d005`, not `FUN_0040d1b2`: a 400-centred pan with no wrap, and one
@@ -2165,7 +2167,202 @@ Verdict:
 - `:700`: wrong. 810 is the screen x; layer x = 648.
 - `:246`: wrong. `hitting` should be `frame > 2` with no retract test.
 - `:5`: the knock is one sound, play slot 28, on each tick the box test passes; it is cheap to
-  model. Whether a playing slot 28 restarts each tick depends on the sound manager's play rule.
+  model. Whether a playing slot 28 restarts each tick depends on the sound manager's play rule
+  (answered in round 6: it does not restart; see "Sound play on a playing slot").
+
+### Menu intro buzz: never stopped on the way to the menu; the skip is gated (round 6)
+`crates/thefly-sim/src/menu.rs:296`, `:390`, test `:1002`
+
+Guess: the round-5 answer leaves slot 7 looping after an unskipped intro. The port does the same,
+which gives a drone in the menu. Is there a stop at intro → menu, at menu entry or at music start?
+
+Original [C]. These are all the slot-7 stops in the binary (`FUN_0040cf2d(…, 7)`). The sound
+manager has no "stop all" routine, and its loaders (`FUN_0040c74b`, `FUN_0040cdd3`) never release
+a buffer:
+- `FUN_0041d3cc` step 2: screen x > 2500 → vx = 0 and stop. As in round 5, this cannot fire
+  before the 3 s timer moves the scene to step 3, and step 3 never runs the buzz block again.
+- `FUN_0041e1be`, the skip handler, stops slots 0, 1, 4 and 7. It is **gated**: it does nothing
+  when step == 3, or when step == 2 and the 3 s timer is running (+0x32b0 +0x28, set by
+  `FUN_0041aa40(1)` at x ≥ 801).
+- `FUN_00437547`, the match fly update: stops slot 7 while the fly's +0x288 is set, otherwise
+  it runs the buzz.
+- `FUN_00433904`, the match fly teardown: stops slots 7 and 36.
+- `FUN_00448169`, the bonus fly teardown: stops slot 7.
+
+The intro end and the menu entry do not stop it:
+- When the pig settles, `FUN_00408068` calls `FUN_0041e4a8` and moves to state 0x1a.
+  `FUN_0041e4a8` releases the two intro flies' surfaces (`FUN_00418a88`: +0x4c Release), sets the
+  rest pose and starts the music through `FUN_0040cfd4(0, 500)`, which is a DirectMusic segment
+  play (`FUN_0040e229`). It makes no DirectSound call.
+- The menu state `FUN_00408113` and `FUN_0040e289` (DirectMusic Stop) do not touch slot 7.
+
+So after an unskipped intro, slot 7 loops in the menu at the last values the step-2 buzz set:
+- fly x about 2001 [I, from round 5's 400 px/s × 3 s]
+- volume −700 − (2001 − 800) ≈ −1900 cB
+- pan ≈ +8000, so almost only the right channel
+- frequency frozen at the last tick's value
+
+It stops when a match starts (the match fly's buzz takes over the slot, and its teardown stops
+it) or when the intro is entered again. On a later entry, `FUN_00407f42` calls `FUN_0041e1be`
+directly on the fresh menu object (step 0, so the gate passes).
+
+Also found, outside the question [C]:
+- The skip is not an end pose. `FUN_0041e1be` snaps the decor to rest and sets step 3, with the
+  pig layers at y = −50 − h and vy = DAT_00466ea8. It also plays slot 2 (volume 500, frequency
+  R(3000) + 10000). The pig then drops and bounces as usual. A later menu entry plays this skip
+  as well, so the pig drops again [I: leaving the menu destroys its object (`FUN_004082c0`, state
+  0x1d and the 0x1a exit) [C]; that every return goes through state 0x14 is assumed].
+- Slot 7 starts in step 1, not in step 2. While layer 0's y is in (−570, −100), the first intro
+  fly (DAT_0046c638, placed at x 830, y 300) runs `FUN_0040d005(x, vx, vy, w = 0, −900)` each
+  tick. Below −570 it keeps buzzing while x + w < 901. Step 2's buzz then continues the same loop.
+  The port has no step-1 fly.
+- `FUN_00408068` runs the scene, including the skip test, only once the 900 ms timer DAT_0046bd30
+  (armed by `FUN_00407f42` on the first visit) has expired. For those 900 ms `FUN_0041d3cc` does
+  not run: there is no scroll and no draw. The port only gates the skip on 900 ms.
+
+Verdict:
+- Not stopping slot 7 at the menu: guess correct. The drone is in the original. It is quiet (about
+  −19 dB) and almost only on the right channel. If the port's drone is loud or centred, look at the
+  mixer's cB-to-gain and pan mapping (`mixer.rs:19`, `:24`), not for a missing stop.
+- The skip at `:296`: wrong. The port accepts it in step 3 and during step 2's timer, and there
+  it stops the buzz. The original ignores both. The test `skipping_during_the_pig_stops_the_buzz`
+  (`:1002`) asserts behaviour that the original does not have.
+- `intro_end` (`:390`) jumping to the end pose: wrong (see the skip above). The step-1 fly and the
+  900 ms gate are missing (left for a later fix).
+- Round 5's "the only other stop is the skip handler" is amended: the skip handler stops slot 7
+  only while its gate is open.
+
+### Sound play on a playing slot does not restart it (round 6)
+`crates/thefly/src/mixer.rs:172` (`start`)
+
+Guess: Play stops the slot's voice and restarts it with the event's settings.
+
+Original (`FUN_0040ce7b(slot, loop)` → `FUN_0040df5b`, on IDirectSoundBuffer) [C]:
+1. GetStatus (vtable +0x24). If the buffer is lost (bit 2), Restore (`FUN_0040df2b`, +0x50).
+2. The test mask is PLAYING (1) for loop == 0 and LOOPING (4) for loop == 1.
+3. When status & mask == 0: Play(0, 0, loop) (+0x30), return 1. Otherwise **nothing**, return 0.
+- No SetCurrentPosition call (+0x34) is made anywhere in the binary, so the original never
+  rewinds a buffer explicitly.
+- Volume, frequency and pan are separate calls (`FUN_0040cea9` +0x3c, `FUN_0040ced5` +0x44,
+  `FUN_0040cf01` +0x40). Callers make them before the play, so they take effect on a buffer that
+  is already playing, even when the play is skipped.
+- So:
+  - A one-shot play on a slot that is still sounding is ignored. The knock (slot 28,
+    `FUN_004485ed`, every contact tick) plays once and can play again only after it ends.
+  - A looped play on a looping slot is ignored.
+  - A looped play on a slot that plays one-shot is not skipped: it switches that buffer to
+    looping without a restart [I, DirectSound semantics].
+- Where the original wants a fresh start, it calls Stop first. One case is the ring slots 49/50
+  (`FUN_00420476`, `FUN_0044b431`, `FUN_0044c9d4`, `FUN_004472df`): when both are busy, stop 49,
+  then set the frequency and play. DirectSound's Stop does not rewind, so that Play continues from
+  the stopped position [I, API semantics; not in the dump].
+
+Verdict: guess wrong. `start` should apply the volume, pan and frequency to the live voice and
+start the voice only when the slot is not playing (for Loop: not looping). Today every per-tick
+Play restarts, so the knock stutters on each contact tick. The port's Stop + Play restart is a
+port decision until the rewind semantics are checked on Windows:
+`wine` with a scratch build that plays, stops at 50 % and plays again.
+
+### Credits page 8: the letterbox shrinks on the Esc tick (round 6)
+`crates/thefly-sim/src/menu.rs:633` (`slide_out`)
+
+Guess: the letterbox starts to shrink on the entry tick (Esc + 1), with the vy −20 entry.
+
+Original [C]:
+- The menu state `FUN_00408113` runs the input step `FUN_0041be05`, then the render
+  `FUN_0041d22a`, in the same tick. On the Esc tick the input step sets page 8 (+0x2a74 = 8).
+- `FUN_0041d22a` runs the photo pass `FUN_0041f3b6` for pages 7, 8 and 9. In that pass, with page
+  == 8, the bounds are turned off, both photo movers run, and the letterbox +0x35f4 changes: it is
+  set to 0 when < 1, else it drops by 10. The bars are drawn at the new value.
+- So on the Esc tick the letterbox is already 110, the photos are already unbounded, and the
+  layers still move at page 9's vy. `FUN_0041eb60(1)`, the entry, first runs on Esc + 1 (round 5).
+  The letterbox is 0 from Esc + 11.
+
+Verdict: guess wrong. The early return on `SlideOut::Esc` skips the shrink. Shrink on the Esc
+tick, before the early return. In the test at `menu.rs:818` the letterbox is then 110 at t = 1,
+100 at t = 2 and 0 at t = 12. The photo bounds already match, because `move_photos` is given
+`page == 9`.
+
+### Bonus AI: the swatter and target reference points (round 6)
+`crates/thefly-sim/src/bonus.rs:400`, `:419`
+
+Guess: the AI lines up trunc(reach) with the target's y (moved into the field frame), and the
+swatter x with the target x.
+
+Original (`FUN_00449923` → controller `FUN_0043b654` / `FUN_0043b7f0` / `FUN_0043b814`, set up by
+`FUN_00449a24` with `FUN_0043b4fb(target, 0x1b0, swatter, 0x398, 5000)`) [C]:
+- **Target point** (`FUN_0043b6f5(1)`, `FUN_0043b756(1)`): (screen x + w/2, y + h/2). The
+  sizes come from `FUN_0041402d`/`FUN_0041403f` (48 → +24, and h/2). The x is folded with
+  `5000 − x` when it goes past 5000, which cannot happen here.
+- **Swatter point** (type 0x398):
+  - x (`FUN_0043bb51`) = +4 + (+0x68)/2 = x + 90 for the 181 px frame
+  - y (`FUN_0043bbfe`) = trunc(+0x98 + (+0x8c)/2) = **trunc(reach + 77)**. +0x8c = 154, and the
+    halving is a C int division.
+- dx = target x point + offset x, against the swatter x point, through the ring rule of
+  `FUN_0043b845`. dy = (target y + h/2 + offset y) − trunc(reach + 77). All values are screen y.
+- **Target choice** (`FUN_00449a24`): |target screen x − swatter +4| over the 10 targets that
+  are active, strictly less than the best so far, which starts at 800. Ties keep the lower index.
+  When no active target is within 800, the index stays 0 and slot 0 is aimed at, active or not.
+
+Verdict: guess wrong. In the port's field frame, `refresh` should get
+`(swatter.x + 90, trunc(reach + 77) − 80)` and `(t.x + 24, t.y + TARGET_H / 2)`. The swatter
+point is the same one the main-game controller uses (`ai.rs:234` doc). Round 4's "use reach − 80
+for the AI" is amended to trunc(reach + 77) − 80. The case with no target within 800 (the port
+returns an idle pad) differs only at the edge.
+
+### Coin frame count: 15, one draw per launch (round 6)
+`crates/thefly-sim/src/bonus.rs:329` (`COIN_FRAMES`), `:707`;
+`crates/thefly/src/draw/between.rs:316`
+
+Guess: 16 frames.
+
+Original [C]:
+- The bonus setup loads `j_piece.bmp` and calls `FUN_00413ce0(45, 45)` on all 20 coins. That
+  routine sets the frame count +0x6c = floor(W / 45) × floor(H / 45). A factor is 1 when the
+  sheet is not larger than the cell on that axis.
+- The local copy `re/wine-game/data/temp/j_piece.bmp` is 675 × 50, so 15 × 1 = **15** frames.
+- On launch (`FUN_004472df`, first free slot of 20), the rand draws are, in order:
+  1. R(100) for the ω re-roll test, and `FUN_00447cc0` when it passes
+  2. the frame, R(+0x6c) = R(15), set by `FUN_00431d48`
+  3. the frame period R(30) + 15 ms
+- The animator (`FUN_00414611`, `FUN_004143c0`) draws no rand, so frames advance with no draw.
+
+Verdict: guess wrong. Use R(15). The draw count is unchanged, but R(16) gives other frame values.
+The frontend's `COIN_SHEET_FRAMES = 15` is right, and its modulo is no longer needed once the sim
+draws R(15).
+
+### Midges: camera delta while stunned or falling, respawn x, fall vx (round 6)
+`crates/thefly-sim/src/world/midges.rs:300`, `:379`, `:338`
+
+Guess: a stunned or falling midge still scrolls with the camera; the respawn x is a screen x
+converted to layer x, as at spawn.
+
+Original [C]:
+- `FUN_00442960` always ends with `FUN_004172a8(dt, delta)`, whatever the stun (+0x200), fall
+  (+0x204) or push state. `FUN_004172a8` always calls `FUN_004180af(dt, delta)`. The camera delta
+  is the double at [ebp+0xc] in both (`ret 0xc`; Ghidra drops it). `FUN_004180af` adds
+  trunc(delta) to layer x and wraps it on every call. The state only changes the velocities that
+  the contact routine `FUN_00442bb3` sets:
+  - stun: wander off, accel flags (0, 0), vx = 0 through `FUN_004170fa`, which writes both +0x20
+    and the base +0xb0, and vy = 0
+  - fall: wander off, accel flags (1, 1), vy = 0, y accel +0x12c = 30, bounds off. **vx is not
+    touched.**
+- **Fall vx.** With the x accel flag set, `FUN_004172a8` sets vx = +0xb0 + sign × +0x128 each
+  tick. +0x128 is the mover's accel, 0 for midges (`FUN_00442806` → `FUN_00417144(…, 0)`).
+  +0xb0 is the last x speed written by the wander reroll (`FUN_004174c0`: ±(R(range) + 65)), the
+  jitter, the homing or the respawn. So a zapped midge falls while it keeps drifting at its last
+  flight x speed, plus the camera delta. It is 0 only when it was stunned just before.
+- The respawn in `FUN_00442bb3` places the midge with `FUN_00417d0d(R(500) + 1000)`, the
+  screen-x setter, which derives layer x. Then it sets y = R(+0x2e − +0x56) + 20. +0x56 is the
+  sheet height, 27 for the one-row 162 × 27 `j_moucheron` sheets. The rand order is x, then y.
+  The respawn also sets vx = the saved +0x18c, the facing frame from its sign, accel flags (1, 0),
+  wander on, bounds on, and +0x170 = 1 when homing.
+
+Verdict:
+- The camera delta while stunned or falling (`:300`): guess correct. Drop the shortcut.
+- The respawn x (`:379`): guess correct. Drop the shortcut.
+- `fall` (`:338`) setting vx = 0: wrong. Keep the midge's current vx (`mover.v[0]`) while it
+  falls, and add only the y accel.
 
 ## Guess correct
 
@@ -2478,6 +2675,37 @@ draw only when it plays).
 
 Verdict: guess correct.
 
+### Bonus swing cooldown and the shockwave y (round 6)
+`crates/thefly-sim/src/bonus.rs:256`
+
+Guess: the 20-tick cooldown starts counting on the first idle tick; the shockwave is not
+modelled.
+
+Original (`FUN_004490be(start)`, swing step `FUN_00449203`, setup `FUN_00448802`) [C]:
+- The fields:
+  - +0x74: the frame
+  - +0xa0: busy (set on every swing or retract step, cleared when the frame reaches 0)
+  - +0xa4: the retract flag (set at the top, stays set after the frame reaches 0)
+  - +0xac: the cooldown count
+  - +0xa8: the cooldown length, 20
+- Each tick, first: if +0xa4 and not +0xa0, then +0xac += 1, and when +0xac > 20, +0xa4 = 0 and
+  +0xac = 0. Then the swing step runs if (start or +0xa0) and +0xac == 0.
+- On tick R the retract takes the frame to 0. On that tick +0xa0 was still set at the top, so the
+  count does not move. Counting starts on R + 1, and a new swing can start on R + 21, on the same
+  tick the count resets. This is the port's rule (cooldown counted from the first frame-0 tick,
+  start when > 20).
+- **Shockwave** (`FUN_00449428`, on the step where the frame passes 4 and the retract flag is
+  set):
+  - x = swatter x − 5 + 130/2, through the screen-x setter
+  - y = trunc(reach + 154/2) = **trunc(+0x98 + 77)**, a screen y (`0x4492dc`–`0x4492f3`:
+    +0x8c halved as a C int, fild, fadd +0x98, ftol)
+  - scale param 2 × 70 + 150 = 290; the first free of the two slots
+  - it draws no rand, so it is cosmetic
+
+Verdict: the cooldown guess is correct, so the [I] can be dropped. Not modelling the shockwave is
+a port decision. If the frontend draws it, put it at (x + 60, trunc(reach + 77)) screen, which is
+trunc(reach + 77) − 80 in the port's field frame.
+
 ## Port decisions
 
 - `crates/thefly-platform/src/audio.rs:292` MIDI loop point: port decision.
@@ -2488,7 +2716,7 @@ Verdict: guess correct.
 - `crates/thefly-sim/src/screen.rs:381` intro video: port decision.
 - `crates/thefly-sim/src/sim.rs:112` intro video: port decision.
 - `crates/thefly-assets/src/btt.rs:96` stats not written: port decision.
-- `crates/thefly-sim/src/bonus.rs:135` COIN_FRAMES 16: asset lookup, not a code constant. The frame is R(frame count), with the count taken from the `piece` sheet at 45×45 frames (`FUN_004472df`) [C]; read the sheet width / 45.
+- `crates/thefly-sim/src/bonus.rs:329` COIN_FRAMES 16: amended in round 6. The count is floor(W / 45) × floor(H / 45) of `j_piece.bmp`, 675 × 50, so 15 (see "Coin frame count").
 - `crates/thefly-sim/src/world/ambient.rs:36` tutorial bubbles (O12): port decision. `FUN_00443488`/`FUN_00443772`/`FUN_00443d54` draw no rand, play no sound and write no game state [C], so leaving them out does not desync anything.
 - `crates/thefly-sim/src/world/mod.rs:131` period-load order: port decision. The
   original reseeds from the clock inside the objects build ("Period load order"), so no draw
@@ -2543,3 +2771,13 @@ Verdict: guess correct.
   - whether a still-playing slot 28 (the knock) restarts on each tick of contact
   - the frontend `draw/*`, `fx.rs`, `assets.rs`, `game.rs` and `btt.rs:96` shortcuts: draw
     anchors, fonts and asset details the dump does not settle
+- Round 6 settled the swing cooldown and the shockwave y ("Bonus swing cooldown"), the AI's
+  swatter y ("Bonus AI: the swatter and target reference points"), the knock restart ("Sound
+  play on a playing slot") and the coin frame count, and both midge shortcuts (plus the fall vx).
+- Open after round 6:
+  - `bonus.rs:203`: the swatter's start x (uninitialised heap; 0 from the captures)
+  - `bonus.rs:134`: the dt split stays [I]
+  - DirectSound Stop + Play: resume or rewind (API semantics, not in the dump)
+  - the bonus swing fields +0x74/+0xa0/+0xa4/+0xac: never written by the setup; whether the
+    constructor `FUN_00448640` zeroes them was not checked
+  - the frontend `draw/*`, `fx.rs`, `assets.rs`, `game.rs` and `btt.rs:96` shortcuts
