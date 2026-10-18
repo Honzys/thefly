@@ -55,15 +55,25 @@ pub const SIZED_SPRITES: &[&str] = &[
     "piecetap",
 ];
 
-/// Outlines besides the table objects'. `tue_mouche` is derived from the sprite mask by the
-/// frontend (`FUN_0042dda4`: edge pixels at half width); the rest are `.bor` files.
+/// Outlines besides the table objects'. Those in [`MASK_OUTLINED`] come from the sprite mask;
+/// the rest are `.bor` files.
 pub const OUTLINED_SPRITES: &[&str] = &[
     "palesventi_gc",
     "palesventi_dt",
     "piedventi_gc",
     "piedventi_dt",
     "tue_mouche",
+    "colle_mouche1",
+    "colle_mouche2",
 ];
+
+/// Outlines the frontend derives from the sprite mask (edge pixels at half width) and hands to
+/// [`GameData::insert_mask_outline`]: the zapper (`FUN_0042dda4`) and the flypapers (answers.md
+/// "Flypaper push-out: mask outline").
+pub const MASK_OUTLINED: &[&str] = &["tue_mouche", "colle_mouche1", "colle_mouche2"];
+
+/// The flypaper outline is built for rows 0..=85 only (`FUN_0042636b(fp, 0x55)`).
+const FLYPAPER_LAST_ROW: usize = 85;
 
 /// What [`GameData::check`] found wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +104,22 @@ impl GameData {
             Some(o) => o,
             None => panic!("outline {name:?} missing; GameData::check was skipped"),
         }
+    }
+
+    /// Stores the mask outline of `name`. A flypaper keeps rows 0..=85 with row 85 closed:
+    /// every point between its first and second edge points is added (answers.md "Flypaper
+    /// push-out: mask outline").
+    pub fn insert_mask_outline(&mut self, name: &str, mut mask: Outline) {
+        if name.starts_with("colle_mouche") {
+            mask.rows.truncate(FLYPAPER_LAST_ROW + 1);
+            if let Some(row) = mask.rows.get_mut(FLYPAPER_LAST_ROW)
+                && let [first, second, ..] = row[..]
+            {
+                row.extend(first + 1..second);
+                row.sort_unstable();
+            }
+        }
+        self.outlines.insert(name.to_owned(), mask);
     }
 
     /// Every name the rules look up, so a bad data directory fails at load, not mid-match.
@@ -162,6 +188,9 @@ impl GameData {
             d.outlines
                 .insert((*name).to_owned(), Outline::rect(Size { w: 100, h: 100 }));
         }
+        for name in ["colle_mouche1", "colle_mouche2"] {
+            d.insert_mask_outline(name, Outline::rect(d.size(name)));
+        }
         d
     }
 }
@@ -199,5 +228,21 @@ mod tests {
         );
         d.sizes.insert("dehors".into(), Size { w: 3000, h: 295 });
         assert_eq!(d.check(), Err(Missing::WorldWidth("dehors".into(), 3000)));
+    }
+
+    /// The synthetic 53 × 300 flypaper rect (half-x 0..=25): rows 0..=85 only, row 0 full,
+    /// rows 1..=84 the two sides, row 85 closed from 0 to 25.
+    #[test]
+    fn a_flypaper_mask_keeps_rows_0_to_85_and_closes_row_85() {
+        let d = GameData::synthetic();
+        let o = d.outline("colle_mouche1");
+        assert_eq!(o.rows.len(), 86);
+        assert_eq!(o.rows[0], (0..=25).collect::<Vec<u16>>());
+        assert_eq!(o.rows[84], [0, 25]);
+        assert_eq!(o.rows[85], (0..=25).collect::<Vec<u16>>());
+        // Other mask outlines are kept whole.
+        let mut d = GameData::default();
+        d.insert_mask_outline("tue_mouche", Outline::rect(Size { w: 4, h: 100 }));
+        assert_eq!(d.outline("tue_mouche").rows.len(), 100);
     }
 }

@@ -7,7 +7,7 @@ use super::lift::SHOP_SCALE;
 use super::{OBJECT_PARALLAX, SCREEN_W, W, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
-use crate::data::{Outline, Size};
+use crate::data::Size;
 use crate::event::{Effect, Event, Pan, PlayParams, SoundOp, SoundSlot};
 use crate::match_state::TrapLayout;
 
@@ -414,8 +414,9 @@ fn throw_sparks(z: &mut Zapper, cx: &mut Ctx) {
 /// `FUN_00428003` (answers.md "Zapper and flypaper: solid push-out"): when the trap's outline
 /// meets the fly's, the fly goes back to its previous position and steps 1 px against vx, then
 /// against vy while vy ≠ 0, until clear; then v = trunc(−v / 1.4). The trap also goes back to
-/// its previous position, which is a no-op here: traps run the object motion `FUN_0042ea74`,
-/// whose state-0 save (FW §5.4 step 4) leaves the previous position at the current one [I].
+/// its previous position, which is a no-op: traps are never collectible and stay in state 0, so
+/// the object motion `FUN_0042ea74` right before leaves the previous position at the current one
+/// [C] (answers.md "Trap restore in the push-out is a no-op").
 fn push_out(fly: &mut Fly, trap: &Shape<'_>) {
     let outline = fly_outline();
     let touches = |fly: &Fly| {
@@ -680,11 +681,8 @@ impl World {
     }
 
     /// `FUN_0042663b` per flypaper (answers.md "Zapper and flypaper: solid push-out"): the solid
-    /// step, then v / 1.4 when the fly's catch box touches the paper (inclusive), no sound.
-    ///
-    /// shortcut: the flypaper's outline source is undocumented and there is no `.bor`; the port
-    /// uses the frame's rectangle outline. Revisit if the original builds it from the mask, as
-    /// it does for the zapper (`FUN_0042dda4`).
+    /// step against the sprite's mask outline (answers.md "Flypaper push-out: mask outline"),
+    /// then v / 1.4 when the fly's catch box touches the paper (inclusive), no sound.
     fn flypaper_step(&mut self, cx: &Ctx) {
         for i in 0..self.traps.flypapers.len() {
             let p = self.traps.flypapers[i];
@@ -696,12 +694,11 @@ impl World {
             let size = cx.data.size(sprite);
             let paper = Rect::new(visible_x(p.screen_x, size.w), p.y, size.w, size.h);
             if paper.overlaps(&self.fly_rect()) {
-                let outline = Outline::rect(size);
                 let shape = Shape {
                     x: paper.x,
                     y: paper.y,
                     size,
-                    outline: &outline,
+                    outline: cx.data.outline(sprite),
                 };
                 push_out(&mut self.fly, &shape);
             }
@@ -1037,24 +1034,40 @@ mod layout_tests {
         assert_eq!((w.fly.vx, w.fly.vy), (214, -100));
     }
 
-    /// The flypaper's outline (a 53 × 300 rect here: half-x 250 and 275) meets the fly's right
-    /// side (half-x x / 2 + 45) at x 410. The fly goes back to its previous position: from 409
-    /// it is clear, so it stays there; from 411 it steps x −1 (still touching), y +1 against
-    /// vy −140, then x −1 to 409, clear. Then v = trunc(−v / 1.4), and the inset box (459..479)
+    /// The flypaper's mask outline (the synthetic 53 × 300 rect: half-x 250 and 275, rows
+    /// 0..=85) meets the fly's right side (half-x x / 2 + 45) at x 410. The fly goes back to its
+    /// previous position: from 409 it is clear, so it stays there; from 411 it steps x −1 (still
+    /// touching), y +1 against vy −140, then x −1 to 409, clear (its bottom row 85 at half-x
+    /// 219..249 misses row 85's 250..275). Then v = trunc(−v / 1.4), and the inset box (459..479)
     /// misses the paper, so no drag.
     #[test]
     fn a_flypaper_pushes_the_fly_back_out_of_its_outline() {
         let mut rig = Rig::new(1);
         let mut w = world_with(vec![slot(TrapKind::Flypaper, 500)], &mut rig);
-        for (prev_x, want_y) in [(409, 100), (411, 101)] {
-            (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (410, 100, 300, -140);
-            (w.fly.prev_x, w.fly.prev_y) = (prev_x, 100);
+        for (prev_x, want_y) in [(409, 0), (411, 1)] {
+            (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (410, 0, 300, -140);
+            (w.fly.prev_x, w.fly.prev_y) = (prev_x, 0);
             w.traps_step(&mut rig.at(1));
             assert_eq!(
                 (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy),
                 (409, want_y, -214, 100)
             );
         }
+    }
+
+    /// answers.md "Flypaper push-out: mask outline": the outline ends at row 85, so the same fly
+    /// at y 100 (outline rows 129..184) passes through the paper's side untouched.
+    #[test]
+    fn a_fly_below_row_85_of_a_flypaper_is_not_pushed_out() {
+        let mut rig = Rig::new(1);
+        let mut w = world_with(vec![slot(TrapKind::Flypaper, 500)], &mut rig);
+        (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy) = (410, 100, 300, -140);
+        (w.fly.prev_x, w.fly.prev_y) = (411, 100);
+        w.traps_step(&mut rig.at(1));
+        assert_eq!(
+            (w.fly.x, w.fly.y, w.fly.vx, w.fly.vy),
+            (410, 100, 300, -140)
+        );
     }
 
     /// The blades knock the fly at most once per 100 ms (tick 7 is 107 ms after tick 0).

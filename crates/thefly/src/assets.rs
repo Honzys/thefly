@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use thefly_sim::GameData;
-use thefly_sim::data::{OUTLINED_SPRITES, Outline, SIZED_SPRITES, Size};
+use thefly_sim::data::{MASK_OUTLINED, OUTLINED_SPRITES, Outline, SIZED_SPRITES, Size};
 use thefly_sim::event::SOUND_FILES;
 use thefly_sim::saves::{self, Persisted};
 use thefly_sim::world::objects::{EXTREME_TYPES, NORMAL_TYPES};
@@ -280,15 +280,14 @@ pub fn game_data(data: &Path) -> Result<GameData, String> {
         let size = (irc.image.width, irc.image.height);
         d.sizes
             .insert(name.to_owned(), rule_size(name, frame_size(sheet, size)));
-        if name == "tue_mouche" {
+        if MASK_OUTLINED.contains(&name) {
             let img = &irc.image;
-            let outline = mask_outline(img.width, img.height, &img.rgba);
-            d.outlines.insert(name.to_owned(), outline);
+            d.insert_mask_outline(name, mask_outline(img.width, img.height, &img.rgba));
         }
     }
     let bors = bor_files(data)?;
     let bor_names = OUTLINED_SPRITES.iter().copied().chain(objects);
-    for name in bor_names.filter(|n| *n != "tue_mouche") {
+    for name in bor_names.filter(|n| !MASK_OUTLINED.contains(n)) {
         let path = bors
             .get(&name.to_ascii_lowercase())
             .ok_or_else(|| format!("{name}.bor missing"))?;
@@ -390,5 +389,6 @@ mod tests {
         }
         let zapper = real.outline("tue_mouche");
         assert_eq!(zapper.rows.len(), 131);
+        assert_eq!(real.outline("colle_mouche1").rows.len(), 86);
     }
 }
