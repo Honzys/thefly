@@ -184,20 +184,20 @@ impl Winner {
     }
 
     /// Rest, hop (three draws: length, parity, frequency), rest R(5000) + 1000, … The trophy
-    /// wanders while hopping.
-    // shortcut: the mover steps after the choreography in a tick, so a hop's first wander draws
-    // follow the cheer's; answers.md "Winner trophy" gives no order [I]. Revisit with a capture.
+    /// wanders while hopping. The move runs before the timers (answers.md "Winner trophy: mover
+    /// before the hop timers"): a new hop first moves on the next tick, and a hop's end zeroes v
+    /// after that tick's move.
     fn hops(&mut self, keys: &KeyState, cx: &mut Ctx) {
         if self.keys_armed.expired(cx.now) && keys.skip() {
             self.stage = Stage::FadeOut;
             self.fade = Fade::new(true, FADE_END_MS);
             return;
         }
-        if self.hop.expired(cx.now) {
-            self.toggle_hop(cx);
-        }
         if self.hopping {
             self.hop_step(cx);
+        }
+        if self.hop.expired(cx.now) {
+            self.toggle_hop(cx);
         }
     }
 
@@ -386,10 +386,11 @@ mod tests {
         w
     }
 
-    /// answers.md "Winner trophy" and "Wander mover internals", seed 1: the hop draws 541 ms,
-    /// parity 18467 odd, 6334 % 2000 → slot 58 at 20834; then the mover x: timer 26500, d 9 (+1),
-    /// 15724 % 10 + 65 = 69, gravity + 5 = 74; y: timer 11478, d 8 (+1), 26962 % 50 + 65 = 77,
-    /// + 5 = 82. Both move 1 px: x 51 ≤ 50 + 2, y 468 clamped to the floor 467.
+    /// answers.md "Winner trophy: mover before the hop timers" and "Wander mover internals",
+    /// seed 1. Tick 1 moves nothing (not hopping yet), then the rest expiry draws the hop 541 ms,
+    /// parity 18467 odd, 6334 % 2000 → slot 58 at 20834. Tick 2 moves first: x timer 26500, d 9
+    /// (+1), 15724 % 10 + 65 = 69, gravity + 5 = 74; y: timer 11478, d 8 (+1), 26962 % 50 + 65 =
+    /// 77, + 5 = 82. Both move 1 px: x 51 ≤ 50 + 2, y 468 clamped to the floor 467.
     #[test]
     fn a_hop_steps_the_trophy_through_the_wander_mover() {
         let mut rig = Rig::new(1);
@@ -399,6 +400,8 @@ mod tests {
         assert_eq!(got, [(0, 58, play_at(Some(20_834), 0))]);
         assert!(w.hopping);
         assert_eq!(w.hop.remaining_ms(0), 541);
+        assert_eq!((w.mover.v, w.trophy_x), ([0, 0], 50));
+        assert!(run(&mut rig, &mut w, &mut m, 1).is_empty());
         assert_eq!(w.mover.v, [74, 82]);
         assert_eq!((w.trophy_x, w.trophy_y), (51, 467.0));
         assert_eq!(rig.rng.rand(), 24464);
@@ -425,7 +428,8 @@ mod tests {
         assert!(moved);
     }
 
-    /// The hop's end, seed 1: v = 0, y = 587 − h, rest 41 % 5000 + 1000 = 1041, slot 54 at −550.
+    /// The hop's end, seed 1: the move runs first and draws six (41 .. 15724, both axes re-roll),
+    /// then v = 0, y = 587 − h, rest 11478 % 5000 + 1000 = 2478, slot 54 at −550.
     #[test]
     fn a_hop_ends_at_rest_on_the_floor() {
         let mut rig = Rig::new(1);
@@ -438,6 +442,6 @@ mod tests {
         let got = run(&mut rig, &mut w, &mut m, 1);
         assert_eq!(got, [(now, 54, play_at(None, -550))]);
         assert_eq!((w.hopping, w.mover.v, w.trophy_y), (false, [0, 0], 467.0));
-        assert_eq!(w.hop.remaining_ms(now), 1041);
+        assert_eq!(w.hop.remaining_ms(now), 2478);
     }
 }
