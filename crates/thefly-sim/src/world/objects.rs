@@ -5,7 +5,7 @@
 use super::collision::{Rect, Shape, fly_outline, outlines_overlap};
 use super::fly::Fly;
 use super::lift::LiftResult;
-use super::traps::Traps;
+use super::traps::{Traps, fan_frame};
 use super::{OBJECT_PARALLAX, W, World};
 use crate::clock::DT;
 use crate::ctx::Ctx;
@@ -214,24 +214,19 @@ impl Objects {
         objects
     }
 
-    /// §5.2 step 4 (`FUN_0042a85a`): each fan stand is an extra, non-collectible object.
-    ///
-    /// shortcut: §5.2 names only the piedventi outline. The stand takes the fan's x as its layer
-    /// x (`Fan::x` is documented as 1.25-layer x, unlike the lift, which reads the same 0.152
-    /// store as a screen-ring x), `_dt` for a right-facing fan, its size from the outline's
-    /// extent, y = 580 − h, weight and rank 0. Revisit when `FUN_0042a85a` is read.
-    fn add_fan_stands(&mut self, traps: &Traps, cx: &mut Ctx) {
+    /// §5.2 step 4 (`FUN_00427954`, answers.md "Fan stands, fan y and trap x"): one extra,
+    /// non-collectible object per fan, in fan order, at the fan's screen x and y with its frame
+    /// size; `piedventi_dt` under a fan that blows right.
+    fn add_fan_stands(&mut self, traps: &Traps, cx: &Ctx) {
         for fan in &traps.fans {
             let sprite = if fan.facing_right {
                 "piedventi_dt"
             } else {
                 "piedventi_gc"
             };
-            let size = outline_extent(cx.data.outline(sprite));
-            let mut o = Object::blank(sprite, size);
-            o.layer_x = fan.x.rem_euclid(W);
-            o.screen_x = o.screen_from_layer();
-            o.prev_x = o.layer_x;
+            let mut o = Object::blank(sprite, fan_frame(cx));
+            o.set_screen_x(fan.screen_x);
+            (o.y, o.rest_y, o.prev_y) = (fan.y, fan.y, fan.y);
             self.list.push(o);
         }
     }
@@ -820,15 +815,6 @@ fn toward_zero(v: i32, d: i32) -> i32 {
         (v - d).max(0)
     } else {
         (v + d).min(0)
-    }
-}
-
-/// The frame an outline covers: its row count by twice its widest value.
-fn outline_extent(o: &Outline) -> Size {
-    let widest = o.rows.iter().flatten().copied().max().unwrap_or(0);
-    Size {
-        w: (i32::from(widest) + 1) * 2,
-        h: i32::try_from(o.rows.len()).unwrap_or(0),
     }
 }
 
