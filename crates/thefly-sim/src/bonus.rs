@@ -175,11 +175,17 @@ impl Bar {
     }
 }
 
+/// The field's screen y: `bckbonusfond` sits at trunc((600 − 440) / 2) = 80 (answers.md "Bonus round
+/// coordinates"). The fly, coins and targets live in field coordinates (y 0 at the top); the
+/// swatter's y and its reach are screen y, so they are shifted by this before meeting a field y.
+pub const FIELD_TOP: f64 = 80.0;
+
 /// The bonus fly (`FUN_004481c2`, `FUN_00448302`): `j_transi_est` 120×94 at (R(300), 150);
 /// a held key adds 0.1 × cap (the float 0.1 widened to a double) per tick, caps 890 / 670, a
 /// released axis decays by 9; x in [0, 680], y in [bg y − 15, bg y + bg h + 15 − 94].
 const FLY_START_X_RAND: i32 = 300;
-const FLY_START_Y: f64 = 150.0;
+/// The start y 150 is a screen y.
+const FLY_START_Y: f64 = 150.0 - FIELD_TOP;
 const FLY_CAP: (i32, i32) = (890, 670);
 const FLY_DECAY: i32 = 9;
 const FLY_MAX_X: f64 = 680.0;
@@ -194,8 +200,9 @@ const SWATTER_CAP: (i32, i32) = (900, 400);
 const SWATTER_MAX_X: f64 = 800.0;
 pub const SWATTER_MIN_Y: f64 = 351.0;
 pub const SWATTER_MAX_Y: f64 = 472.0;
-/// shortcut: the swatter's start x is not given (answers.md "Bonus round movers"); 400.
-const SWATTER_START_X: f64 = 400.0;
+/// shortcut: the original leaves the start x uninitialised until the first mover tick clamps it;
+/// the captures show 0 [I] (answers.md "Bonus round coordinates"), revisit if a capture disagrees.
+const SWATTER_START_X: f64 = 0.0;
 /// Reach (+0x98) = (1 − (472 − y) / 121) × 375.
 const REACH_SPAN: f64 = 121.0;
 pub const REACH_MAX: f64 = 375.0;
@@ -384,7 +391,8 @@ impl BonusAi {
 
     /// Aims at the nearest active target by |Δx| and returns the pad, swing included.
     // shortcut: AR §8.3 does not say which swatter y the AI aligns; it aligns the hit box's top,
-    // trunc(reach), which y moves monotonically.
+    // trunc(reach), which y moves monotonically. That is a screen y, so it is moved into the
+    // field frame of the targets (answers.md "Bonus round coordinates").
     fn pad(&mut self, swatter: &BonusMover, targets: &[Piece], h: f64, cx: &mut Ctx) -> FarmerPad {
         self.frenzy_step(h, cx);
         let nearest = targets
@@ -401,7 +409,7 @@ impl BonusAi {
         };
         self.controller.target = Target::BonusTarget(i);
         self.controller.refresh(
-            (swatter.x as i32, reach(swatter.y) as i32),
+            (swatter.x as i32, (reach(swatter.y) - FIELD_TOP) as i32),
             (t.x as i32, t.y as i32),
         );
         let aligned = self
@@ -791,12 +799,13 @@ impl BonusRound {
         }
     }
 
-    /// The box (x + 30, trunc(reach), 121, 154) against target `i`.
+    /// The box (x + 30, trunc(reach), 121, 154) against target `i`: the reach is a screen y, so the
+    /// box top is reach − 80 in the targets' field frame (answers.md "Bonus round coordinates").
     fn swat(&mut self, i: usize, cx: &mut Ctx) {
         let s = &self.swatter;
         let sw = (
             s.x + SWAT_INSET,
-            reach(s.y).trunc(),
+            reach(s.y).trunc() - FIELD_TOP,
             SWATTER_W - 2.0 * SWAT_INSET,
             SWAT_H,
         );
@@ -985,8 +994,8 @@ mod tests {
         assert_eq!(b.wing_ms[0], draws[100] % 10 + 10);
         assert_eq!(b.wing_ms[9], draws[109] % 10 + 10);
         assert_eq!(b.coin_rate, f64::from(draws[110] % 60 + 1) / 100.0);
-        assert_eq!((b.fly.x, b.fly.y), (f64::from(draws[111] % 300), 150.0));
-        assert_eq!((b.swatter.x, b.swatter.y), (400.0, 351.0));
+        assert_eq!((b.fly.x, b.fly.y), (f64::from(draws[111] % 300), 70.0));
+        assert_eq!((b.swatter.x, b.swatter.y), (0.0, 351.0));
         assert_eq!(rig.rng, probe);
     }
 
@@ -1075,8 +1084,9 @@ mod tests {
         assert_eq!(got, [(501.0, 15.0), (501.0, 381.0)]);
     }
 
-    /// The swatter at (400, 472) has reach 375 and hits through (430, 375, 121, 154) grown by
-    /// the 48 × 44 target: x 382..=551, y 331..=529.
+    /// The swatter at (400, 472) has reach 375 and hits through the screen box (430, 375, 121, 154)
+    /// grown by the 48 × 44 target: x 382..=551, screen y 331..=529, i.e. field y 251..=449
+    /// (answers.md "Bonus round coordinates": the field top is 80).
     #[test]
     fn a_target_is_hit_by_its_top_left_in_the_grown_swatter_box() {
         let mut rig = Rig::new(1);
@@ -1088,15 +1098,40 @@ mod tests {
             y,
             ..Piece::default()
         };
-        b.targets[0] = at(382.0, 331.0);
-        b.targets[1] = at(551.0, 529.0);
-        b.targets[2] = at(381.0, 331.0);
-        b.targets[3] = at(552.0, 529.0);
-        b.targets[4] = at(551.0, 530.0);
+        b.targets[0] = at(382.0, 251.0);
+        b.targets[1] = at(551.0, 449.0);
+        b.targets[2] = at(381.0, 251.0);
+        b.targets[3] = at(552.0, 449.0);
+        b.targets[4] = at(551.0, 450.0);
         rig.cx(|cx| (0..5).for_each(|i| b.swat(i, cx)));
         let hit: Vec<bool> = b.targets[..5].iter().map(|t| !t.active).collect();
         assert_eq!(hit, [true, true, false, false, false]);
         assert_eq!(b.hits, 2);
+    }
+
+    /// answers.md "Bonus round coordinates": the AI aligns the hit box top, trunc(reach) in screen
+    /// y, with the target's screen y = field y + 80. Swatter y 412 has reach 189, so a target at
+    /// field y 109 is level (dy 0); a target at field y 189 is 80 px below it.
+    #[test]
+    fn the_ai_aligns_the_screen_reach_with_the_field_target_plus_the_field_top() {
+        let mut rig = Rig::new(1);
+        let swatter = BonusMover {
+            x: 400.0,
+            y: 412.0,
+            ..BonusMover::default()
+        };
+        let at = |y: f64| Piece {
+            active: true,
+            x: 400.0,
+            y,
+            ..Piece::default()
+        };
+        // A fresh AI per target: a level swatter rerolls the aim offset.
+        for (y, dy) in [(109.0, 0), (189.0, 80)] {
+            let mut ai = rig.cx(|cx| BonusAi::new(AiLevel::Normal, 0.5, cx));
+            rig.cx(|cx| ai.pad(&swatter, &[at(y)], 0.5, cx));
+            assert_eq!(ai.controller.dy, dy, "target y {y}");
+        }
     }
 
     /// answers.md "Bonus round movers": reach 0 at y 351, 375 at y 472; y 412 gives
@@ -1302,6 +1337,7 @@ mod tests {
     fn the_swatter_holds_still_while_swinging() {
         let mut rig = Rig::new(1);
         let (mut m, mut b) = playing(&mut rig);
+        b.swatter.x = 400.0;
         b.swing = Swing {
             frame: 2,
             retract: false,
