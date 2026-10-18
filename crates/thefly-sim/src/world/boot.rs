@@ -120,8 +120,15 @@ impl Boot {
         ((f64::from(self.x) * OBJECT_PARALLAX) as i32).rem_euclid(BOOT_WRAP)
     }
 
+    /// The drawn box: across the ring end the screen x is shifted by −BOOT_WRAP (FW §4.4 step 6).
     pub fn rect(&self) -> Rect {
-        Rect::new(self.screen_x(), self.y, self.w, self.h)
+        let x = self.screen_x();
+        let x = if x >= BOOT_WRAP - self.w {
+            x - BOOT_WRAP
+        } else {
+            x
+        };
+        Rect::new(x, self.y, self.w, self.h)
     }
 
     /// Gone once it has risen above the top bound (y < −h).
@@ -237,7 +244,7 @@ impl Boot {
         }
         self.stomps += 1;
         cx.emit(Event::Effect(Effect::Stomp {
-            x: self.screen_x() + self.w / 2,
+            x: self.rect().x + self.w / 2,
             y: FLOOR_Y,
         }));
         cx.sound(SoundSlot::BOOM, SoundOp::SetVolume(BOOM_VOLUME));
@@ -317,6 +324,17 @@ mod tests {
     use crate::match_state::{MatchConfig, MatchState, Players};
 
     const FLY_W: i32 = 120;
+
+    /// FW §4.3 step 1 and §4.4 step 6: a boot at screen x 4950 (layer 3960) and 270 wide straddles
+    /// the 5000 ring end and covers x −50..220, so it touches a fly box at x 0.
+    #[test]
+    fn a_boot_across_the_ring_end_touches_a_fly_at_the_left_edge() {
+        let mut boot = Boot::new(270, 575);
+        (boot.x, boot.y) = (3960, 0);
+        assert_eq!(boot.screen_x(), 4950);
+        assert_eq!(boot.contact_side(Rect::new(0, 100, 100, 300)), Some(3));
+        assert_eq!(boot.contact_side(Rect::new(300, 100, 100, 300)), None);
+    }
 
     /// Runs the boot over a still fly until it retires or `cap` ticks pass; returns the ticks.
     fn run(boot: &mut Boot, rig: &mut Rig, splatted: bool, cap: u64) -> u64 {
