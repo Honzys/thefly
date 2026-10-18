@@ -99,7 +99,9 @@ impl FlyingGoodies {
 
 impl World {
     /// Step 16: spawn (`FUN_00432684`), update (`FUN_00432dfb`), catch (`FUN_0043309b`).
-    /// Open item: the swatter flag that gates the farmer's catch.
+    /// The farmer catches only while the swing frame is 3 or more and the "cannot hit" flag is
+    /// clear, against the box (x, trunc(reach), 131, 154), bounds inclusive (gaps §5.1). The
+    /// trailing-side re-roll is `R(100) <= 2q` for the fly and `< 2q` for the farmer (gaps §5.2).
     pub fn flying_goodies_step(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let _ = (m, cx);
         todo!("W2 fly-and-world §6.2, §6.3")

@@ -1,8 +1,9 @@
 //! W3. The bonus round (0x64): handicaps, countdown, coins, targets, counting, the end tally and
 //! the bonus AI (ai-and-rules §8.3). The AI reuses W2's [`Aligner`].
 //!
-//! Open items: the coin trajectory's math call, the layout, and how the bonus fly and swatter
-//! move (proposal: the world's fly physics and farmer movement on the bonus play field).
+//! Coin entry is decoded (gaps §7.3, `sin`). Open item O3: the layout, the intro, the coins'
+//! leftward motion and how the bonus fly and swatter move (proposal: the world's fly physics and
+//! farmer movement on the bonus play field).
 
 use crate::clock::Timer;
 use crate::ctx::Ctx;
@@ -105,7 +106,7 @@ pub struct Piece {
     pub vy: f64,
 }
 
-/// A bonus-round actor's position and velocity. Open item: its motion rule.
+/// A bonus-round actor's position and velocity. Open item O3: its motion rule.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BonusMover {
     pub x: f64,

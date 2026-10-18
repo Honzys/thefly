@@ -8,9 +8,9 @@ use crate::match_state::MatchState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ambient {
-    /// Open item: the animal-sound interval and choice rule are not in the docs.
+    /// Open item O11: the animal-sound interval and choice rule are not in the docs.
     pub animal_timer: Timer,
-    /// Tutorial mode only: the bubble shown (fly or farmer side) and its timer. Open item: the
+    /// Tutorial mode only: the bubble shown (fly or farmer side) and its timer. Open item O12: the
     /// hint sequence and triggers are not decoded.
     pub tutorial: Option<TutorialBubble>,
 }
@@ -27,6 +27,6 @@ impl World {
     /// Step 17.
     pub fn ambient_step(&mut self, m: &mut MatchState, cx: &mut Ctx) {
         let _ = (m, cx);
-        todo!("W2 fly-and-world §2 step 17, ai-and-rules §1.5; open items")
+        todo!("W2 fly-and-world §2 step 17, ai-and-rules §1.5; open items O11, O12")
     }
 }

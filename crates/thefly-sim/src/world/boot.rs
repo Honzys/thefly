@@ -33,7 +33,7 @@ pub struct Boot {
     pub accel: i32,
     pub offset: i32,
     pub retarget: Timer,
-    /// +0x178. Open item: what sets it.
+    /// +0x178. Open item O23: what sets it (fly-and-world §7.2 step 7 only reads it).
     pub ready: bool,
 }
 
@@ -72,7 +72,7 @@ impl World {
     /// Step 7: clear the active flag when gone; otherwise update unless paused.
     pub fn boot_step(&mut self, cx: &mut Ctx) {
         let _ = cx;
-        todo!("W2 fly-and-world §7.2; open item: the sin call (ai-and-rules Still open 5)")
+        todo!("W2 fly-and-world §7.2; the hover uses sin, gaps §7.2")
     }
 
     /// Step 10: only while the fly is alive, the contact test (`FUN_0043b157`) and the push

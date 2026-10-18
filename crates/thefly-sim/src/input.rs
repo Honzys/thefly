@@ -38,7 +38,7 @@ pub mod keys {
     pub const FLY_ACTION: Scancode = Scancode::RETURN;
     pub const FLY_GOODIE: Scancode = Scancode::RSHIFT;
 
-    // Open item: ai-and-rules "Still open" 1, the T/G/F/H to direction order is unconfirmed.
+    // Farmer: T up, G down, F left, H right, Tab swing, Q goodie (gaps §1.1, §1.2, confirmed twice).
     pub const FARMER_UP: Scancode = Scancode::T;
     pub const FARMER_DOWN: Scancode = Scancode::G;
     pub const FARMER_LEFT: Scancode = Scancode::F;

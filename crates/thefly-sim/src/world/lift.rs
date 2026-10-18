@@ -21,8 +21,8 @@ pub const HOIST_VY: i32 = -300;
 pub const APPROACH_VY: i32 = 450;
 /// The idle bob's first period in ticks (reset, fly-and-world §5.6).
 pub const IDLE_PERIOD: i32 = 102;
-/// The hook offset `off`, the original's constructor argument. Open item: the value is not in
-/// the docs (plan, open items); 0 is a placeholder until W1 derives it from the hook test.
+/// The hook offset `off`, the original's constructor argument. Open item O8: the value is not in
+/// the docs (fly-and-world §5.6 only names the field); 0 is a placeholder.
 pub const HOOK_OFF: i32 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

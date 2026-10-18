@@ -22,7 +22,7 @@ pub const FADE_END_MS: u64 = 600;
 pub const LOGO_KEY_MS: u64 = 3000;
 pub const LOGO_AUTO_MS: u64 = 10_000;
 /// Loading: 9 progress steps of 200 ms busy-wait, then 500 ms (screens-and-rendering §4.1).
-/// Open item: the step count of 9 is inferred.
+/// Open item O16: the step count of 9 is inferred.
 pub const LOADING_STEPS: u32 = 9;
 pub const LOADING_STEP_MS: u64 = 200;
 pub const LOADING_TAIL_MS: u64 = 500;
@@ -149,7 +149,7 @@ pub enum GamePhase {
         step: u32,
         next: Timer,
     },
-    /// "3, 2, 1, Go!": 3 down to 0, one per 1000 ms; slot 52 at the start. Open item: whether
+    /// "3, 2, 1, Go!": 3 down to 0, one per 1000 ms; slot 52 at the start. Open item O16: whether
     /// the world ticks under the banner.
     Banner {
         count: i32,
@@ -170,7 +170,7 @@ impl Gameplay {
     pub fn enter(m: &mut MatchState, cx: &mut Ctx) -> MatchFlow {
         let _ = (m, cx);
         todo!(
-            "W3 game-spec §2.2 gameplay, ai-and-rules §9.1; open item: timers armed before the loading waits"
+            "W3 game-spec §2.2 gameplay, ai-and-rules §9.1; open item O16: timers armed before the loading waits"
         )
     }
 
@@ -193,7 +193,7 @@ impl Gameplay {
     }
 }
 
-/// Farewell (0x82). Open item: timing and choreography.
+/// Farewell (0x82). Open item O5: timing and choreography.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Farewell {
     pub until: Timer,
@@ -231,7 +231,7 @@ impl QuitDialog {
     /// Left/Right toggle, Enter answers. Some(true) is YES.
     pub fn tick(&mut self, keys: &KeyState, cx: &mut Ctx) -> Option<bool> {
         let _ = (keys, cx);
-        todo!("W3 screens-and-rendering §2.5; Esc behaviour is an open item")
+        todo!("W3 screens-and-rendering §2.5; Esc behaviour is open item O15")
     }
 }
 

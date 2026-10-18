@@ -271,7 +271,7 @@ impl MatchState {
     /// Delivery (ai-and-rules §7.5): `saved[type] += 1`, stats delivered and price total.
     pub fn record_delivery(&mut self, kind: usize) {
         let _ = kind;
-        todo!("W3 ai-and-rules §7.5; open item: the price statistic formula")
+        todo!("W3 ai-and-rules §7.5; price total += trunc(price), gaps §11.3")
     }
 }
 
