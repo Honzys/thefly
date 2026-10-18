@@ -28,9 +28,7 @@ pub struct FlyGame {
     prev: Option<State>,
     mixer: Mixer,
     fx: Fx,
-    loading2: bool,
     trophy_landed_ms: Option<u64>,
-    picks: u32,
     /// Where `scoot.btt` / `boite.btt` are written (the directory they were read from).
     save_dir: PathBuf,
     script: Script,
@@ -49,9 +47,7 @@ impl FlyGame {
             prev: None,
             mixer,
             fx: Fx::new(seed),
-            loading2: false,
             trophy_landed_ms: None,
-            picks: seed,
             save_dir,
             script,
             tick: 0,
@@ -88,7 +84,6 @@ impl FlyGame {
             Event::ScreenChanged => {
                 self.fx.clear();
                 self.trophy_landed_ms = None;
-                self.pick_loading();
             }
             Event::Sound {
                 slot: SoundSlot::BOOM,
@@ -125,13 +120,6 @@ impl FlyGame {
             self.fx.dust_burst(tx - 20.0, 310.0, 480, 100, 30, 200.0);
             self.trophy_landed_ms = Some(self.sim.clock().now_ms());
         }
-    }
-
-    /// SR §4.1: `LOADING` or `LOADING2` at random, from a frontend-only generator so the sim's
-    /// rand stream is untouched.
-    fn pick_loading(&mut self) {
-        self.picks = self.picks.wrapping_mul(214_013).wrapping_add(2_531_011);
-        self.loading2 = (self.picks >> 16) & 1 == 1;
     }
 
     fn shots_done(&self) -> bool {
@@ -172,7 +160,6 @@ impl thefly_platform::Game for FlyGame {
             l: Lerp { alpha },
             now: self.sim.clock().now_ms(),
             fx: &self.fx,
-            loading2: self.loading2,
             trophy_landed_ms: self.trophy_landed_ms,
         };
         let mut g = Gfx { r };

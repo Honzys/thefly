@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use thefly_sim::GameData;
 use thefly_sim::data::{OUTLINED_SPRITES, Outline, SIZED_SPRITES, Size};
 use thefly_sim::event::SOUND_FILES;
-use thefly_sim::highscores::{HighScoreTable, Row};
-use thefly_sim::saves::{Options, Persisted};
+use thefly_sim::saves::{self, Persisted};
 use thefly_sim::world::objects::{EXTREME_TYPES, NORMAL_TYPES};
 
 /// A logical sprite: its `.irc` file in `data/rsc/` and its frame cut (SR §1.2, row-major).
@@ -310,25 +309,15 @@ fn save_path(data: &Path, file: &str) -> Option<PathBuf> {
     release.is_file().then_some(release)
 }
 
-/// shortcut: decodes with `thefly_assets::btt` directly, skipping the checksum check, because
-/// `saves::decode_*` (W3) is still `todo!`; switch to them once W3 lands.
+/// The saves through the sim's decoders; a missing or corrupt file keeps the default.
 pub fn persisted(data: &Path) -> Persisted {
-    let mut p = Persisted::default();
     let read = |file| save_path(data, file).and_then(|path| std::fs::read(path).ok());
-    if let Some(s) = read("boite.btt").and_then(|b| thefly_assets::btt::parse_settings(&b).ok()) {
-        p.options = Options {
-            music: s.values[0] != 0,
-            tutorial: s.values[1] != 0,
-        };
+    let mut p = Persisted::default();
+    if let Some(o) = read("boite.btt").and_then(|b| saves::decode_options(&b).ok()) {
+        p.options = o;
     }
-    if let Some(s) = read("scoot.btt").and_then(|b| thefly_assets::btt::parse_scores(&b).ok()) {
-        let rows = s.entries.iter().map(|e| Row {
-            name: e.name.clone(),
-            score: e.score,
-        });
-        p.scores = HighScoreTable {
-            rows: rows.collect(),
-        };
+    if let Some(s) = read("scoot.btt").and_then(|b| saves::decode_scores(&b).ok()) {
+        p.scores = s;
     }
     p
 }
