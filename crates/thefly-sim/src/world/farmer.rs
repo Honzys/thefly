@@ -3,7 +3,6 @@
 
 use super::collision::Rect;
 use super::fly::KickDir;
-use super::goodies::USE_BLOCK;
 use super::{SCREEN_W, SwatHit, World};
 use crate::clock::{DT, Timer};
 use crate::ctx::Ctx;
@@ -549,8 +548,8 @@ impl World {
         edge
     }
 
-    /// Step 6: human move then hit test, or the AI (which moves and swings itself). A goodie
-    /// use attempt in step 4 left [`USE_BLOCK`] in the swing memory and cancels this tick's edge.
+    /// Step 6: human move then hit test, or the AI (which moves and swings itself). The human
+    /// swing edge comes from step 4, already cancelled by a goodie use attempt.
     pub fn farmer_step(
         &mut self,
         pad: &FarmerPad,
@@ -560,7 +559,7 @@ impl World {
     ) -> SwatHit {
         let fly_box = Rect::new(self.fly.x, self.fly.y, self.fly.size.w, self.fly.size.h);
         let (pad, swing) = match self.ai.is_some() {
-            false => (*pad, swing_edge && self.farmer_swing_memory != USE_BLOCK),
+            false => (*pad, swing_edge),
             true => {
                 self.spend_farmer_request(m, cx);
                 let view = self.ai_view(m);

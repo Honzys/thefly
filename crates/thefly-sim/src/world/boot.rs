@@ -4,7 +4,7 @@
 use std::cmp::Ordering;
 
 use super::collision::Rect;
-use super::{OBJECT_PARALLAX, SCREEN_H, W, World};
+use super::{OBJECT_PARALLAX, W, World};
 use crate::clock::Timer;
 use crate::ctx::Ctx;
 use crate::event::{Effect, Event, SoundOp, SoundSlot};
@@ -53,8 +53,6 @@ pub const RETIRE_VY: i32 = -80;
 pub const RETIRE_ACCEL: i32 = 80;
 /// Sound 6's volume is set to +8000 before the stomp plays it (out of range, FW §7.2 step 9).
 pub const BOOM_VOLUME: i32 = 8000;
-/// The push places the fly this far into the boot (FW §7.3).
-pub const PUSH_INSET_Y: i32 = 20;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Boot {
@@ -328,9 +326,7 @@ impl World {
 
     /// Step 10: only while the fly is alive, the contact test (`FUN_0043b157`) and the push
     /// (`FUN_0043734c`), which may splat the fly. On a tie side1 is horizontal, so the push
-    /// cannot splat, and the vertical placement follows.
-    // shortcut: Fly::push_by_boot takes one side, so the tie's vertical placement (FW §7.3
-    // table, then the 600 − h cap) is written here. Revisit by giving push_by_boot both sides.
+    /// cannot splat.
     pub fn boot_collision(&mut self, cx: &mut Ctx) {
         if !self.boot.active || !self.fly.alive() {
             return;
@@ -339,17 +335,8 @@ impl World {
             return;
         };
         let boot = self.boot.rect();
-        self.fly.push_by_boot(contact.side1, boot, cx);
-        let Some(side2) = contact.side2 else {
-            return;
-        };
-        let h = self.fly.size.h;
-        let y = if side2 == 2 {
-            boot.y + boot.h - PUSH_INSET_Y
-        } else {
-            boot.y - (h - PUSH_INSET_Y)
-        };
-        self.fly.y = y.min(SCREEN_H - h);
+        self.fly
+            .push_by_boot(contact.side1, contact.side2, boot, cx);
     }
 }
 

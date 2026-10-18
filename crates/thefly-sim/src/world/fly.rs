@@ -464,19 +464,27 @@ impl Fly {
         }
     }
 
-    /// `FUN_0043734c` mode 2: place the fly against the boot on `side1`, cap y at 600 − h, and
-    /// splat it when pushed down below y 249 (§7.3).
-    pub fn push_by_boot(&mut self, side1: u8, boot: Rect, cx: &mut Ctx) {
+    /// `FUN_0043734c` mode 2: place the fly against the boot on `side1`, then on the tie's
+    /// `side2`, cap y at 600 − h, and splat it when pushed down below y 249 on side1 2 (§7.3).
+    pub fn push_by_boot(&mut self, side1: u8, side2: Option<u8>, boot: Rect, cx: &mut Ctx) {
+        self.place_against(side1, boot);
+        if let Some(side2) = side2 {
+            self.place_against(side2, boot);
+        }
+        self.y = self.y.min(SCREEN_H - self.size.h);
+        if self.y > BOOT_SPLAT_Y && side1 == 2 {
+            self.splat(0, cx);
+        }
+    }
+
+    /// The §7.3 placement table: side 0 top, 1 left, 2 below, 3 right.
+    fn place_against(&mut self, side: u8, boot: Rect) {
         let (w, h) = (self.size.w, self.size.h);
-        match side1 {
+        match side {
             0 => self.y = boot.y - (h - 20),
             1 => self.x = boot.x - (w - 25),
             2 => self.y = boot.y + boot.h - 20,
             _ => self.x = boot.x + boot.w - 25,
-        }
-        self.y = self.y.min(SCREEN_H - h);
-        if self.y > BOOT_SPLAT_Y && side1 == 2 {
-            self.splat(0, cx);
         }
     }
 
@@ -1359,20 +1367,35 @@ mod tests {
         for (side, x, y) in cases {
             let mut fly = b.fly();
             (fly.x, fly.y) = (161, 253);
-            b.with(|cx| fly.push_by_boot(side, boot, cx));
+            b.with(|cx| fly.push_by_boot(side, None, boot, cx));
             assert_eq!((fly.x, fly.y), (x, y), "side {side}");
             assert!(!fly.splatted);
         }
         // Side 2: y = 200 + 575 − 20, capped at 600 − 94 = 506 > 249, so splat.
         let mut fly = b.fly();
-        b.with(|cx| fly.push_by_boot(2, boot, cx));
+        b.with(|cx| fly.push_by_boot(2, None, boot, cx));
         assert_eq!(fly.y, 506);
         assert!(fly.splatted);
         // Side 2 but high: y = 0 + 150 − 20 = 130, no splat.
         let mut high = b.fly();
-        b.with(|cx| high.push_by_boot(2, Rect::new(300, 0, 270, 150), cx));
+        b.with(|cx| high.push_by_boot(2, None, Rect::new(300, 0, 270, 150), cx));
         assert_eq!(high.y, 130);
         assert!(!high.splatted);
+    }
+
+    /// FW §7.3 on a tie: side1 (left) places x = 300 − 95, side2 (below) y = 200 + 575 − 20,
+    /// capped at 506; above 249 but side1 is not 2, so no splat.
+    #[test]
+    fn a_tie_places_both_sides_and_caps_y() {
+        let mut b = Bench::new(1);
+        let boot = Rect::new(300, 200, 270, 575);
+        let mut fly = b.fly();
+        b.with(|cx| fly.push_by_boot(1, Some(2), boot, cx));
+        assert_eq!((fly.x, fly.y), (300 - 95, 506));
+        assert!(!fly.splatted);
+        let mut top = b.fly();
+        b.with(|cx| top.push_by_boot(3, Some(0), boot, cx));
+        assert_eq!((top.x, top.y), (300 + 270 - 25, 200 - 74));
     }
 
     #[test]
