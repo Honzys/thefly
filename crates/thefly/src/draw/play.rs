@@ -169,19 +169,22 @@ fn tint(g: &mut Gfx, m: &MatchState) -> Result<(), Error> {
     g.shade(cell, alpha)
 }
 
+/// Midge sprite frames (27 × 27, six of them).
+const MIDGE_FRAMES: u32 = 6;
+
+/// Each midge's own period of R(5) + 30 ms per frame (answers.md "Midge wrap, bounds and frame
+/// period"), `Midge::size` in the sim; the slot index staggers the midges.
+fn midge_frame(now: u64, period_ms: i32, slot: usize) -> u32 {
+    let period = u64::try_from(period_ms).unwrap_or(0).max(1);
+    ((now / period + slot as u64) % u64::from(MIDGE_FRAMES)) as u32
+}
+
 fn midges(g: &mut Gfx, v: &View, cur: &[Midge], prev: Option<&[Midge]>) -> Result<(), Error> {
-    const FRAME_SIZE: f32 = 27.0;
     for (i, md) in cur.iter().enumerate().filter(|(_, md)| md.active) {
         let pm = prev.and_then(|p| p.get(i)).filter(|p| p.active);
         let x = v.l.i(pm.map(|p| p.x), md.x);
         let y = v.l.i(pm.map(|p| p.y), md.y);
-        let frame = (v.anim(50, 6) + i as u32) % 6;
-        let scale = if md.size > 0 {
-            md.size as f32 / FRAME_SIZE
-        } else {
-            1.0
-        };
-        g.spr_scaled("moucheron", x, y, frame, scale, 255.0)?;
+        g.spr("moucheron", x, y, midge_frame(v.now, md.size, i))?;
     }
     Ok(())
 }
@@ -588,6 +591,16 @@ mod tests {
         assert_eq!(ring_x(100.0, 0.0, 50.0), 100.0);
         assert_eq!(ring_x(4990.0, 0.0, 50.0), -10.0);
         assert_eq!(ring_x(10.0, 4990.0, 50.0), 20.0);
+    }
+
+    /// At 300 ms a 30 ms midge is on frame 10 % 6 = 4 and a 34 ms one on 8 % 6 = 2; slot 3 is
+    /// three frames ahead; a bad period does not divide by zero.
+    #[test]
+    fn midges_animate_at_their_own_frame_period() {
+        assert_eq!(midge_frame(300, 30, 0), 4);
+        assert_eq!(midge_frame(300, 34, 0), 2);
+        assert_eq!(midge_frame(300, 30, 3), 1);
+        assert_eq!(midge_frame(300, 0, 0), 300 % 6);
     }
 
     #[test]
