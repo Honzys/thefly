@@ -235,7 +235,10 @@ impl Audio {
             return Ok(None);
         };
         let spec = AudioSpec::new(Some(sound.rate), Some(2), Some(AudioFormat::F32LE));
-        let stream = dev.subsystem.new_playback_stream(&spec, None).map_err(sdl)?;
+        let stream = dev
+            .subsystem
+            .new_playback_stream(&spec, None)
+            .map_err(sdl)?;
         dev.device.bind_stream(&stream).map_err(sdl)?;
         stream.set_gain(params.volume).map_err(sdl)?;
         self.next_id += 1;
@@ -346,7 +349,10 @@ fn load_wav(path: &Path) -> Result<Sound, Error> {
         AudioSpecWAV::load_wav(path).map_err(|e| Error::Sdl(format!("{}: {e}", path.display())))?;
     let bytes = wav.buffer();
     let samples: Vec<f32> = match wav.format {
-        AudioFormat::U8 => bytes.iter().map(|&b| (f32::from(b) - 128.0) / 128.0).collect(),
+        AudioFormat::U8 => bytes
+            .iter()
+            .map(|&b| (f32::from(b) - 128.0) / 128.0)
+            .collect(),
         AudioFormat::S16LE => bytes
             .chunks_exact(2)
             .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
