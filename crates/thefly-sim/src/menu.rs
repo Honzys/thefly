@@ -116,8 +116,9 @@ const FLY_START_X: f64 = -120.0;
 const PIG_H: i32 = 300;
 const BOOT_H: i32 = 575;
 const BOOT_REST_Y: f64 = 350.0;
-/// Credits: five text pairs held 7000 ms each. shortcut: the slide choreography is cosmetic
-/// and reduced to the holds; revisit when W4 needs the scene motion.
+/// Credits: five text pairs held 7000 ms each, looping until Esc (`FUN_0041be05`).
+/// shortcut: the two scene sprites wander during the slide and draw rand through the shared
+/// Wander rule (answers.md "Credits: end and rand"); not modelled until the wander mover lands.
 pub const CREDIT_PAIRS: u8 = 5;
 pub const CREDIT_HOLD_MS: u64 = 7000;
 
@@ -480,9 +481,10 @@ impl Menu {
     fn credits_tick(&mut self, keys: &KeyState, cfg: &MatchConfig, cx: &mut Ctx) -> Flow {
         let c = &mut self.credits;
         if c.hold.expired_rearm(cx.now) {
-            c.pair += 1;
+            c.pair = (c.pair + 1) % CREDIT_PAIRS;
         }
-        if c.pair >= CREDIT_PAIRS || keys.pressed(Scancode::ESCAPE) {
+        // Page 9 reads only the Esc edge; the pairs loop until then.
+        if keys.pressed(Scancode::ESCAPE) {
             self.go(Page::Top, cfg, cx);
             self.boot.phase = SlidePhase::Parked;
         }
