@@ -265,7 +265,6 @@ mod tests {
     /// A 2P period at seed 1: placement and the fly's period-start respawn, with the fly clear
     /// of every object and appearing.
     #[test]
-    #[ignore = "needs W2 (Traps::from_layout)"]
     fn a_new_period_places_objects_and_respawns_the_fly_clear_of_them() {
         let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
         let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
@@ -281,7 +280,6 @@ mod tests {
 
     /// The tick itself needs W2's farmer and traps.
     #[test]
-    #[ignore = "needs W2"]
     fn a_built_world_ticks_with_no_input() {
         let (mut rng, data, mut events) = (MsvcRand::new(1), GameData::synthetic(), Vec::new());
         let mut cx = Ctx::new(0, &mut rng, &data, &mut events);
