@@ -279,7 +279,10 @@ impl Gameplay {
             cx.emit(Event::Music(Music::Stop));
             return MatchFlow::Next(after_period(m, cx));
         }
+        // answers.md "Quit dialog: the paused match keeps updating (round 5)": under the dialog
+        // the whole world update runs paused with the keys released, as under the banner.
         if self.world.paused {
+            self.world.tick(&KeyState::NONE, m, cx);
             return MatchFlow::Stay;
         }
         if keys.pressed(Scancode::ESCAPE) {
@@ -681,6 +684,34 @@ mod tests {
         }
         assert_eq!(g.phase, GamePhase::Playing);
         assert!(!g.world.paused && !g.world.fly.appearing);
+    }
+
+    /// answers.md "Quit dialog: the paused match keeps updating (round 5)": under the dialog the
+    /// world ticks as in the banner, paused and with the keys released, so rand keeps drawing
+    /// and the reset(0) sparkles fade.
+    #[test]
+    fn the_quit_dialog_keeps_the_world_ticking_paused() {
+        let mut rig = Rig::new(1);
+        let mut m = two_player(&mut rig);
+        let world = rig.cx(|cx| World::new(&mut m, cx));
+        let mut g = Gameplay::loading(world, false, rig.now());
+        to_banner(&mut rig, &mut g, &mut m);
+        for _ in 0..TICK_CAP {
+            if g.phase == GamePhase::Playing {
+                break;
+            }
+            rig.step(&[], |k, cx| g.tick(k, &mut m, cx));
+        }
+        g.world.fly.sparkle_alpha[0] = 255;
+        g.world.fly.sparkles_visible = true;
+        g.pause(rig.now());
+        let before = rig.rng.clone();
+        rig.step(&[Scancode::RIGHT, Scancode::UP], |k, cx| {
+            g.tick(k, &mut m, cx)
+        });
+        assert_ne!(rig.rng, before);
+        assert!(g.world.paused && g.world.fly.sparkle_alpha[0] < 255);
+        assert_eq!((g.world.fly.vx, g.world.fly.vy), (0, 0));
     }
 
     /// The pause gates the AI tick: one player's AI is unchanged across the banner.
