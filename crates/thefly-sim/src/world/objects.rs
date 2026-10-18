@@ -354,11 +354,14 @@ impl Objects {
             }
             self.list[i].bounce();
         }
+        // No support: no floor test and no fall [C] (answers.md "Sliding object without support").
         let Some((k, still)) = support else {
             return;
         };
         if !still {
-            self.detach(i);
+            // Only k's rider list; any other support keeps a stale entry [C] (round 5).
+            self.list[k].resting_on_top.retain(|&r| r != i);
+            self.list[i].supported_by.clear();
             let o = &mut self.list[i];
             o.state = ObjState::Falling;
             o.drop_vx = (f64::from(o.vx) / 50.0) as i32;
@@ -474,17 +477,18 @@ impl Objects {
         list[0]
     }
 
-    /// `FUN_0042fe10`'s support: the last active object `i` rests on, and whether it still
-    /// touches it 1 px lower.
+    /// `FUN_0042fe10`'s support (answers.md "Sliding object without support"): the walk runs in
+    /// descending index, so it is the lowest-index active support; still when any support
+    /// touches `i` 1 px lower.
     fn support(&self, i: usize, cx: &Ctx) -> Option<(usize, bool)> {
-        let o = &self.list[i];
-        let k = o
+        let mut supports = self.list[i]
             .supported_by
             .iter()
             .copied()
-            .filter(|&k| self.list[k].active)
-            .max()?;
-        Some((k, self.touches_at(i, k, (0, 1), cx)))
+            .filter(|&k| self.list[k].active);
+        let k = supports.clone().min()?;
+        let still = supports.any(|s| self.touches_at(i, s, (0, 1), cx));
+        Some((k, still))
     }
 
     /// `FUN_0042fb1c`: which of `i`'s probes against `k` still touch, with its layer x moved
@@ -534,11 +538,11 @@ impl Objects {
         (0..self.list.len()).find(|&k| keep(&self.list[k]) && self.touches_other(i, k, dx, cx))
     }
 
-    /// Another active object `k`, not in `i`'s own stack and not on the lift, touches `i` with
-    /// its screen x moved `dx`.
+    /// Another active object `k`, not one of `i`'s supports and not on the lift, touches `i`
+    /// with its screen x moved `dx`. Riders count (answers.md "Sliding object without support").
     fn touches_other(&self, i: usize, k: usize, dx: i32, cx: &Ctx) -> bool {
         let (o, b) = (&self.list[i], &self.list[k]);
-        let unrelated = k != i && !o.supported_by.contains(&k) && !o.resting_on_top.contains(&k);
+        let unrelated = k != i && !o.supported_by.contains(&k);
         if !unrelated || !b.active || b.on_lift {
             return false;
         }
@@ -1812,6 +1816,67 @@ mod tests {
             (260, 381, -245, ObjState::Sliding)
         );
         assert_eq!(o.supported_by, [1]);
+    }
+
+    /// answers.md "Sliding object without support" (round 5): the support is the lowest-index
+    /// one and "still" holds when any support overlaps 1 px lower. As in the bounce test chips1
+    /// rests one row into chips2 (index 2), but it also lists a far chips2 (index 0, at 3000)
+    /// as a support. Index 0 is picked, chips2 makes it still, and the right probe against the
+    /// far one touches nothing: no bounce, vx stays 295.
+    #[test]
+    fn a_sliding_object_probes_its_lowest_index_support_and_is_still_on_any() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = placed(b.object(3, 320), 381);
+        (o.state, o.vx) = (ObjState::Sliding, 300);
+        o.supported_by.extend([2, 0]);
+        let mut far = b.object(4, 3000);
+        far.resting_on_top.push(1);
+        let mut k = b.object(4, 300);
+        k.resting_on_top.push(1);
+        objs.list.extend([far, o, k]);
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        let o = &objs.list[1];
+        assert_eq!(
+            (o.layer_x, o.y, o.vx, o.state),
+            (260, 381, 295, ObjState::Sliding)
+        );
+    }
+
+    /// The slide-off (round 5) leaves only the picked support's rider list (index 0, the lowest)
+    /// and clears its own list; index 2 keeps a stale rider entry.
+    #[test]
+    fn a_slide_off_leaves_only_the_picked_supports_rider_list() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = placed(b.object(3, 1000), 380);
+        (o.state, o.vx) = (ObjState::Sliding, 300);
+        o.supported_by.extend([2, 0]);
+        let mut low = b.object(4, 300);
+        low.resting_on_top.push(1);
+        let mut high = b.object(4, 3000);
+        high.resting_on_top.push(1);
+        objs.list.extend([low, o, high]);
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        assert_eq!(objs.list[1].state, ObjState::Falling);
+        assert!(objs.list[1].supported_by.is_empty());
+        assert!(objs.list[0].resting_on_top.is_empty());
+        assert_eq!(objs.list[2].resting_on_top, [1]);
+    }
+
+    /// Riders are touches too (round 5): the hit of the previous-position test, with chips2
+    /// listed as chips1's rider, still resolves, pushes chips2 (103) and bounces (−245).
+    #[test]
+    fn a_rider_that_overlaps_counts_as_a_touch() {
+        let mut b = Bench::new(1);
+        let mut objs = Objects::empty();
+        let mut o = b.object(3, 300);
+        (o.state, o.vx) = (ObjState::Sliding, 300);
+        o.resting_on_top.push(1);
+        objs.list.extend([o, b.object(4, 452)]);
+        b.with(|cx| objs.step_objects(0.0, &Traps::default(), cx));
+        assert_eq!((objs.list[0].screen_x, objs.list[0].vx), (300, -245));
+        assert_eq!(objs.list[1].vx, 103);
     }
 
     /// Off its support (no overlap 1 px lower) a sliding object falls: drop vx trunc(295 / 50).
