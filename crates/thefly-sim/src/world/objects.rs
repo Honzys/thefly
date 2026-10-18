@@ -217,8 +217,9 @@ impl Objects {
     /// §5.2 step 4 (`FUN_0042a85a`): each fan stand is an extra, non-collectible object.
     ///
     /// shortcut: §5.2 names only the piedventi outline. The stand takes the fan's x as its layer
-    /// x, `_dt` for a right-facing fan, its size from the outline's extent, y = 580 − h, weight
-    /// and rank 0. Revisit when `FUN_0042a85a` is read.
+    /// x (`Fan::x` is documented as 1.25-layer x, unlike the lift, which reads the same 0.152
+    /// store as a screen-ring x), `_dt` for a right-facing fan, its size from the outline's
+    /// extent, y = 580 − h, weight and rank 0. Revisit when `FUN_0042a85a` is read.
     fn add_fan_stands(&mut self, traps: &Traps, cx: &mut Ctx) {
         for fan in &traps.fans {
             let sprite = if fan.facing_right {
@@ -228,8 +229,8 @@ impl Objects {
             };
             let size = outline_extent(cx.data.outline(sprite));
             let mut o = Object::blank(sprite, size);
-            o.layer_x = fan.x;
-            o.screen_x = (f64::from(fan.x) * OBJECT_PARALLAX) as i32;
+            o.layer_x = fan.x.rem_euclid(W);
+            o.screen_x = o.screen_from_layer();
             o.prev_x = o.layer_x;
             self.list.push(o);
         }
@@ -611,7 +612,8 @@ impl Objects {
     /// `FUN_0042f3b1` (§5.5 step 8), then fly vy += weight.
     ///
     /// shortcut: on a collision the object goes back to its previous position before the fly
-    /// is placed on it (§5.5 step 8.5 does not say). Revisit when `FUN_0042f3b1` is read.
+    /// is placed on it (§5.5 step 8.5 does not say). Revisit when `FUN_0042f3b1` is read. The
+    /// fan push between the carry and vy += weight is skipped with the object fan push (O9).
     fn carry(&mut self, fly: &mut Fly, cx: &mut Ctx) {
         let Some(i) = self.carried else {
             return;
@@ -668,6 +670,7 @@ impl Objects {
                 (o.vx, o.vy) = (0, 0);
             }
             LiftResult::Delivered(i) => {
+                self.lift_loaded = false;
                 cx.emit(Event::play(SoundSlot::MONEY));
                 let o = &mut self.list[i];
                 o.active = false;
@@ -830,6 +833,7 @@ fn outline_extent(o: &Outline) -> Size {
 
 /// §5.2 step 3 without the economy: up to [`MAX_PLACED`] objects, each a type draw then up to
 /// [`PLACEMENT_X_TRIES`] x draws in 0..5000, with landing sound 6 per placed object.
+/// `span_free` gets that screen-unit x (§5.2 step 3.3), not a layer x (open item O22).
 pub fn place_on_table(
     types: &[ObjectType],
     eligible: &[bool],
@@ -1210,7 +1214,8 @@ mod tests {
         assert!(b.events.contains(&Event::play(SoundSlot::MONEY)));
         assert_eq!(m.economy.saved[1], Some(1));
         assert_eq!((m.stats.delivered, m.stats.price_total), (1, price as i32));
-        assert!(!w.objects.list[0].active && w.objects.all_delivered && w.period_over);
+        assert!(!w.objects.list[0].active && !w.objects.lift_loaded);
+        assert!(w.objects.all_delivered && w.period_over);
     }
 
     #[test]

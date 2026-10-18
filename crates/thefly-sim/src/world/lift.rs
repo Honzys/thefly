@@ -132,6 +132,10 @@ impl Lift {
     }
 
     /// `FUN_00430fe7`.
+    ///
+    /// shortcut: the anchor is a screen-ring x; the layer x is trunc(x / 1.25) as for objects
+    /// (`Object::set_screen_x`), so the first follow can move x by 1 px (1618 → 1617). Revisit
+    /// when the sprite x setter is read.
     fn reset(&mut self, cx: &mut Ctx) {
         self.anchor = usize::try_from(cx.rng.r(3)).unwrap_or(0);
         self.x = self.anchors[self.anchor];
