@@ -49,6 +49,12 @@ pub const HOMING_ABOVE: i32 = 50;
 pub const HOMING_X_RAND: i32 = 200;
 pub const HOMING_Y_RAND: i32 = 60;
 pub const HOMING_Y_OFFSET: i32 = 180;
+/// answers.md "Midge homing: ring bands (round 4)": the ring is the midge's wrap (+0x2c); a band
+/// is half of it.
+/// shortcut: answers.md does not give the midge's +0x2c; the port takes [`W`], the 4000 px ring
+/// its midge and farmer x share. Revisit if a midge wrap value is documented.
+pub const HOMING_RING: i32 = W;
+pub const HOMING_BAND: i32 = HOMING_RING / 2;
 /// gaps §8.1 contact routine: a 700 ms stun; a zapped midge falls with y acceleration 30; the
 /// zapper test is at (x, y + 7); a respawn draws x = R(500) + 1000, y = R(H − h) + 20.
 pub const STUN_MS: u64 = 700;
@@ -96,10 +102,8 @@ pub struct Midge {
     pub size: i32,
     /// The velocity is `mover.v`.
     pub(crate) mover: Wander,
-    /// The spawn vx (v0); the homing speeds are 0 until the first R(100) > 50 re-roll.
+    /// The spawn vx (v0), the base of the homing speeds.
     pub v0: i32,
-    pub speed_x: i32,
-    pub speed_y: i32,
     /// Homing point on the farmer: offsets R(farmerW), R(farmerH − 60); tolerances R(30).
     pub home_dx: i32,
     pub home_dy: i32,
@@ -156,10 +160,7 @@ impl Default for Swarm {
 impl Midge {
     /// `FUN_00404caf`'s per-midge draws, in rand order (answers.md "Midge spawn draw order",
     /// amended by "Midges: spawn x, ..."). The x tolerance is the second R(30), the y
-    /// tolerance the first.
-    // shortcut: answers.md "Midges: spawn x, ..." sets accel flag x, so x never re-rolls under
-    // Wander; `mover::Wander` has no such flag, so x still re-rolls (three draws per expiry).
-    // Revisit when the mover gains per-axis accel flags.
+    /// tolerance the first. Accel flag x is set, so x never re-rolls under Wander.
     fn spawn(cx: &mut Ctx) -> Self {
         let x = cx.rng.r(W - SPAWN_X_MARGIN) + SPAWN_X_BASE;
         let vx = sign_roll(cx) * (cx.rng.r(SPAWN_VX_RAND) + SPAWN_VX_BASE);
@@ -175,7 +176,8 @@ impl Midge {
             (MOVER_SPEED, MOVER_SPEED),
             MOVER_RUNS,
             MOVER_ACCEL,
-        );
+        )
+        .with_accel_flags(true, false);
         mover.v[0] = vx;
         Self {
             active: true,
@@ -231,26 +233,48 @@ impl Midge {
         }
     }
 
-    /// `FUN_00442f95`, after the contact step (answers.md "Midges: spawn x, homing gates, ...").
-    /// A stunned or falling midge does nothing. Else maybe new speeds, then x steers toward
-    /// farmer x + home x and y toward farmer y + home y outside ±tol_y (inside, y wanders). The x
-    /// tolerance is not used.
-    // shortcut: answers.md gates the x steer by the "ring q as decoded in round 1", which no
-    // round defines beyond "q in [0, 4)"; the port always steers x. Revisit with FUN_00442f95.
+    /// `FUN_00442f95`, after the contact step (answers.md "Midge homing: ring bands (round 4)").
+    /// A stunned or falling midge does nothing. Else R(100) > 50 rolls this tick's speeds; x
+    /// steers by its ring band, y outside ±tol_y. v is written only on a rolled tick; the accel
+    /// flags, set on every tick, keep a steered axis from re-rolling under Wander.
     fn home(&mut self, farmer: &Farmer, cx: &mut Ctx) {
         if self.stunned || self.falling {
             return;
         }
-        if cx.rng.r(HOMING_ROLL) > HOMING_ABOVE {
-            self.speed_x = cx.rng.r(HOMING_X_RAND) + self.v0.abs();
-            self.speed_y = cx.rng.r(HOMING_Y_RAND) + (self.v0 - HOMING_Y_OFFSET).abs();
+        let rolled = cx.rng.r(HOMING_ROLL) > HOMING_ABOVE;
+        let (sx, sy) = if rolled {
+            let sx = cx.rng.r(HOMING_X_RAND) + self.v0.abs();
+            (
+                sx,
+                cx.rng.r(HOMING_Y_RAND) + (self.v0 - HOMING_Y_OFFSET).abs(),
+            )
+        } else {
+            (0, 0)
+        };
+        // q = (d + ring) / (ring / 2) with band edges 0..4; integer division gives the band.
+        let d = self.x - (farmer.x + self.home_dx);
+        let x_dir = match (d + HOMING_RING).div_euclid(HOMING_BAND) {
+            0 | 2 => Some(-1),
+            1 | 3 => Some(1),
+            _ => None,
+        };
+        let target_y = farmer.y + self.home_dy;
+        let y_dir = if self.y < target_y - self.tol_y {
+            Some(1)
+        } else if self.y > target_y + self.tol_y {
+            Some(-1)
+        } else {
+            None
+        };
+        if let Some(dir) = x_dir.filter(|_| sx != 0) {
+            self.mover.v[0] = dir * sx;
         }
-        let dx = farmer.x + self.home_dx - self.x;
-        self.mover.v[0] = dx.signum() * self.speed_x;
-        let dy = farmer.y + self.home_dy - self.y;
-        if dy.abs() > self.tol_y {
-            self.mover.v[1] = dy.signum() * self.speed_y;
+        if let Some(dir) = y_dir.filter(|_| sy != 0) {
+            self.mover.v[1] = dir * sy;
         }
+        self.mover = self
+            .mover
+            .with_accel_flags(x_dir.is_some(), y_dir.is_some());
     }
 
     /// `FUN_00442960` for a goodie midge: a stunned midge holds still, a zapped one drops, else
@@ -475,6 +499,7 @@ mod tests {
     use super::super::farmer::rig::Rig;
     use super::*;
     use crate::match_state::{MatchConfig, MatchState, Players};
+    use crate::rng::MsvcRand;
 
     fn world(rig: &mut Rig) -> World {
         let config = MatchConfig {
@@ -501,7 +526,13 @@ mod tests {
         assert!(s.on);
         assert_eq!((m.x, m.y, m.mover.v[0], m.size), (841, 569, 334, 30));
         assert_eq!((m.home_dx, m.home_dy, m.tol_x, m.tol_y), (29, 58, 18, 18));
-        assert_eq!((m.speed_x, m.speed_y), (0, 0));
+        // Accel flag x is set at the spawn, so a step re-rolls only y: R(150), R(10), R(200).
+        let (mut moved, before) = (m, rig.rng.clone());
+        moved.mover.step(&mut rig.cx(0));
+        assert_eq!(
+            (draws_between(&before, &rig.rng), moved.mover.v[0]),
+            (3, 334)
+        );
         assert!(!m.timer.expired(724) && m.timer.expired(725));
         assert_eq!((n.x, n.y, n.mover.v[0], n.size), (3315, 361, 281, 32));
         assert_eq!((n.home_dx, n.home_dy, n.tol_x, n.tol_y), (6, 107, 2, 25));
@@ -564,31 +595,90 @@ mod tests {
         assert_eq!(active(&w), 10);
     }
 
-    /// v0 200, seed 1: R(100) = 41 keeps the speeds (200, 20); then 18467 % 100 = 67 > 50 draws
-    /// sx = 6334 % 200 + 200 = 334 and sy = 26500 % 60 + |200 − 180| = 60. x always steers;
-    /// y steers only outside ±tol_y.
-    #[test]
-    fn homing_rerolls_speeds_over_50_and_steers_y_outside_the_tolerance() {
-        let mut rig = Rig::new(1);
-        let w = world(&mut rig);
-        let (fx, fy) = (w.farmer.x, w.farmer.y);
+    /// How many rand() calls `after` is past `before`.
+    fn draws_between(before: &MsvcRand, after: &MsvcRand) -> u32 {
+        let mut r = before.clone();
+        for n in 0..10_000 {
+            if r == *after {
+                return n;
+            }
+            r.rand();
+        }
+        panic!("rng not reached within 10000 draws");
+    }
+
+    /// A homing midge `d` px right of its target, with v0 200, tol_y 10 and v = (5, 7).
+    fn homer(w: &World, d: i32, dy: i32) -> Midge {
         let mut m = Midge {
             active: true,
-            x: fx + 100,
-            y: fy + 5,
+            x: w.farmer.x + d,
+            y: w.farmer.y + dy,
             v0: 200,
-            speed_x: 200,
-            speed_y: 20,
             tol_y: 10,
             ..Midge::default()
         };
-        m.mover.v = [0, 7];
+        m.mover.v = [5, 7];
+        m
+    }
+
+    /// answers.md "Midge homing: ring bands (round 4)", seed 1: R(100) = 41 rolls nothing, so v
+    /// is kept; then 18467 % 100 = 67 > 50 rolls sx = 6334 % 200 + 200 = 334 and sy = 26500 % 60
+    /// + |200 − 180| = 60. y steers only outside ±tol_y.
+    #[test]
+    fn homing_writes_v_only_on_ticks_that_roll_the_speeds() {
+        let mut rig = Rig::new(1);
+        let w = world(&mut rig);
+        let mut m = homer(&w, 100, 50);
         let mut rig = Rig::new(1);
         m.home(&w.farmer, &mut rig.cx(0));
-        assert_eq!(m.mover.v, [-200, 7]);
-        m.y = fy + 50;
+        assert_eq!(m.mover.v, [5, 7]);
         m.home(&w.farmer, &mut rig.cx(0));
         assert_eq!(m.mover.v, [-334, -60]);
+        let mut m = homer(&w, 100, 5);
+        let mut rig = Rig::new(1);
+        rig.rng.rand();
+        m.home(&w.farmer, &mut rig.cx(0));
+        assert_eq!(m.mover.v, [-334, 7], "inside the tolerance y wanders");
+    }
+
+    /// q = 2 + 2d / 4000 for d = midge x − target x: [0, 1) and [2, 3) steer left, [1, 2) and
+    /// [3, 4) right (the shortest way round the ring), and outside [0, 4) x is not steered.
+    /// Seed 1 after one skipped draw rolls sx = 334.
+    #[test]
+    fn homing_steers_x_the_short_way_round_the_ring() {
+        let mut rig = Rig::new(1);
+        let w = world(&mut rig);
+        let cases = [
+            (-3000, -334), // q 0.5
+            (-1000, 334),  // q 1.5
+            (0, -334),     // q 2
+            (1000, -334),  // q 2.5
+            (2500, 334),   // q 3.25
+            (-4500, 5),    // q −0.25
+            (4100, 5),     // q 4.05
+        ];
+        for (d, vx) in cases {
+            let mut m = homer(&w, d, 0);
+            let mut rig = Rig::new(1);
+            rig.rng.rand();
+            m.home(&w.farmer, &mut rig.cx(0));
+            assert_eq!(m.mover.v[0], vx, "d {d}");
+        }
+    }
+
+    /// The accel flags: in a band x is flagged and holds its v, so a step re-rolls only y (inside
+    /// the tolerance its flag is 0): 3 draws. Outside the bands both axes re-roll: 6.
+    #[test]
+    fn homing_sets_the_accel_flags_so_the_wander_rerolls_only_free_axes() {
+        let mut rig = Rig::new(1);
+        let w = world(&mut rig);
+        for (d, draws) in [(100, 3), (4100, 6)] {
+            let mut m = homer(&w, d, 0);
+            m.home(&w.farmer, &mut rig.cx(0));
+            let before = rig.rng.clone();
+            m.mover.step(&mut rig.cx(0));
+            assert_eq!(draws_between(&before, &rig.rng), draws, "d {d}");
+        }
     }
 
     /// A stunned or falling midge makes no homing draws and keeps its velocity.
