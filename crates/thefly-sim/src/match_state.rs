@@ -6,7 +6,7 @@ use crate::ctx::Ctx;
 use crate::economy::{Economy, Setup};
 use crate::stats::Stats;
 use crate::world::ai::AiLevel;
-use crate::world::lift::{ANCHOR_GAP, draw_anchors};
+use crate::world::lift::{ANCHOR_GAP, SHOP_SCALE, draw_anchors};
 use crate::world::traps::TrapKind;
 
 /// Period clock limit in minutes (data+0x26), and in tutorial mode.
@@ -176,14 +176,44 @@ impl TrapLayout {
         winch: &[i32; 3],
         tokens: &mut i32,
     ) -> Result<(), PlaceError> {
-        let _ = (kind, shop_x, winch, tokens);
-        todo!("W3 ai-and-rules §4.3")
+        let spec = kind.spec();
+        // FUN_00424db1: flypaper needs 1 token, a fan tokens/2 ≥ 1, a zapper tokens/4 ≥ 1.
+        if *tokens < spec.cost || self.count(kind) >= spec.cap {
+            return Err(PlaceError::Refused);
+        }
+        let w = spec.width;
+        let on_trap = self.slots.iter().any(|s| {
+            let sj = to_shop(s.x);
+            (sj - w..=sj + s.kind.spec().width).contains(&shop_x)
+        });
+        let on_winch = winch.iter().any(|&stored| {
+            let ws = to_shop(stored);
+            (ws - w..=ws + ANCHOR_GAP).contains(&shop_x)
+        });
+        if on_trap || on_winch {
+            return Err(PlaceError::Blocked);
+        }
+        self.slots.push(TrapSlot {
+            kind,
+            x: (f64::from(shop_x) / SHOP_SCALE) as i32,
+            y: spec.stored_y,
+        });
+        *tokens = (*tokens - spec.cost).max(0);
+        Ok(())
     }
 
     pub fn count(&self, kind: TrapKind) -> usize {
-        let _ = kind;
-        todo!("W3 ai-and-rules §4.3; the two fans share their cap")
+        let fan = |k: TrapKind| matches!(k, TrapKind::FanLeft | TrapKind::FanRight);
+        self.slots
+            .iter()
+            .filter(|s| s.kind == kind || (fan(kind) && fan(s.kind)))
+            .count()
     }
+}
+
+/// Stored units back to shop px: trunc(stored × 0.152) (ai-and-rules §4.3).
+pub fn to_shop(stored: i32) -> i32 {
+    (f64::from(stored) * SHOP_SCALE) as i32
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,18 +257,66 @@ impl MatchState {
 
     /// `FUN_0040b7b2`.
     pub fn advance(&mut self, cx: &mut Ctx) -> Advance {
-        let _ = cx;
-        todo!("W3 ai-and-rules §9.1")
+        if self.config.extreme() {
+            return self.advance_extreme(cx);
+        }
+        let p = &mut self.progress;
+        p.meal = Some(match p.meal {
+            None => {
+                p.day = 1;
+                Meal::Breakfast
+            }
+            Some(Meal::Breakfast) => Meal::Lunch,
+            Some(Meal::Lunch) => Meal::Dinner,
+            Some(Meal::Dinner) => {
+                p.day += 1;
+                Meal::Breakfast
+            }
+        });
+        p.outside = Some(p.outside.is_some_and(|o| !o));
+        if p.day > self.config.days {
+            return Advance::Over;
+        }
+        self.stats.periods += 1;
+        Advance::Next
+    }
+
+    /// Extreme: one period at a random meal and side, then over. The draws follow the order
+    /// AR §9.1 lists them (meal, side, winch). shortcut: the order inside `FUN_0040b7b2` is not
+    /// stated; revisit if the binary is re-read.
+    fn advance_extreme(&mut self, cx: &mut Ctx) -> Advance {
+        const MEALS: [Meal; 3] = [Meal::Breakfast, Meal::Lunch, Meal::Dinner];
+        if self.progress.meal.is_some() {
+            return Advance::Over;
+        }
+        let meal = MEALS[cx.rng.r(3) as usize];
+        let outside = cx.rng.odd();
+        self.progress = Progress {
+            meal: Some(meal),
+            day: 1,
+            outside: Some(outside),
+        };
+        self.winch = draw_anchors(ANCHOR_GAP, cx);
+        self.traps.slots.clear();
+        self.stats.periods += 1;
+        Advance::Next
     }
 
     /// `FUN_0040b922`: a bonus round follows this period.
     pub fn bonus_due(&self) -> bool {
-        todo!("W3 ai-and-rules §9.1")
+        self.config.extreme() || self.progress.meal == Some(Meal::Dinner)
     }
 
     /// `FUN_0040b94c`: the match ends after this period (and its bonus round, if due).
     pub fn over_after_period(&self) -> bool {
-        todo!("W3 ai-and-rules §9.1")
+        self.config.extreme()
+            || (self.progress.meal == Some(Meal::Dinner)
+                && self.config.days < self.progress.day + 1)
+    }
+
+    /// AR §3.1 step 2: the shop before the final dinner.
+    pub fn last_shop(&self) -> bool {
+        self.progress.meal == Some(Meal::Lunch) && self.config.days <= self.progress.day
     }
 
     /// Extreme mode always plays in the arena; otherwise the period's inside/outside flag, with
@@ -264,14 +342,31 @@ impl MatchState {
 
     /// `FUN_0040bc5e`: kills + 1, stats kills + 1, kill type by this life's hits (3/2/1).
     pub fn record_kill(&mut self, hits: i32) {
-        let _ = hits;
-        todo!("W3 ai-and-rules §7.6")
+        let e = &mut self.economy;
+        e.kills += 1;
+        self.stats.kills += 1;
+        // A kill with no hit (boot, zapper) is taken as the one-hit case [I]: §7.6 lists 1, 2–3
+        // and 4+ only.
+        let kind = match hits {
+            ..=1 => 3,
+            2..=3 => 2,
+            _ => 1,
+        };
+        // Index 0 of the original list is unused, so it holds KILL_LOG_CAP − 1 types.
+        if e.kill_log.len() < KILL_LOG_CAP - 1 {
+            e.kill_log.push(kind);
+        }
     }
 
-    /// Delivery (ai-and-rules §7.5): `saved[type] += 1`, stats delivered and price total.
+    /// Delivery (ai-and-rules §7.5): `saved[type] += 1`, stats delivered and price total. The
+    /// sound (slot 11) is the caller's.
     pub fn record_delivery(&mut self, kind: usize) {
-        let _ = kind;
-        todo!("W3 ai-and-rules §7.5; price total += trunc(price), gaps §11.3")
+        let e = &mut self.economy;
+        if let Some(Some(saved)) = e.saved.get_mut(kind) {
+            *saved += 1;
+        }
+        self.stats.delivered += 1;
+        self.stats.price_total += e.food_prices.get(kind).map_or(0, |&p| p as i32);
     }
 }
 
@@ -341,6 +436,169 @@ mod tests {
         assert_eq!(rng_off, probe);
         assert_eq!(on.music_game2, probe.odd());
         assert_eq!(rng_on, probe);
+    }
+
+    fn cx_run<T>(rng: &mut MsvcRand, f: impl FnOnce(&mut Ctx) -> T) -> T {
+        let (data, mut events) = (GameData::synthetic(), Vec::new());
+        f(&mut Ctx::new(0, rng, &data, &mut events))
+    }
+
+    /// AR §9.1: normal 2 days is B1, L1, D1, B2, L2, D2, then over; sides alternate.
+    #[test]
+    fn a_normal_match_advances_through_the_meals_and_days() {
+        let (mut m, mut rng) = build(MatchConfig::default(), false);
+        let before = rng.clone();
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            assert_eq!(cx_run(&mut rng, |cx| m.advance(cx)), Advance::Next);
+            let p = m.progress;
+            seen.push((p.meal.unwrap(), p.day, p.outside.unwrap()));
+        }
+        use Meal::*;
+        assert_eq!(
+            seen,
+            [
+                (Breakfast, 1, false),
+                (Lunch, 1, true),
+                (Dinner, 1, false),
+                (Breakfast, 2, true),
+                (Lunch, 2, false),
+                (Dinner, 2, true),
+            ]
+        );
+        assert_eq!(cx_run(&mut rng, |cx| m.advance(cx)), Advance::Over);
+        assert_eq!(m.stats.periods, 6, "the over call is not counted");
+        assert_eq!(rng, before, "a normal advance draws nothing");
+    }
+
+    /// AR §9.1 on a fresh seed 1: the meal, the side, then three winch draws.
+    #[test]
+    fn extreme_draws_one_period_and_rerolls_the_winch() {
+        let config = MatchConfig {
+            players: Players::Two,
+            mode: Mode::Special,
+            ..MatchConfig::default()
+        };
+        let (mut m, _) = build(config, false);
+        let mut rng = MsvcRand::new(1);
+        m.traps.slots.push(TrapSlot {
+            kind: TrapKind::Zapper,
+            x: 0,
+            y: 0,
+        });
+        assert_eq!(cx_run(&mut rng, |cx| m.advance(cx)), Advance::Next);
+        // Fresh seed 1: 41 % 3 = 2 → dinner; 18467 is odd → outside.
+        assert_eq!(m.progress.meal, Some(Meal::Dinner));
+        assert_eq!((m.progress.day, m.progress.outside), (1, Some(true)));
+        assert!(m.traps.slots.is_empty());
+        // The winch takes the next three draws: 6334 % 761, 26500 % 761, 19169 % 761.
+        let shop = [6334 % 761, 26500 % 761, 19169 % 761];
+        assert_eq!(shop, [246, 626, 144]);
+        assert_eq!(m.winch, shop.map(|v| (f64::from(v) / 0.152) as i32));
+        assert!(m.bonus_due() && m.over_after_period());
+        assert_eq!(cx_run(&mut rng, |cx| m.advance(cx)), Advance::Over);
+        assert_eq!(m.stats.periods, 1);
+    }
+
+    #[test]
+    fn the_bonus_follows_dinner_and_the_match_ends_after_the_last_dinner() {
+        let (mut m, mut rng) = build(MatchConfig::default(), false);
+        let mut flags = Vec::new();
+        for _ in 0..6 {
+            cx_run(&mut rng, |cx| m.advance(cx));
+            flags.push((m.bonus_due(), m.over_after_period(), m.last_shop()));
+        }
+        assert_eq!(
+            flags,
+            [
+                (false, false, false),
+                (false, false, false),
+                (true, false, false),
+                (false, false, false),
+                (false, false, true),
+                (true, true, false),
+            ]
+        );
+    }
+
+    /// AR §7.6.
+    #[test]
+    fn kills_count_and_log_their_type() {
+        let (mut m, _) = build(MatchConfig::default(), false);
+        for hits in [1, 2, 3, 4, 9] {
+            m.record_kill(hits);
+        }
+        assert_eq!((m.economy.kills, m.stats.kills), (5, 5));
+        assert_eq!(m.economy.kill_log, [3, 2, 2, 1, 1]);
+        for _ in 0..100 {
+            m.record_kill(1);
+        }
+        assert_eq!(m.economy.kills, 105);
+        assert_eq!(m.economy.kill_log.len(), KILL_LOG_CAP - 1);
+    }
+
+    /// AR §7.5, gaps §11.3.
+    #[test]
+    fn a_delivery_counts_saved_and_the_truncated_price() {
+        let (mut m, _) = build(MatchConfig::default(), false);
+        let mut present = vec![false; 22];
+        present[0] = true;
+        m.economy.start_period(&present);
+        m.economy.food_prices[0] = 49.8;
+        m.record_delivery(0);
+        m.record_delivery(0);
+        assert_eq!(m.economy.saved[0], Some(2));
+        assert_eq!((m.stats.delivered, m.stats.price_total), (2, 98));
+    }
+
+    /// AR §4.3: traps and winch block their spans, bounds inclusive; caps and tokens refuse.
+    #[test]
+    fn the_validator_rejects_spans_and_deducts_tokens() {
+        let mut layout = TrapLayout::default();
+        let winch = [(700.0 / 0.152) as i32; 3]; // shop x 699 or 700 after the round trip
+        let ws = to_shop(winch[0]);
+        let mut tokens = 14;
+        assert_eq!(
+            layout.place(TrapKind::Zapper, 100, &winch, &mut tokens),
+            Ok(())
+        );
+        assert_eq!(tokens, 10);
+        assert_eq!(layout.slots[0].x, (100.0 / 0.152) as i32);
+        let zs = to_shop(layout.slots[0].x);
+        // A flypaper (width 8) is blocked from zs − 8 to zs + 97.
+        let fp = TrapKind::Flypaper;
+        assert_eq!(
+            layout.place(fp, zs - 8, &winch, &mut tokens),
+            Err(PlaceError::Blocked)
+        );
+        assert_eq!(
+            layout.place(fp, zs + 97, &winch, &mut tokens),
+            Err(PlaceError::Blocked)
+        );
+        assert_eq!(
+            layout.place(fp, ws + 36, &winch, &mut tokens),
+            Err(PlaceError::Blocked)
+        );
+        assert_eq!(
+            layout.place(fp, ws - 8, &winch, &mut tokens),
+            Err(PlaceError::Blocked)
+        );
+        assert_eq!(layout.place(fp, zs + 98, &winch, &mut tokens), Ok(()));
+        assert_eq!(
+            layout.place(TrapKind::FanRight, 400, &winch, &mut tokens),
+            Ok(())
+        );
+        assert_eq!((layout.slots[2].y, tokens), (600, 7));
+        assert_eq!(
+            layout.count(TrapKind::FanLeft),
+            1,
+            "the fans share their count"
+        );
+        let mut one = 1;
+        assert_eq!(
+            layout.place(TrapKind::FanLeft, 500, &winch, &mut one),
+            Err(PlaceError::Refused)
+        );
     }
 
     #[test]

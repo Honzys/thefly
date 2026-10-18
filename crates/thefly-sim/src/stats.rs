@@ -39,12 +39,30 @@ pub struct StatsPage {
 impl Stats {
     /// Fly life ended: add to the total and the max.
     pub fn record_life(&mut self, ms: u64) {
-        let _ = ms;
-        todo!("W3 ai-and-rules §8.7")
+        self.survival_total_ms += ms;
+        self.survival_max_ms = self.survival_max_ms.max(ms);
     }
 
     pub fn page(&self) -> StatsPage {
-        todo!("W3 ai-and-rules §8.7 page values; the percentage constant at 0x45debc is 100")
+        let ratio = |num: f64, den: i32| if den == 0 { 0.0 } else { num / f64::from(den) };
+        let average_price = if self.delivered == 0 {
+            0
+        } else {
+            self.price_total / self.delivered
+        };
+        StatsPage {
+            delivered: self.delivered,
+            delivered_percent: ratio(f64::from(self.delivered), self.available) * 100.0,
+            max_survival_s: self.survival_max_ms as f64 / 1000.0,
+            avg_survival_s: self.survival_total_ms as f64 / 1000.0 / f64::from(self.kills + 1),
+            // Shown as a whole number (screens-and-rendering §5.2).
+            avg_price: f64::from(average_price),
+            swings: self.swings,
+            kills: self.kills,
+            kills_per_period: ratio(f64::from(self.kills), self.periods),
+            hit_ratio_percent: ratio(f64::from(self.hits), self.swings) * 100.0,
+            avg_damage: ratio(f64::from(self.damage), self.swings),
+        }
     }
 }
 
@@ -90,5 +108,44 @@ impl StatsScreen {
     ) -> MatchFlow {
         let _ = (keys, m, table, cx);
         todo!("W3 game-spec §2.2 statistics, ai-and-rules §8.5")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lives_add_to_the_total_and_the_max() {
+        let mut s = Stats::default();
+        s.record_life(4000);
+        s.record_life(1500);
+        assert_eq!((s.survival_total_ms, s.survival_max_ms), (5500, 4000));
+    }
+
+    /// AR §8.7 page values.
+    #[test]
+    fn the_page_divides_with_zero_for_an_empty_denominator() {
+        assert_eq!(Stats::default().page(), StatsPage::default());
+        let s = Stats {
+            periods: 4,
+            delivered: 6,
+            available: 24,
+            price_total: 200,
+            swings: 40,
+            hits: 10,
+            damage: 300,
+            kills: 3,
+            survival_total_ms: 60_000,
+            survival_max_ms: 30_500,
+        };
+        let p = s.page();
+        assert_eq!(p.delivered_percent, 25.0);
+        assert_eq!(p.max_survival_s, 30.5);
+        assert_eq!(p.avg_survival_s, 15.0); // 60 s / (3 + 1)
+        assert_eq!(p.avg_price, 33.0); // 200 / 6, whole
+        assert_eq!(p.kills_per_period, 0.75);
+        assert_eq!(p.hit_ratio_percent, 25.0);
+        assert_eq!(p.avg_damage, 7.5);
     }
 }
